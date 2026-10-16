@@ -1,0 +1,19 @@
+# Build configuration for the pegwallet verification stub.
+#
+# Two environment realities are encoded here because fedimint 0.12.0 pulls a native
+# crypto dependency (`aws-lc-sys`, via fedimint-core + fedimint-connectors) that needs
+# cmake + libclang(bindgen), neither of which is installed system-wide in this sandbox.
+#
+# 1. `bdk_wallet` 3.2.0 gates its `bdk-tx` (PSBT/fee) API behind `--cfg bdk_wallet_unstable`
+#    in addition to the `bdk-tx` feature; src/lib.rs emits `compile_error!` otherwise.
+[build]
+rustflags = ["--cfg", "bdk_wallet_unstable"]
+
+[env]
+# 2. libclang for aws-lc-sys's bindgen step. Obtained with:
+#      uv pip install --target /tmp/opencode/lc libclang
+#    (the nix-provided libclang is glibc-incompatible with the system loader).
+LIBCLANG_PATH = "/tmp/opencode/lc/clang/native"
+#    The PyPI libclang wheel ships no clang "builtin" headers, so point bindgen at the
+#    clang-18 resource headers + GCC's include dir for stddef.h/stdarg.h/stdint.h etc.
+BINDGEN_EXTRA_CLANG_ARGS = "-isystem /nix/store/28gw2lzdsncc5c3x58q9550cgsz6lipi-clang-18.1.8-lib/lib/clang/18/include -isystem /usr/lib/gcc/x86_64-redhat-linux/16/include"
