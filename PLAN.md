@@ -903,6 +903,14 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
   `await_final_send_operation_state(operation_id)`** — events are supplementary.
 - Balance stream: `client.subscribe_balance_changes(unit)` — **blocked by §8.2** (primary module for BTC unverified).
 
+### Adoption task (`sync::adoption_task`)
+
+Runs `deposit::adopt_orphan_claims` at boot (the first `tokio::time::interval` tick is immediate)
+and every `ADOPTION_INTERVAL` (60 s). The task takes a `tokio::sync::watch::Receiver<bool>`
+shutdown signal and exits when it observes `true` or the sender is dropped. `tokio::select!` races
+`ticker.tick()` against `shutdown.changed()`; both arms are cancel-safe, so the app — and tests —
+can stop the task cleanly without aborting a journal write mid-transaction.
+
 ### Crash-safe persistence (douglaz patterns, `journal.rs`)
 
 - App journal under `Database` prefix `[0x00]`; fedimint clients under `[0x01] ++ u32_le(db_prefix)` — **separate partitions**.
@@ -1089,9 +1097,12 @@ scaffold; docs.rs links are for the pinned versions.
    `ReceivePaymentEvent.operation_id`; figures from `ReceiveMeta { outpoint, value, fee }`. docs:
    <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/struct.WalletClientModule.html#method.await_receive>,
    <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/enum.WalletOperationMeta.html>.
-9. **Journal scaffold is in-memory** — all transitions, single-open invariants, conditional writes,
-   and `claim_bind`/`TakenBy` are real (`journal.rs:172-174`); the fedimint `Database` raw-row/dbtx
-   persistence layer is deferred. docs:
+9. **Journal is DB-backed, with an in-memory test backend** — `Journal` is a handle over
+   `Arc<dyn JournalBackend>` (`journal.rs:762`): `Journal::new(Database, Vec<u8>)` wires
+   `journal_db::DbJournal`, while `Journal::in_memory()` keeps the unit-test backend. Every
+   transition is a read-check-write inside one `DatabaseTransaction`, and the single-open /
+   unique-claim invariants are enforced in that transaction. `Database` is a concrete struct (not
+   a trait), so the constructor takes `Database`, not `Arc<dyn Database>` (COMPILE.md §18). docs:
    <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html>,
    <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.DatabaseTransaction.html>.
 10. **`WalletClientConfig`** — not constructed; `WalletClientInit::default()` is assumed
@@ -1107,6 +1118,8 @@ scaffold; docs.rs links are for the pinned versions.
     (`Copy + Ord + Serialize + Deserialize`), `FeeQuote` (`Clone + PartialEq + Eq + Debug`).
 13. **Build note** — `cargo check` was run with `cmake` on `PATH`; `LIBCLANG_PATH` and
     `BINDGEN_EXTRA_CLANG_ARGS` are in `.cargo/config.toml [env]`.
+14. **`tracing`** — already pinned in §2 (`=0.1.44`) and used by `sync::adoption_task` for transient
+    pass warnings; no dependency change was needed.
 
 ---
 

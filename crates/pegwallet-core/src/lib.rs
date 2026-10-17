@@ -10,15 +10,16 @@ pub mod client;
 pub mod deposit;
 pub mod error;
 pub mod journal;
+mod journal_db;
 pub mod ops;
 pub mod sync;
 pub mod wire;
 pub mod withdrawal;
 
-pub use error::{classify_error, Classify, ErrorClass, PegError};
+pub use error::{Classify, ErrorClass, PegError, classify_error};
 pub use journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositOrigin, DepositRow, DepositState, Journal,
-    WithdrawalRow, WithdrawalState,
+    JournalBackend, WithdrawalRow, WithdrawalState,
 };
 pub use ops::{DepositId, WithdrawalId};
 pub use wire::FeeQuoteWire;

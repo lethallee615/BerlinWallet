@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use fedimint_client::db::ChronologicalOperationLogKey;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
+use fedimint_core::db::Database;
 use fedimint_eventlog::EventLogId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -169,20 +172,119 @@ struct JournalInner {
     watermarks: BTreeMap<FederationId, ChronologicalOperationLogKey>,
 }
 
-/// In-memory scaffold of the journal. The state transitions and the
-/// `claim_bind` invariant are real; the production crate will back the same
-/// methods with fedimint `Database` raw rows and dbtx commits.
-#[derive(Clone, Debug, Default)]
-pub struct Journal {
+#[async_trait]
+pub trait JournalBackend: Send + Sync {
+    async fn open_deposit(
+        &self,
+        federation_id: &FederationId,
+    ) -> anyhow::Result<Option<DepositRow>>;
+    async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<()>;
+    async fn deposit(&self, id: &DepositId) -> anyhow::Result<Option<DepositRow>>;
+    async fn deposits_in(&self, states: &[DepositState]) -> anyhow::Result<Vec<DepositRow>>;
+    async fn deposit_funding_txid(&self, id: &DepositId) -> anyhow::Result<Option<bitcoin::Txid>>;
+    async fn set_deposit_quoted_fee(
+        &self,
+        id: &DepositId,
+        fee: bitcoin::Amount,
+    ) -> anyhow::Result<()>;
+    async fn set_deposit_funding_txid(
+        &self,
+        id: &DepositId,
+        txid: bitcoin::Txid,
+    ) -> anyhow::Result<()>;
+    async fn set_deposit_address_if(
+        &self,
+        id: &DepositId,
+        address: bitcoin::Address<bitcoin::address::NetworkUnchecked>,
+        expected: DepositState,
+    ) -> anyhow::Result<ApplyResult>;
+    async fn fail_deposit_if(
+        &self,
+        id: &DepositId,
+        expected: DepositState,
+        err: &str,
+    ) -> anyhow::Result<ApplyResult>;
+    async fn fail_deposit(&self, id: &DepositId, err: &str) -> anyhow::Result<()>;
+    async fn set_deposit_aborted(&self, id: &DepositId, next: EventLogId) -> anyhow::Result<()>;
+    async fn set_deposit_next_position(
+        &self,
+        id: &DepositId,
+        next: EventLogId,
+    ) -> anyhow::Result<()>;
+    async fn claim_bind(
+        &self,
+        federation_id: &FederationId,
+        outpoint: bitcoin::OutPoint,
+        id: &DepositId,
+    ) -> anyhow::Result<BindResult>;
+    async fn bound_outpoints(
+        &self,
+        federation_id: &FederationId,
+    ) -> anyhow::Result<BTreeSet<bitcoin::OutPoint>>;
+    async fn scan_watermark(
+        &self,
+        federation_id: &FederationId,
+    ) -> anyhow::Result<Option<ChronologicalOperationLogKey>>;
+    async fn set_scan_watermark(
+        &self,
+        federation_id: &FederationId,
+        key: ChronologicalOperationLogKey,
+    ) -> anyhow::Result<()>;
+    async fn finish_deposit(
+        &self,
+        id: &DepositId,
+        outpoint: bitcoin::OutPoint,
+        gross: bitcoin::Amount,
+        fee: bitcoin::Amount,
+    ) -> anyhow::Result<()>;
+    async fn close_deposit_done(&self, id: &DepositId) -> anyhow::Result<()>;
+    async fn claim_adopt_if_absent(
+        &self,
+        federation_id: &FederationId,
+        outpoint: bitcoin::OutPoint,
+        claim: AdoptedClaim,
+    ) -> anyhow::Result<BindResult>;
+    async fn close_deposit_done_if_open(
+        &self,
+        id: &DepositId,
+        gross: bitcoin::Amount,
+        fee: bitcoin::Amount,
+    ) -> anyhow::Result<()>;
+    async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult>;
+    async fn insert_withdrawal(&self, row: &WithdrawalRow) -> anyhow::Result<()>;
+    async fn withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<Option<WithdrawalRow>>;
+    async fn open_withdrawal(
+        &self,
+        federation_id: &FederationId,
+    ) -> anyhow::Result<Option<WithdrawalRow>>;
+    async fn set_withdrawal_operation_id(
+        &self,
+        id: &WithdrawalId,
+        operation_id: OperationId,
+    ) -> anyhow::Result<()>;
+    async fn set_withdrawal_quote(
+        &self,
+        id: &WithdrawalId,
+        quote: FeeQuoteWire,
+    ) -> anyhow::Result<()>;
+    async fn set_withdrawal_failed(&self, id: &WithdrawalId, err: &str) -> anyhow::Result<()>;
+    async fn set_broadcast(&self, id: &WithdrawalId, txid: bitcoin::Txid) -> anyhow::Result<()>;
+    async fn set_refunded(&self, id: &WithdrawalId) -> anyhow::Result<()>;
+    async fn set_failed(&self, id: &WithdrawalId) -> anyhow::Result<()>;
+    async fn cancel_withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<ApplyResult>;
+    async fn scan_for_send(&self, id: &WithdrawalId) -> anyhow::Result<Option<OperationId>>;
+}
+
+/// In-memory implementation of [`JournalBackend`], used by unit tests and
+/// [`Journal::in_memory`].
+#[derive(Debug, Default)]
+pub struct MemoryJournal {
     inner: Arc<Mutex<JournalInner>>,
 }
 
-impl Journal {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub async fn open_deposit(
+#[async_trait]
+impl JournalBackend for MemoryJournal {
+    async fn open_deposit(
         &self,
         federation_id: &FederationId,
     ) -> anyhow::Result<Option<DepositRow>> {
@@ -200,7 +302,7 @@ impl Journal {
             .cloned())
     }
 
-    pub async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<()> {
+    async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if inner.deposits.values().any(|existing| {
             existing.federation_id == row.federation_id
@@ -215,15 +317,12 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn deposit(&self, id: &DepositId) -> anyhow::Result<Option<DepositRow>> {
+    async fn deposit(&self, id: &DepositId) -> anyhow::Result<Option<DepositRow>> {
         let inner = self.inner.lock().await;
         Ok(inner.deposits.get(id).cloned())
     }
 
-    pub async fn deposits_in(
-        &self,
-        states: &[DepositState],
-    ) -> anyhow::Result<Vec<DepositRow>> {
+    async fn deposits_in(&self, states: &[DepositState]) -> anyhow::Result<Vec<DepositRow>> {
         let inner = self.inner.lock().await;
         Ok(inner
             .deposits
@@ -233,15 +332,12 @@ impl Journal {
             .collect())
     }
 
-    pub async fn deposit_funding_txid(
-        &self,
-        id: &DepositId,
-    ) -> anyhow::Result<Option<bitcoin::Txid>> {
+    async fn deposit_funding_txid(&self, id: &DepositId) -> anyhow::Result<Option<bitcoin::Txid>> {
         let inner = self.inner.lock().await;
         Ok(inner.deposits.get(id).and_then(|row| row.funding_txid))
     }
 
-    pub async fn set_deposit_quoted_fee(
+    async fn set_deposit_quoted_fee(
         &self,
         id: &DepositId,
         fee: bitcoin::Amount,
@@ -254,7 +350,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_deposit_funding_txid(
+    async fn set_deposit_funding_txid(
         &self,
         id: &DepositId,
         txid: bitcoin::Txid,
@@ -267,7 +363,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_deposit_address_if(
+    async fn set_deposit_address_if(
         &self,
         id: &DepositId,
         address: bitcoin::Address<bitcoin::address::NetworkUnchecked>,
@@ -288,7 +384,7 @@ impl Journal {
         Ok(ApplyResult::Applied)
     }
 
-    pub async fn fail_deposit_if(
+    async fn fail_deposit_if(
         &self,
         id: &DepositId,
         expected: DepositState,
@@ -307,7 +403,7 @@ impl Journal {
         Ok(ApplyResult::Applied)
     }
 
-    pub async fn fail_deposit(&self, id: &DepositId, err: &str) -> anyhow::Result<()> {
+    async fn fail_deposit(&self, id: &DepositId, err: &str) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.deposits.get_mut(id) {
             row.state = DepositState::Failed;
@@ -317,11 +413,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_deposit_aborted(
-        &self,
-        id: &DepositId,
-        next: EventLogId,
-    ) -> anyhow::Result<()> {
+    async fn set_deposit_aborted(&self, id: &DepositId, next: EventLogId) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.deposits.get_mut(id) {
             row.next_position = Some(next);
@@ -332,7 +424,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_deposit_next_position(
+    async fn set_deposit_next_position(
         &self,
         id: &DepositId,
         next: EventLogId,
@@ -347,7 +439,7 @@ impl Journal {
 
     /// The single claim-key writer. `Bound` means this row owns the credit;
     /// `TakenBy` means another row already does.
-    pub async fn claim_bind(
+    async fn claim_bind(
         &self,
         federation_id: &FederationId,
         outpoint: bitcoin::OutPoint,
@@ -369,7 +461,7 @@ impl Journal {
         Ok(BindResult::Bound)
     }
 
-    pub async fn bound_outpoints(
+    async fn bound_outpoints(
         &self,
         federation_id: &FederationId,
     ) -> anyhow::Result<BTreeSet<bitcoin::OutPoint>> {
@@ -382,7 +474,7 @@ impl Journal {
             .collect())
     }
 
-    pub async fn scan_watermark(
+    async fn scan_watermark(
         &self,
         federation_id: &FederationId,
     ) -> anyhow::Result<Option<ChronologicalOperationLogKey>> {
@@ -390,7 +482,7 @@ impl Journal {
         Ok(inner.watermarks.get(federation_id).copied())
     }
 
-    pub async fn set_scan_watermark(
+    async fn set_scan_watermark(
         &self,
         federation_id: &FederationId,
         key: ChronologicalOperationLogKey,
@@ -400,7 +492,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn finish_deposit(
+    async fn finish_deposit(
         &self,
         id: &DepositId,
         outpoint: bitcoin::OutPoint,
@@ -419,7 +511,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn close_deposit_done(&self, id: &DepositId) -> anyhow::Result<()> {
+    async fn close_deposit_done(&self, id: &DepositId) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.deposits.get_mut(id) {
             row.state = DepositState::Done;
@@ -430,7 +522,7 @@ impl Journal {
 
     /// Adoption inserts the `Adopted`/`Done` row and binds the claim in one
     /// critical section. If another row holds the claim, nothing is inserted.
-    pub async fn claim_adopt_if_absent(
+    async fn claim_adopt_if_absent(
         &self,
         federation_id: &FederationId,
         outpoint: bitcoin::OutPoint,
@@ -469,7 +561,7 @@ impl Journal {
         Ok(BindResult::Bound)
     }
 
-    pub async fn close_deposit_done_if_open(
+    async fn close_deposit_done_if_open(
         &self,
         id: &DepositId,
         gross: bitcoin::Amount,
@@ -495,7 +587,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult> {
+    async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult> {
         let mut inner = self.inner.lock().await;
         let Some(row) = inner.deposits.get_mut(id) else {
             return Ok(ApplyResult::Skipped);
@@ -512,7 +604,7 @@ impl Journal {
         Ok(ApplyResult::Applied)
     }
 
-    pub async fn insert_withdrawal(&self, row: &WithdrawalRow) -> anyhow::Result<()> {
+    async fn insert_withdrawal(&self, row: &WithdrawalRow) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if inner.withdrawals.values().any(|existing| {
             existing.federation_id == row.federation_id
@@ -527,15 +619,12 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn withdrawal(
-        &self,
-        id: &WithdrawalId,
-    ) -> anyhow::Result<Option<WithdrawalRow>> {
+    async fn withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<Option<WithdrawalRow>> {
         let inner = self.inner.lock().await;
         Ok(inner.withdrawals.get(id).cloned())
     }
 
-    pub async fn open_withdrawal(
+    async fn open_withdrawal(
         &self,
         federation_id: &FederationId,
     ) -> anyhow::Result<Option<WithdrawalRow>> {
@@ -553,7 +642,7 @@ impl Journal {
             .cloned())
     }
 
-    pub async fn set_withdrawal_operation_id(
+    async fn set_withdrawal_operation_id(
         &self,
         id: &WithdrawalId,
         operation_id: OperationId,
@@ -567,7 +656,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_withdrawal_quote(
+    async fn set_withdrawal_quote(
         &self,
         id: &WithdrawalId,
         quote: FeeQuoteWire,
@@ -580,11 +669,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_withdrawal_failed(
-        &self,
-        id: &WithdrawalId,
-        err: &str,
-    ) -> anyhow::Result<()> {
+    async fn set_withdrawal_failed(&self, id: &WithdrawalId, err: &str) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.withdrawals.get_mut(id) {
             row.state = WithdrawalState::Failed;
@@ -594,11 +679,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_broadcast(
-        &self,
-        id: &WithdrawalId,
-        txid: bitcoin::Txid,
-    ) -> anyhow::Result<()> {
+    async fn set_broadcast(&self, id: &WithdrawalId, txid: bitcoin::Txid) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.withdrawals.get_mut(id) {
             row.txid = Some(txid);
@@ -608,7 +689,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_refunded(&self, id: &WithdrawalId) -> anyhow::Result<()> {
+    async fn set_refunded(&self, id: &WithdrawalId) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.withdrawals.get_mut(id) {
             row.state = WithdrawalState::Refunded;
@@ -617,7 +698,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn set_failed(&self, id: &WithdrawalId) -> anyhow::Result<()> {
+    async fn set_failed(&self, id: &WithdrawalId) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.withdrawals.get_mut(id) {
             row.state = WithdrawalState::Failed;
@@ -626,7 +707,7 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn cancel_withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<ApplyResult> {
+    async fn cancel_withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<ApplyResult> {
         let mut inner = self.inner.lock().await;
         let Some(row) = inner.withdrawals.get_mut(id) else {
             return Ok(ApplyResult::Skipped);
@@ -639,23 +720,147 @@ impl Journal {
         Ok(ApplyResult::Applied)
     }
 
-    pub async fn scan_for_send(
-        &self,
-        id: &WithdrawalId,
-    ) -> anyhow::Result<Option<OperationId>> {
+    async fn scan_for_send(&self, id: &WithdrawalId) -> anyhow::Result<Option<OperationId>> {
         let inner = self.inner.lock().await;
         Ok(inner.withdrawals.get(id).and_then(|row| row.operation_id))
     }
 }
 
-fn net_credit(gross: bitcoin::Amount, fee: bitcoin::Amount) -> fedimint_core::Amount {
+pub(crate) fn net_credit(gross: bitcoin::Amount, fee: bitcoin::Amount) -> fedimint_core::Amount {
     let net = gross.checked_sub(fee).unwrap_or(bitcoin::Amount::ZERO);
     fedimint_core::Amount::from_sats(net.to_sat())
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+pub(crate) fn is_open_deposit(state: DepositState) -> bool {
+    matches!(
+        state,
+        DepositState::AwaitingAddress | DepositState::AddressShown
+    )
+}
+
+pub(crate) fn is_open_withdrawal(state: &WithdrawalState) -> bool {
+    matches!(state, WithdrawalState::Quoting | WithdrawalState::Submitted)
+}
+
+/// Public journal handle. [`Journal::new`] is DB-backed; [`Journal::in_memory`]
+/// is used by tests. The journal methods come from [`JournalBackend`] via
+/// `Deref`.
+#[derive(Clone)]
+pub struct Journal {
+    backend: Arc<dyn JournalBackend>,
+}
+
+impl Journal {
+    pub fn new(db: Database, client_prefix: Vec<u8>) -> Self {
+        Self {
+            backend: Arc::new(crate::journal_db::DbJournal::new(db, client_prefix)),
+        }
+    }
+
+    pub fn in_memory() -> Self {
+        Self {
+            backend: Arc::new(MemoryJournal::default()),
+        }
+    }
+}
+
+impl Deref for Journal {
+    type Target = dyn JournalBackend;
+
+    fn deref(&self) -> &Self::Target {
+        self.backend.as_ref()
+    }
+}
+
+impl std::fmt::Debug for Journal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Journal").finish_non_exhaustive()
+    }
+}
+
+impl Default for Journal {
+    fn default() -> Self {
+        Self::in_memory()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::hashes::Hash as _;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn in_memory_backend_enforces_open_and_claim_invariants() {
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+
+        let first = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(10_000),
+        );
+        journal.insert_deposit(&first).await.expect("insert first");
+
+        let second = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START.next(),
+            bitcoin::Amount::from_sat(20_000),
+        );
+        assert!(
+            journal.insert_deposit(&second).await.is_err(),
+            "a second open deposit must be rejected"
+        );
+
+        let open = journal
+            .open_deposit(&federation_id)
+            .await
+            .expect("read open")
+            .expect("open row");
+        assert_eq!(open.id, first.id);
+
+        let outpoint = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x11; 32]), 0);
+        assert_eq!(
+            journal
+                .claim_bind(&federation_id, outpoint, &first.id)
+                .await
+                .expect("bind"),
+            BindResult::Bound
+        );
+        assert_eq!(
+            journal
+                .claim_bind(&federation_id, outpoint, &first.id)
+                .await
+                .expect("rebind"),
+            BindResult::Bound
+        );
+        assert_eq!(
+            journal
+                .claim_bind(&federation_id, outpoint, &second.id)
+                .await
+                .expect("conflict"),
+            BindResult::TakenBy(first.id.clone())
+        );
+        assert!(
+            journal
+                .bound_outpoints(&federation_id)
+                .await
+                .expect("bound")
+                .contains(&outpoint)
+        );
+
+        assert_eq!(
+            journal.cancel_deposit(&first.id).await.expect("cancel"),
+            ApplyResult::Applied
+        );
+    }
 }

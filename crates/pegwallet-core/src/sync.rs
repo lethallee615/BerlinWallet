@@ -15,22 +15,30 @@ use crate::journal::Journal;
 pub const ADOPTION_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Boot + every [`ADOPTION_INTERVAL`] (`tokio::time::interval`'s first tick is
-/// immediate). This is what drains a deposit whose Success arm deferred because
-/// the claim was not yet visible: the next tick binds it and the row leaves
-/// `AddressShown`, releasing the single-flight slot.
+/// immediate). Exits cleanly when `shutdown` changes to `true` or its sender is
+/// dropped.
 pub async fn adoption_task(
     client: ClientHandleArc,
     journal: Journal,
     federation_id: FederationId,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut ticker = tokio::time::interval(ADOPTION_INTERVAL);
     loop {
-        ticker.tick().await;
-        let client_ref: &Client = &**client;
-        if let Err(err) =
-            deposit::adopt_orphan_claims(client_ref, &journal, federation_id).await
-        {
-            tracing::warn!(?err, "adoption pass failed; will retry next tick");
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = ticker.tick() => {
+                let client_ref: &Client = &**client;
+                if let Err(err) =
+                    deposit::adopt_orphan_claims(client_ref, &journal, federation_id).await
+                {
+                    tracing::warn!(?err, "adoption pass failed; will retry next tick");
+                }
+            }
         }
     }
 }
