@@ -6,6 +6,7 @@ use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_mint_client::MintClientInit;
+use fedimint_mintv2_client::MintClientInit as MintV2ClientInit;
 use fedimint_walletv2_client::WalletClientInit;
 use fedimint_walletv2_common::KIND as WALLET_V2_KIND;
 use fedimint_walletv2_common::config::WalletClientConfig;
@@ -19,6 +20,8 @@ pub async fn build_client(
 ) -> anyhow::Result<ClientHandleArc> {
     let mut builder = Client::builder().await?;
     builder.with_module(MintClientInit);
+    // The federation may expose mintv2 (the current primary module for BTC).
+    builder.with_module(MintV2ClientInit);
     // `WalletClientInit` is a unit struct (`#[derive(Default)]`). The real
     // `WalletClientConfig` is per-federation module config delivered through
     // `ClientModuleInitArgs::cfg()`, not a client-builder argument.
@@ -40,9 +43,10 @@ pub async fn build_client(
         // `ClientPreview::join` returns a `ClientHandle`, not a `Client`.
         preview.join(db, root_secret).await?
     };
-    let client = Arc::new(client);
-    client.start_executor();
-    Ok(client)
+    // `ClientBuilder::join`/`open` already call `start_executor` internally
+    // (`fedimint-client/src/client/builder.rs:545,583`); calling it again panics
+    // with "start_executor was called previously".
+    Ok(Arc::new(client))
 }
 
 /// Read the per-federation walletv2 client config from the joined client.

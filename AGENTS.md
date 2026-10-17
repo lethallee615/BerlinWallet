@@ -33,7 +33,8 @@ Versions below are verified against the crates.io sparse index + the committed `
 | Crate | Version | Role |
 |---|---|---|
 | `fedimint-client` | `=0.12.0` | federation client, `Client`, `ClientBuilder` |
-| `fedimint-mint-client` | `=0.12.0` | ecash mint module (`MintClientInit`) |
+| `fedimint-mint-client` | `=0.12.0` | ecash mint module (`MintClientInit`, v1 compatibility) |
+| `fedimint-mintv2-client` | `=0.12.0` | ecash mintv2 module (`MintClientInit`) — primary BTC module |
 | `fedimint-wallet-client` | `=0.12.0` | on-chain wallet module (`WalletClientInit`) |
 | `fedimint-client-module` | `=0.12.0` | `ClientModule` trait, `ClientModuleInit` |
 | `fedimint-connectors` | `=0.12.0` | `ConnectorRegistry` |

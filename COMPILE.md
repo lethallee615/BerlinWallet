@@ -755,7 +755,8 @@ pub fn start_executor(&self);
 
 ```rust
 let mut builder = Client::builder().await?;
-builder.with_module(MintClientInit);
+builder.with_module(MintClientInit);            // v1 compatibility
+builder.with_module(MintV2ClientInit);           // mintv2: primary BTC module
 builder.with_module(WalletClientInit::default());
 let client = if Client::get_config_from_db(&db).await.is_some() {
     builder.open(connectors, db, root_secret).await?
@@ -1188,3 +1189,117 @@ verify this sandbox is **sandbox-only and uncommitted**; CI must install a C++17
 Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html#method.with_decoders>,
 <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientBuilder.html#method.open>,
 <https://github.com/fedimint/fedimint/tree/v0.12.0>.
+
+
+---
+
+## 24. First live join: exact outcome
+
+Command/data:
+```text
+BERLIN_WALLET_DATA_DIR=/tmp/opencode/berlin-join
+berlin-wallet join fed11qgqycjnfwfhksw309umnqwpsxsurvve4vvcn2de3v43rgvfhxucnwdrp8qmnyvmyvvmnwvnrvsekgcnxxu6nwdf3v93kxwps8yenqdfnxgunwetyv3skzenp9amrzqqpyqzas0ps93dvl7wgu2xj9nh63vlw4t9lmh4qh5kkqtsewgccqyunv5dewzq
+berlin-wallet run <invite> https://mutinynet.com/api
+```
+
+### 24.1 First attempt: panic before federation I/O
+
+Exact stderr:
+
+```text
+thread 'main' panicked at fedimint-client/src/sm/executor.rs:394:13:
+start_executor was called previously
+```
+
+The call chain ended at our `berlin-wallet-core/src/client.rs:44` call to
+`ClientHandle::start_executor`. `ClientBuilder::join`/`open` already start the executor internally
+(`fedimint-client/src/client/builder.rs:582-583` and `:545`). Fix: removed the extra
+`client.start_executor()` from `build_client`.
+
+### 24.2 Second attempt: join succeeded
+
+Exact stdout:
+
+```text
+federation id: 05d83c302c5acff9c8e28d22cefa8b3eeaacbfddea0bd2d602e1972318013936
+chain-id network: signet
+config network: signet
+module 0: lnv2
+module 1: meta
+module 2: mintv2
+module 3: walletv2
+primary BTC module: Some(2)
+min withdrawal: 10000 sat
+```
+
+So the chain-id derivation points at Signet, the config agrees, and the federation's primary BTC
+module is **mintv2**, not v1 mint.
+
+### 24.3 Deposit attempt
+
+`berlin-wallet run <invite> https://mutinynet.com/api`, then:
+
+```text
+address
+deposit 50000
+```
+
+Exact stdout:
+```text
+bdk address: tb1qzdj0g2cdhj3zemu8sszfcd57tmanhv5wvjy6ak
+...
+deposit 01a14b81-efbf-7113-9673-efcd0d024fba state=AddressShown address=Some("tb1qen7rhvlway2w3q7w6ktykd5g3wz5780jkp5f67c4zkqfdw6wjj3snydtvm") (address write: Applied)
+```
+
+Exact stderr:
+```text
+error: Insufficient funds: 0 BTC available of 0.00050054 BTC needed
+```
+
+Failing source: `bdk_wallet-3.2.0/src/wallet/coin_selection.rs:138` (coin selection for the peg-in
+funding transaction). The deposit row remains `AddressShown` for later funding; no on-chain
+Mutinynet funds were available to this harness.
+
+### 24.4 Withdrawal attempt before mintv2 was registered
+
+Exact stderr:
+```text
+error: No module to balance a partial transaction (affected unit: AmountUnit(0)
+```
+
+Failing source: the fee-quote dry-run in `fedimint-client/src/client.rs:911` (the same bail exists
+in the finalize path at `:768`). The federation exposes `mintv2`, but the client only registered
+v1 `MintClientInit`, so there was no primary module for `AmountUnit::BITCOIN`. Fix: added
+`fedimint-mintv2-client` and registered `MintClientInit as MintV2ClientInit` alongside v1.
+
+### 24.5 Withdrawal attempt after mintv2 registration
+
+The previous failed attempt left a `Quoting` row; added a `cancel-withdraw <id>` CLI command and
+cancelled it. Retry:
+
+```text
+cancel-withdraw 01a14b83-8506-7656-89c4-ab3a447c447b
+withdraw tb1qcw496t7p4cyjg8a96h9wwff3nukn04au7dkqj3 10000
+```
+
+Exact stderr:
+```text
+error: Insufficient funds
+```
+
+Failing source: `fedimint-mintv2-client/src/lib.rs:503`
+(`.context("Insufficient funds")?` inside `create_final_inputs_and_outputs`). The client has zero
+ecash balance, so the fee quote cannot fund the withdrawal. The row remains `Quoting` (quote errors
+are left for retry); `cancel-withdraw` releases it. No Mutinynet ecash was available to fund the
+withdrawal.
+
+### 24.6 What was fixed by the live run
+
+- Removed the duplicate `start_executor()` call (`build_client`).
+- Added the `mintv2` client module (`fedimint-mintv2-client`); without it a federation with only
+  `mintv2` has no primary BTC module.
+- Added `cancel-withdraw` to recover a `Quoting` row left by a failed quote.
+- Added module/primary diagnostics to `join`.
+
+No funds were fabricated or papered over: the deposit and withdrawal both fail for the honest
+reason that the harness has no Mutinynet BTC/ecash.

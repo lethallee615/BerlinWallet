@@ -681,6 +681,7 @@ dependencies = [
  "fedimint-derive-secret",
  "fedimint-eventlog",
  "fedimint-mint-client",
+ "fedimint-mintv2-client",
  "fedimint-rocksdb",
  "fedimint-walletv2-client",
  "fedimint-walletv2-common",
@@ -2265,6 +2266,58 @@ dependencies = [
 
 [[package]]
 name = "fedimint-mint-common"
+version = "0.12.0"
+source = "git+https://github.com/fedimint/fedimint?tag=v0.12.0#2ead392ba22141bbe5898cdb724ec3dbc55387a9"
+dependencies = [
+ "anyhow",
+ "bitcoin_hashes 0.14.101",
+ "fedimint-core",
+ "fedimint-tbs",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "fedimint-mintv2-client"
+version = "0.12.0"
+source = "git+https://github.com/fedimint/fedimint?tag=v0.12.0#2ead392ba22141bbe5898cdb724ec3dbc55387a9"
+dependencies = [
+ "anyhow",
+ "aquamarine",
+ "async-channel",
+ "async-stream",
+ "async-trait",
+ "bitcoin_hashes 0.14.101",
+ "bls12_381",
+ "erased-serde",
+ "fedimint-api-client",
+ "fedimint-client",
+ "fedimint-client-module",
+ "fedimint-core",
+ "fedimint-derive-secret",
+ "fedimint-eventlog",
+ "fedimint-logging",
+ "fedimint-mintv2-common",
+ "fedimint-tbs",
+ "fedimint-threshold-crypto",
+ "futures",
+ "hex",
+ "itertools 0.14.0",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "serdect 0.2.0",
+ "strum 0.27.2",
+ "strum_macros 0.27.2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "fedimint-mintv2-common"
 version = "0.12.0"
 source = "git+https://github.com/fedimint/fedimint?tag=v0.12.0#2ead392ba22141bbe5898cdb724ec3dbc55387a9"
 dependencies = [
@@ -8809,16 +8862,6 @@ source = "git+https://github.com/fedimint/fedimint?tag=v0.12.0#2ead392ba22141bbe
 
 [[patch.unused]]
 name = "fedimint-mint-server"
-version = "0.12.0"
-source = "git+https://github.com/fedimint/fedimint?tag=v0.12.0#2ead392ba22141bbe5898cdb724ec3dbc55387a9"
-
-[[patch.unused]]
-name = "fedimint-mintv2-client"
-version = "0.12.0"
-source = "git+https://github.com/fedimint/fedimint?tag=v0.12.0#2ead392ba22141bbe5898cdb724ec3dbc55387a9"
-
-[[patch.unused]]
-name = "fedimint-mintv2-common"
 version = "0.12.0"
 source = "git+https://github.com/fedimint/fedimint?tag=v0.12.0#2ead392ba22141bbe5898cdb724ec3dbc55387a9"
 

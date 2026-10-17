@@ -50,7 +50,8 @@ berlin_wallet/                  # workspace root
 | Crate | Version | Role |
 |---|---|---|
 | `fedimint-client` | `=0.12.0` | federation client, `Client`, `ClientBuilder` |
-| `fedimint-mint-client` | `=0.12.0` | ecash mint module client (`MintClientInit`) |
+| `fedimint-mint-client` | `=0.12.0` | ecash mint module client (`MintClientInit`, v1 compatibility) |
+| `fedimint-mintv2-client` | `=0.12.0` | ecash mintv2 module client (`MintClientInit`) — primary BTC module |
 | `fedimint-walletv2-client` | `=0.12.0` | on-chain wallet module client (`WalletClientInit`, `WalletClientModule`) |
 | `fedimint-walletv2-common` | `=0.12.0` | `WalletClientConfig`, `OutputInfo`, `TxInfo`, endpoint constants |
 | `fedimint-client-module` | `=0.12.0` | `ClientModule` trait, `ClientModuleInit` |
@@ -125,7 +126,8 @@ pub async fn build_client(
     invite: InviteCode,
 ) -> anyhow::Result<ClientHandleArc> {
     let mut builder = Client::builder().await?;
-    builder.with_module(MintClientInit);
+    builder.with_module(MintClientInit);              // v1 compatibility
+    builder.with_module(MintV2ClientInit);             // mintv2 (primary BTC module)
     builder.with_module(WalletClientInit::default());
     let preview = builder.preview(connectors.clone(), &invite).await?;
     let client = Arc::new(preview.join(db, root_secret).await?); // -> ClientHandle
@@ -933,8 +935,8 @@ adopted elsewhere.
   for the same claim (same `(federation_id, funding_outpoint)`); repeat to exercise both
   interleavings; assert exactly one credit row, the open row closes `Done` (not stuck
   `AddressShown`), and the single-flight slot is released.
-- **Balance:** blocked by §8.2 (primary module for BTC) — do not assert balance movements until
-  that is resolved.
+- **Balance:** primary module for BTC is `mintv2` (§8.2, resolved); the balance API is not yet wired
+  into the UI/harness.
 
 ---
 
@@ -975,7 +977,7 @@ Two sync tasks plus the adoption task (and the fedimint client's internal execut
   federation's `FinalSendOperationState::Success(txid)` and persists it. No BDK script scan is
   needed for external destinations; only `BdkWallet::is_our_address` gates a local scan.
 - Stops on the shared `watch::Receiver<bool>` shutdown signal.
-- Balance stream: `client.subscribe_balance_changes(unit)` — **blocked by §8.2** (primary module for BTC unverified).
+- Balance stream: `client.subscribe_balance_changes(unit)` — primary module is `mintv2`; not yet wired.
 
 ### Adoption task (`sync::adoption_task`)
 
@@ -1006,7 +1008,7 @@ can stop the task cleanly without aborting a journal write mid-transaction.
 - `#[uniffi::export]` a `PegWallet` ABI object (must be `Send + Sync + 'static`; internally `Arc<PegWalletCore>`).
 - Methods:
   - `join_federation(invite_code: String) -> Result<String>`
-  - `balance_sat() -> u64` — **blocked by §8.2** (primary module for BTC unverified).
+  - `balance_sat() -> u64` — primary module resolved (`mintv2`); not yet exposed.
   - `request_deposit_address() -> Result<DepositView>` — **non-blocking**: inserts/returns the single open `deposit_requests` row in `AwaitingAddress` and returns immediately. A background task runs `receive()` (120 s bound + retry) and performs the `AddressShown` write.
   - `fund_deposit(id: String) -> Result<String>` — **idempotent**: if `funding_txid` is already set, returns it without building a second BDK transaction; otherwise builds/signs/broadcasts the peg-in transaction and returns its txid. A BDK balance below `amount` surfaces the `build_tx` error and leaves the row `AddressShown`.
   - `deposit_status(id: String) -> Result<DepositView>` — current state, address (null until `AddressShown`), quoted fee, gross, net credit, funding txid.
@@ -1107,7 +1109,7 @@ methods + polling, then add async streams once bindings are verified.
 Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 1. **Wallet-module flow** — **RESOLVED** (VERIFY.md §8): walletv2 uses `receive()` + `await_receive(position)` for deposits and `send()` + `await_final_send_operation_state(id)` for withdrawals. There is no `peg_in`/`allocate_deposit_address_pooled`/`withdraw` in the v2 module.
-2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — **BLOCKING for the balance implementation**: `get_balance_for_unit(AmountUnit::Bitcoin)` and `subscribe_balance_changes(unit)` need a primary module, and both modules claim `supports_being_primary`. Do not implement balance until this is resolved against the source/config.
+2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — **RESOLVED by the live join**: the federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`; `mintv2` is the primary BTC module (`primary_module_for_unit(BITCOIN) = Some(2)`). The client must register both v1 `MintClientInit` and `mintv2` `MintClientInit` (aliased `MintV2ClientInit`); without mintv2, sends fail with `No module to balance a partial transaction (affected unit: AmountUnit(0)`.
 3. **`ClientBuilder::open` vs `join` signatures** — **RESOLVED**: `join` is `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`; `ClientBuilder::open(self, connectors, db_no_decoders, pre_root_secret) -> Result<ClientHandle>` (`builder.rs:483`) opens an existing DB and verifies the stored secret hash. `Client::get_config_from_db(&db) -> Option<ClientConfig>` (`client.rs:459`) detects it; `build_client` uses `open` when present.
 4. **BDK persistence call shape** — **RESOLVED** (VERIFY.md §1): `PersistedWallet::create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` and `PersistedWallet::load(&mut P, LoadParams) -> Result<Option<Self>, LoadWithPersistError<P::Error>>`.
 5. **Chain source choice** — esplora/electrum/bitcoind-rpc; a product decision. `bdk_esplora::EsploraAsyncExt::sync`/`full_scan` is the verified esplora path.

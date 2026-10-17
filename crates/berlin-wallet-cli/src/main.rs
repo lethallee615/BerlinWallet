@@ -18,6 +18,7 @@ use fedimint_client::RootSecret;
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
+use fedimint_core::module::AmountUnit;
 use fedimint_walletv2_client::WalletClientModule;
 use tokio::sync::{Mutex, watch};
 
@@ -105,6 +106,7 @@ fn print_help() {
     println!("  watch <deposit-id>                  await the deposit's claim");
     println!("  request-withdraw <address> <sat>    create a withdrawal row");
     println!("  send-withdraw <withdrawal-id>       quote + send an existing row");
+    println!("  cancel-withdraw <withdrawal-id>     cancel a Quoting row");
     println!("  withdraw <address> <sat>            request + send in one step");
     println!("  status <id>                         print a deposit or withdrawal row");
     println!("  sync                                run one BDK Esplora sync");
@@ -125,6 +127,15 @@ async fn join(invite: &str, root_secret: RootSecret, data_dir: &Path) -> anyhow:
     println!("federation id: {}", client.federation_id());
     println!("chain-id network: {chain_network}");
     println!("config network: {}", module.get_network());
+    for (id, config) in &client.config().await.modules {
+        println!("module {id}: {}", config.kind);
+    }
+    println!(
+        "primary BTC module: {:?}",
+        client
+            .primary_module_for_unit(AmountUnit::BITCOIN)
+            .map(|(id, _)| id)
+    );
     println!("min withdrawal: {} sat", min_withdrawal_sat(&client).await?);
     Ok(())
 }
@@ -245,6 +256,16 @@ async fn run(
                     .next()
                     .ok_or_else(|| anyhow!("usage: send-withdraw <withdrawal-id>"))?;
                 command_send_withdraw(&client, &journal, &WithdrawalId(id.to_owned())).await
+            }
+            "cancel-withdraw" => {
+                let id = parts
+                    .next()
+                    .ok_or_else(|| anyhow!("usage: cancel-withdraw <withdrawal-id>"))?;
+                let result = journal
+                    .cancel_withdrawal(&WithdrawalId(id.to_owned()))
+                    .await?;
+                println!("cancel result: {result:?}");
+                Ok(())
             }
             "withdraw" => {
                 let address = parts
