@@ -1,13 +1,15 @@
 use std::time::Duration;
 
 use bdk_wallet::Wallet;
+use fedimint_client::Client;
 use fedimint_client::module::transaction::FeeQuote;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
 use fedimint_walletv2_client::{FinalSendOperationState, WalletClientModule};
 
 use crate::bdk;
-use crate::error::{classify_error, ErrorClass, PegError};
+use crate::client::wallet_client_config;
+use crate::error::{ErrorClass, PegError, classify_error};
 use crate::journal::{Journal, WithdrawalRow};
 use crate::ops::WithdrawalId;
 
@@ -36,19 +38,43 @@ pub async fn request_withdrawal(
     Ok(row)
 }
 
+/// Reject a withdrawal that the federation would reject as dust before any
+/// fee quote is requested. `WalletClientModule::send` performs the same check
+/// against its decoded `WalletClientConfig`, but only after the quote path.
+pub fn validate_withdrawal_value(
+    value: bitcoin::Amount,
+    dust_limit: bitcoin::Amount,
+) -> anyhow::Result<()> {
+    if value < dust_limit {
+        return Err(PegError::WithdrawalBelowDust { value, dust_limit }.into());
+    }
+    Ok(())
+}
+
 /// Quote, re-quote and drift-check, submit once, then await the final state.
 /// Both `SendError` and the final-await error are classified before any row
 /// is left behind.
 pub async fn send_withdrawal(
+    client: &Client,
     journal: &Journal,
-    module: &WalletClientModule,
     id: &WithdrawalId,
 ) -> anyhow::Result<()> {
+    let module = client.get_first_module::<WalletClientModule>()?;
     let row = journal
         .withdrawal(id)
         .await?
         .ok_or_else(|| PegError::WithdrawalNotFound(id.0.clone()))?;
     let value = row.value;
+
+    // Fail before the quote/send path: a dust value is permanent, so release
+    // the single-flight slot and surface a typed error.
+    let dust_limit = wallet_client_config(client).await?.dust_limit;
+    if let Err(err) = validate_withdrawal_value(value, dust_limit) {
+        if let Err(journal_err) = journal.set_withdrawal_failed(id, &err.to_string()).await {
+            tracing::warn!(?journal_err, "failed to persist dust rejection");
+        }
+        return Err(err);
+    }
 
     let chain_fee = module.send_fee().await?;
     let quote: FeeQuote = module.send_fee_quote(value).await?;
@@ -137,4 +163,61 @@ pub async fn reconcile_before_resend(
     }
 
     Err(PegError::InconclusiveScan.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dust_value_is_rejected_before_send() {
+        let dust_limit = bitcoin::Amount::from_sat(10_000);
+        let value = bitcoin::Amount::from_sat(9_999);
+
+        let err = validate_withdrawal_value(value, dust_limit).expect_err("below dust");
+        let typed = err
+            .downcast_ref::<PegError>()
+            .expect("must be a typed PegError");
+        assert!(matches!(
+            typed,
+            PegError::WithdrawalBelowDust {
+                value: rejected,
+                dust_limit: limit
+            } if *rejected == value && *limit == dust_limit
+        ));
+
+        assert!(validate_withdrawal_value(dust_limit, dust_limit).is_ok());
+    }
+
+    #[test]
+    fn wallet_config_defaults_match_source() {
+        use std::collections::BTreeMap;
+
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        use fedimint_core::PeerId;
+        use fedimint_walletv2_common::config::{FeeConsensus, WalletConfigConsensus};
+
+        let secp = Secp256k1::new();
+        let mut bitcoin_pks = BTreeMap::new();
+        for peer in 0..4u16 {
+            let mut secret = [0u8; 32];
+            secret[0] = peer as u8 + 1;
+            let secret_key = SecretKey::from_slice(&secret).expect("valid secret key");
+            bitcoin_pks.insert(
+                PeerId::from(peer),
+                PublicKey::from_secret_key(&secp, &secret_key),
+            );
+        }
+
+        let fee_consensus = FeeConsensus::new(10_000).expect("1% is the maximum");
+        let config =
+            WalletConfigConsensus::new(bitcoin_pks, fee_consensus, bitcoin::Network::Bitcoin);
+
+        assert_eq!(config.dust_limit, bitcoin::Amount::from_sat(10_000));
+        assert_eq!(config.fee_consensus.base, fedimint_core::Amount::from_sats(100));
+        assert_eq!(config.fee_consensus.parts_per_million, 10_000);
+        assert_eq!(config.send_tx_vbytes, 228);
+        assert_eq!(config.receive_tx_vbytes, 316);
+        assert_eq!(config.feerate_base, 250);
+    }
 }

@@ -471,6 +471,10 @@ Steps:
 
 1. `let address = bdk_wallet.reveal_next_address(KeychainKind::External).address;`
    Persist `{ id, federation_id, address, value, state = Quoting }`.
+   **Before any quote**, read `client::wallet_client_config(client).await?.dust_limit` and reject
+   `value < dust_limit` with `PegError::WithdrawalBelowDust`, persisting the row as `Failed`
+   (which clears the open index). This mirrors `WalletClientModule::send`'s `DustValue` check but
+   fails before `send_fee()`/`send_fee_quote()`.
 2. Quote: `let chain_fee = module.send_fee().await?;` and
    `let quote = module.send_fee_quote(value).await?;` (`value: bitcoin::Amount`).
    Show `value`, `chain_fee`, the `FeeQuote`, and the **net/total debit**. For a sweep use
@@ -508,6 +512,13 @@ journal.insert_withdrawal(WithdrawalRow {
     id, federation_id, address: bdk_address.to_string(), value,
     state: WithdrawalState::Quoting, ..Default::default()
 }).await?;
+
+// 1b. pre-send dust check: fail before any quote/send
+let dust_limit = wallet_client_config(client).await?.dust_limit;
+if value < dust_limit {
+    journal.set_withdrawal_failed(id, "below dust limit").await?;
+    return Err(PegError::WithdrawalBelowDust { value, dust_limit }.into());
+}
 
 // 2. quote
 let chain_fee = module.send_fee().await?;                 // bitcoin::Amount
@@ -569,11 +580,15 @@ Related walletv2 methods (VERIFY.md §8.2): `receive_fee() -> Result<bitcoin::Am
 `pending_tx_chain() -> FederationResult<Vec<TxInfo>>`.
 
 **Dust and fee limits come from `WalletClientConfig`.** `dust_limit` drives `SendError::DustValue`
-and `max_sendable_amount(...)`, so a wrong value makes small withdrawals fail. The config is decoded
-from the federation config (`client.config().get_module_cfg(id).cast::<WalletClientConfig>()`,
-VERIFY §8.5); `WalletClientInit::default()` is assumed and `WalletClientConfig`
-construction/defaults are **UNVERIFIED** (§8.10). Validate `value >= dust_limit` against the decoded
-config before `send()`.
+and `max_sendable_amount(...)`, so a wrong value makes small withdrawals fail. The config is
+per-federation module config: `WalletClientInit` is a unit struct, and
+`ClientModuleInitArgs::cfg()` supplies `WalletClientConfig` to `WalletClientModule`. After join,
+read it with `Client::config().await` +
+`ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`. Defaults are set by
+`WalletConfigConsensus::new`: `dust_limit = 10_000 sats`; `fee_consensus` is a 100-sat base plus a
+federation-chosen `parts_per_million` (0..=10,000 = up to 1%); `send_tx_vbytes` /
+`receive_tx_vbytes` are derived from the guardian count (4 guardians: 228/316). Validate
+`value >= dust_limit` against the decoded config before `send()`.
 
 ### 4.3 State enums
 
@@ -1055,7 +1070,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 7. **Depending on douglaz's `wallet_core`/`wallet-fedimint`** — AGPL-3.0, not on crates.io (git dep at a pinned commit). Either re-implement a small journal inline or take the git dep with the license consequence.
 8. **`tx_builder` construction for fedimint transactions** — **RESOLVED** for walletv2: `send()` is the high-level wrapper that builds/submits internally and returns an `OperationId`; no manual `TransactionBuilder` is needed for peg-out.
 9. **Recovery path (§5)** — `ClientPreview::recover` + `Client::wait_for_all_recoveries()` is on the boot critical path but **unverified**: VERIFY.md did not exercise a restore/recovery. The step that shuts down the recovery client and reopens the partition before reading balance is unconfirmed; treat it as blocking a production boot/restore implementation.
-10. **`WalletClientConfig` construction/defaults** — **UNVERIFIED**: `WalletClientInit::default()` is assumed. `WalletClientConfig` carries `dust_limit` and `fee_consensus`; `dust_limit` drives `SendError::DustValue` and `max_sendable_amount(...)`, so a wrong default makes small withdrawals fail. Verify the decoded config path (`client.config().get_module_cfg(id).cast::<WalletClientConfig>()`) and how the module is constructed before implementing peg-out dust checks.
+10. **`WalletClientConfig` construction/defaults** — **RESOLVED** (COMPILE.md §19). `WalletClientInit` is a unit struct with `Default`; the config is per-federation module config delivered via `ClientModuleInitArgs::cfg()`. After join, read it with `Client::config().await` + `ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`. Defaults live in `WalletConfigConsensus::new`: `dust_limit = 10_000 sats`, `fee_consensus.base = 100 sats` plus a federation-chosen `parts_per_million` (capped at 10_000 = 1%), and `send_tx_vbytes`/`receive_tx_vbytes` derived from the guardian count (4 guardians: 228/316). `send_withdrawal` rejects `value < dust_limit` before quoting.
 11. **`ReceiveMeta` full field set** — **UNVERIFIED** beyond `outpoint` and `fee` (VERIFY §8.3/§8.5 exercise those two): the adopted-row path also reads `address`, `value`, and `change_outpoint_range`. Confirm the exact `ReceiveMeta` fields on the pinned 0.12.0 before relying on them; orphan adoption depends on `outpoint` (dedup key), `value` (gross), `fee` (claim fee), and `address` (display).
 12. **Deposit detection without a local bitcoind RPC** — **UNVERIFIED**: `WalletClientInit::default()` is assumed to carry no `DynBitcoindRpc`. The `receive`/`await_receive` path is expected to read **federation-reported chain state** (the federation's wallet module watches the chain), not a local RPC; confirm this before assuming deposits are detected without `ClientBuilder::with_bitcoind_rpc`.
 13. **`await_receive` has no operation id/meta** — **RESOLVED in design**: the Success arm reuses `scan_receive_claims(client)` (the same scan as adoption), takes the unbound claim, and reads `ReceivePaymentEvent.operation_id` + `ReceiveMeta { outpoint, value, fee }`; `claim_figures` is gone (§4.1 step 7).
@@ -1122,8 +1137,11 @@ scaffold; docs.rs links are for the pinned versions.
    a trait), so the constructor takes `Database`, not `Arc<dyn Database>` (COMPILE.md §18). docs:
    <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html>,
    <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.DatabaseTransaction.html>.
-10. **`WalletClientConfig`** — not constructed; `WalletClientInit::default()` is assumed
-    (`client.rs:19`); dust/fee limits remain unverified (§8.10). docs:
+10. **`WalletClientConfig`** — resolved (§8.10, COMPILE.md §19). `WalletClientInit` is a unit
+    struct with `Default`; the per-federation config arrives via
+    `ClientModuleInitArgs::cfg()` and is read with
+    `Client::config().await` + `ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`.
+    `send_withdrawal` rejects values below `dust_limit` before quoting. docs:
     <https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/config/struct.WalletClientConfig.html>.
 11. **`receive()` returns `Address`, not `Result`** — no error to classify; the address task's only
     terminal path is retry-budget exhaustion (`deposit.rs:56-77`); see §4.3. docs:

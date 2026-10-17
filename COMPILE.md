@@ -152,12 +152,14 @@ dbtx signatures, and per-transaction invariants are in §18.
 Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html>,
 <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.DatabaseTransaction.html>.
 
-## 10. `WalletClientConfig` not constructed
+## 10. `WalletClientConfig` — resolved (§19)
 
-**Plan** (§8.10): unverified. The scaffold only calls `WalletClientInit::default()`
-(`crates/berlin-wallet-core/src/client.rs:19`) and does not read or validate
-`WalletClientConfig`. `dust_limit`/`fee_consensus` therefore remain unverified for
-`SendError::DustValue` and `max_sendable_amount`.
+**Plan** (§8.10): **RESOLVED**. `WalletClientInit` is a unit struct with `Default`; the
+per-federation `WalletClientConfig` is not a client-builder argument. It arrives through
+`ClientModuleInitArgs::cfg()` and is read after join via `Client::config().await` +
+`ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`. `client::wallet_client_config`
+wraps that path, and `send_withdrawal` validates `value >= dust_limit` before quoting. See §19 for
+signatures and the source defaults.
 
 Docs: <https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/config/struct.WalletClientConfig.html>.
 
@@ -371,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (9 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (11 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -400,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (9 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (11 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -534,3 +536,150 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.DatabaseTransaction.html>,
 <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/trait.IDatabaseTransactionOpsCore.html>,
 <https://docs.rs/tokio/1.53.3/tokio/sync/watch/struct.Receiver.html>.
+
+---
+
+## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
+
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (11 tests).
+
+### 19.1 How the config is constructed and passed
+
+`WalletClientInit` is a **unit struct** with an explicit `Default`:
+
+```rust
+// fedimint-walletv2-client-0.12.0/src/lib.rs:178-180
+#[derive(Debug, Clone, Default)]
+pub struct WalletClientInit;
+```
+
+`WalletClientInit::default()` is therefore correct. `WalletClientConfig` is **not** a
+client-builder argument; it is per-federation module config supplied to the module initializer:
+
+```rust
+// fedimint-client-module-0.12.0/src/module/init.rs:99
+pub fn cfg(&self) -> &<<C as ModuleInit>::Common as CommonModuleInit>::ClientConfig;
+
+// fedimint-walletv2-client-0.12.0/src/lib.rs:195-216
+impl ClientModuleInit for WalletClientInit {
+    async fn init(&self, args: &ClientModuleInitArgs<Self>) -> anyhow::Result<Self::Module> {
+        let module = WalletClientModule {
+            cfg: args.cfg().clone(), // <- WalletClientConfig
+            ...
+        };
+        ...
+    }
+}
+```
+
+For walletv2, `WalletCommonInit::ClientConfig = WalletClientConfig`
+(`fedimint-walletv2-common-0.12.0/src/lib.rs:114`) and the module kind is
+`KIND = ModuleKind::from_static_str("walletv2")` (`lib.rs:30`).
+
+After joining, the decoded config is read without touching the module's private `cfg` field:
+
+```rust
+// fedimint-client-0.12.0/src/client.rs:567
+pub async fn config(&self) -> ClientConfig;
+
+// fedimint-core-0.12.0/src/config.rs:514
+pub fn get_first_module_by_kind<T: Decodable + 'static>(
+    &self,
+    kind: impl Into<ModuleKind>,
+) -> anyhow::Result<(ModuleInstanceId, &T)>;
+```
+
+The scaffold wraps this in `client::wallet_client_config` (`client.rs:37`):
+
+```rust
+pub async fn wallet_client_config(client: &Client) -> anyhow::Result<WalletClientConfig> {
+    let config = client.config().await;
+    let (_, wallet_config) =
+        config.get_first_module_by_kind::<WalletClientConfig>(WALLET_V2_KIND)?;
+    Ok(wallet_config.clone())
+}
+```
+
+Type path: `fedimint_walletv2_common::config::WalletClientConfig`
+(`fedimint-walletv2-common-0.12.0/src/config.rs:215`).
+
+### 19.2 Actual defaults (from source)
+
+`WalletClientConfig` itself has **no `Default` impl** and no constructor. The defaults are set when
+the federation builds its consensus config via `WalletConfigConsensus::new(bitcoin_pks,
+fee_consensus, network)` (`config.rs:77`); the client receives the resulting values in the
+federation's `ClientConfig`.
+
+| Field | Source value | Notes |
+|---|---|---|
+| `dust_limit` | `bitcoin::Amount::from_sat(10_000)` (`config.rs:128`) | 10,000 sat |
+| `fee_consensus.base` | `Amount::from_sats(100)` (`config.rs:159`) | 100 sat per input/output |
+| `fee_consensus.parts_per_million` | supplied by the federation, `0..=10_000` (`config.rs:152-155`) | No fixed default; max 1%. `FeeConsensus::new` rejects >10,000. |
+| `send_tx_vbytes` | derived from `bitcoin_pks.len()` (`config.rs:111-116`) | No single default; 4 guardians → 228 vbytes |
+| `receive_tx_vbytes` | derived from `bitcoin_pks.len()` (`config.rs:117-122`) | 4 guardians → 316 vbytes |
+| `feerate_base` | `250` (`config.rs:127`) | Source comment: intentionally below the 1 sat/vB vote floor |
+
+The source's guardian-count table (`config.rs:52-72`) includes 1 → 166/192, 4 → 228/316,
+5 → 255/369, 6 → 281/423, 7 → 290/440, 8 → 317/494, 9 → 344/548, 10 → 352/565, …,
+20 → 565/991 for send/receive vbytes.
+
+**Mainnet assessment.**
+
+- `dust_limit = 10,000 sat` is conservative and mainnet-safe as a policy floor: it is above
+  Bitcoin Core's relay dust thresholds (330–546 sat for the common output types), so it does not
+  create uneconomical outputs. It is stricter than protocol dust and may reject small but valid
+  sends; that is intentional for a federation peg-out.
+- `fee_consensus` is a fee policy, not a safety bound. The constructor enforces `base = 100 sat`
+  and `parts_per_million <= 10,000` (≤1%), but the client decodes the federation's config without
+  re-validating those fields; a malicious federation could publish a hand-crafted larger ppm.
+  Treat it as part of the federation trust boundary and surface the quote before sending.
+- `send_tx_vbytes`/`receive_tx_vbytes` are consensus constants derived from guardian count. They
+  match the standard one-change-input/two-output transaction shape. They are mainnet-usable when
+  the federation config is honest and the guardian count is correct; the client does not
+  independently recompute them. More inputs than the formula assumes would underprice the mining
+  fee, so the federation remains the source of truth.
+- `feerate_base = 250` is intentionally below the 1 sat/vB minimum vote floor per the source
+  comment; the actual feerate comes from federation consensus, so this is not a mainnet-safety
+  concern by itself.
+
+### 19.3 Pre-send validation
+
+`send_withdrawal` (`withdrawal.rs:57`) now takes `&Client`, resolves the module and config, and
+rejects dust **before** `send_fee()`/`send_fee_quote()`:
+
+```rust
+// withdrawal.rs:44
+pub fn validate_withdrawal_value(
+    value: bitcoin::Amount,
+    dust_limit: bitcoin::Amount,
+) -> anyhow::Result<()> {
+    if value < dust_limit {
+        return Err(PegError::WithdrawalBelowDust { value, dust_limit }.into());
+    }
+    Ok(())
+}
+```
+
+The typed error is `PegError::WithdrawalBelowDust { value, dust_limit }` (`error.rs:78`). On
+rejection, the row is marked `Failed` through `set_withdrawal_failed` (which also clears the open
+index) and the typed error is returned. Test:
+`withdrawal::tests::dust_value_is_rejected_before_send` (`withdrawal.rs:173`).
+
+`withdrawal::tests::wallet_config_defaults_match_source` constructs a 4-guardian
+`WalletConfigConsensus::new(..., FeeConsensus::new(10_000)?, Network::Bitcoin)` and asserts
+`dust_limit = 10,000 sat`, `fee_consensus.base = 100 sat`, `parts_per_million = 10,000`,
+`send_tx_vbytes = 228`, `receive_tx_vbytes = 316`, and `feerate_base = 250`.
+
+`WalletClientModule::send` still performs its own `value < self.cfg.dust_limit` check and returns
+`SendError::DustValue` (`fedimint-walletv2-client-0.12.0/src/lib.rs:380-382`); the pre-send check is
+the early, typed path.
+
+### 19.4 Docs links
+
+- <https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/config/struct.WalletClientConfig.html>
+- <https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/config/struct.WalletConfigConsensus.html>
+- <https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/config/struct.FeeConsensus.html>
+- <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/struct.WalletClientInit.html>
+- <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/module/init/struct.ClientModuleInitArgs.html>
+- <https://docs.rs/fedimint-core/0.12.0/fedimint_core/config/struct.ClientConfig.html#method.get_first_module_by_kind>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.config>

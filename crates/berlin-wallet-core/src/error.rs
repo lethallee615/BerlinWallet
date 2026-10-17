@@ -74,6 +74,12 @@ pub enum PegError {
     #[error("withdrawal not found: {0}")]
     WithdrawalNotFound(String),
 
+    #[error("withdrawal value {value} is below the federation dust limit {dust_limit}")]
+    WithdrawalBelowDust {
+        value: bitcoin::Amount,
+        dust_limit: bitcoin::Amount,
+    },
+
     #[error("deposit address not ready")]
     AddressNotReady,
 

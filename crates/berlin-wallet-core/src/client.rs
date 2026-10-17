@@ -6,6 +6,8 @@ use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_mint_client::MintClientInit;
 use fedimint_walletv2_client::WalletClientInit;
+use fedimint_walletv2_common::KIND as WALLET_V2_KIND;
+use fedimint_walletv2_common::config::WalletClientConfig;
 
 /// Build a client with the walletv2 module registered.
 pub async fn build_client(
@@ -16,12 +18,27 @@ pub async fn build_client(
 ) -> anyhow::Result<ClientHandleArc> {
     let mut builder = Client::builder().await?;
     builder.with_module(MintClientInit);
+    // `WalletClientInit` is a unit struct (`#[derive(Default)]`). The real
+    // `WalletClientConfig` is per-federation module config delivered through
+    // `ClientModuleInitArgs::cfg()`, not a client-builder argument.
     builder.with_module(WalletClientInit::default());
 
     let preview = builder.preview(connectors.clone(), &invite).await?;
     // `ClientPreview::join` returns a `ClientHandle`, not a `Client`.
     let client = preview.join(db, root_secret).await?;
     Ok(Arc::new(client))
+}
+
+/// Read the per-federation walletv2 client config from the joined client.
+///
+/// `WalletClientInit` is a unit struct, so `WalletClientInit::default()` is
+/// correct; the `WalletClientConfig` travels inside the federation's
+/// `ClientConfig` and is exposed by `Client::config()`.
+pub async fn wallet_client_config(client: &Client) -> anyhow::Result<WalletClientConfig> {
+    let config = client.config().await;
+    let (_, wallet_config) =
+        config.get_first_module_by_kind::<WalletClientConfig>(WALLET_V2_KIND)?;
+    Ok(wallet_config.clone())
 }
 
 /// App journal partition.
