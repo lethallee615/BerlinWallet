@@ -203,11 +203,11 @@ to that address (`Wallet::build_tx()` → `create_psbt`/`sign_with_signers`/`fin
 broadcast it via the configured chain source, and persist `funding_txid`. External funding (handing
 the address to a third party) follows the same row/observation path minus the BDK transaction step.
 
-**Fees.** Quote `module.receive_fee().await?` before funding and persist it; show
-`net = amount − quoted_fee`. At claim time persist the actual `ReceiveMeta.fee` and compute
-`net_credit = gross_deposited − claim_fee` (fall back to the quoted `receive_fee()` if the claim
-has not recorded one). The Bitcoin network fee for the funding transaction is paid by the BDK
-wallet and is **not** part of `receive_fee()`.
+**Fees (order matters: quote → show net → fund).** Quote `module.receive_fee().await?` before
+funding and persist it; show `net = amount − quoted_fee`. At claim time persist the actual
+`ReceiveMeta.fee` and compute `net_credit = gross_deposited − claim_fee` (fall back to the quoted
+`receive_fee()` if the claim has not recorded one). The Bitcoin network fee for the funding
+transaction is paid by the BDK wallet and is **not** part of `receive_fee()`.
 
 Steps:
 
@@ -217,14 +217,20 @@ Steps:
 2. Otherwise read `let position = client.get_next_event_log_id().await;` and persist
    `{ id, federation_id, position, amount, state = AwaitingAddress }` **before** calling `receive()`.
 3. **Asynchronously** call `let addr = module.receive().await;` with a **120 s** bound and retry on
-   timeout (#9205). Persist `{ address = addr, state = AddressShown }` **before** exposing it via
-   `deposit_status(id)`. The FFI caller is not blocked (see §6).
-4. **Fund from BDK** (default, **idempotent**): `fund_deposit(id)` first checks `funding_txid`; if
-   it is already set, return it and do **not** build a second transaction. Otherwise
-   `bdk_wallet.build_tx()` paying `addr` for `amount`; sign with `sign_with_signers`,
-   `finalize_psbt`, broadcast via the configured chain source, and persist `funding_txid`.
-   External funding skips this step.
-5. `let quoted_fee = module.receive_fee().await?;` persist it and show `net`.
+   timeout (#9205) up to `MAX_ADDRESS_ATTEMPTS` (5). Persist `{ address = addr, state =
+   AddressShown }` **before** exposing it via `deposit_status(id)`. The background address task
+   **stops at `AddressShown`**; it does not fund. If the retry budget is exhausted, set
+   `state = Failed` with `last_error` and release the single-flight invariant. The FFI caller is
+   not blocked (see §6).
+4. **Quote the deposit fee and show the net before funding**: `let quoted_fee =
+   module.receive_fee().await?;` persist it and show `net = amount − quoted_fee`. `ReceiveError`
+   variants (`FederationError`, `NoConsensusFeerateAvailable`) are transient — retry; they do not
+   move the row to `Failed`.
+5. **Fund from BDK** (default, **idempotent**, only when the caller invokes `fund_deposit(id)`):
+   `fund_deposit(id)` first checks `funding_txid`; if it is already set, return it and do **not**
+   build a second transaction. Otherwise `bdk_wallet.build_tx()` paying `addr` for `amount`; sign
+   with `sign_with_signers`, `finalize_psbt`, broadcast via the configured chain source, and persist
+   `funding_txid`. External funding skips this step.
 6. Subscribe to `ReceivePaymentEvent` for **UI only** (#9338).
 7. **Bounded watch loop.** `await_receive(position)` is **unbounded** — it waits until a payment
    arrives, so a user who never pays would hang the task. Wrap it:
@@ -240,19 +246,21 @@ Steps:
        `last_error = "claim aborted"`, keep `state = AddressShown`, and re-enter
        `await_receive(next_position)` with bounded retry/backoff. (`await_receive` normally loops
        over aborted claims internally, so this branch is defensive.)
+   - **Errors** → classify: timeouts/transport/federation errors are transient (stay
+     `AddressShown`); a permanent error (e.g. the federation dropped the wallet module) moves the
+     row to `Failed` and releases the invariant.
 8. **On boot:** for every row in `AwaitingAddress`/`AddressShown`, resume the async address/claim
    steps from the persisted `position`. **Additionally**, reconcile claims via module operations —
    scan the operation log for `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match
    the deposit's funding outpoint (fedimint-sdk `find_claim` pattern) — because #9338 can commit a
    claim without its event-log announcement. Never create a second open row for the federation.
+   `Cancelled`/`Failed` rows are terminal and never block the next request.
 
 ```rust
-// 0. single-flight: one open deposit per federation
+// ---- request_deposit: caller gets the open row immediately; this part runs in background ----
 if let Some(existing) = journal.open_deposit(federation_id).await? {
-    return Ok(existing);                   // same address under #9101; no new position
+    return Ok(existing);                   // single-flight; same address under #9101
 }
-
-// 1. anchor BEFORE receive()
 let position = client.get_next_event_log_id().await;
 let id = new_deposit_id();                 // client ULID, not derived from position
 journal.insert_deposit(DepositRow {
@@ -260,31 +268,39 @@ journal.insert_deposit(DepositRow {
     state: DepositState::AwaitingAddress, ..Default::default()
 }).await?;
 
-// 2. address, bounded at 120 s, retry on timeout — runs asynchronously (§6)
+let mut attempts = 0;
+const MAX_ADDRESS_ATTEMPTS: u32 = 5;
 let address = loop {
     match timeout(Duration::from_secs(120), module.receive()).await {
         Ok(addr) => break addr,            // receive() returns Address directly (no Result)
-        Err(_elapsed) => continue,         // stay AwaitingAddress; see #9205
+        Err(_elapsed) => {
+            attempts += 1;
+            if attempts >= MAX_ADDRESS_ATTEMPTS {
+                journal.fail_deposit(id, "receive() timed out"); // Failed; releases invariant
+                return Ok(());
+            }
+            // stay AwaitingAddress; see #9205
+        }
     }
 };
 journal.set_deposit_address(id, &address, DepositState::AddressShown).await?;
+// The background address task stops here. Funding is a separate caller action.
 
-// 3. fund from BDK (idempotent: never build a second tx)
+// ---- fund_deposit(id): caller-invoked; quote -> show net -> fund ----
 if let Some(funding_txid) = journal.deposit_funding_txid(id).await? {
-    return Ok(funding_txid);
+    return Ok(funding_txid);               // idempotent: never build a second tx
 }
+let quoted_fee = module.receive_fee().await?;   // quote BEFORE funding
+journal.set_deposit_quoted_fee(id, quoted_fee).await?;
+show_net(amount, quoted_fee);
 let mut psbt = /* bdk_wallet.build_tx() paying `address` `amount` */;
 bdk_wallet.sign_with_signers(&mut psbt, /* signers */, /* options */)?;
 bdk_wallet.finalize_psbt(&mut psbt, /* options */)?;
 let funding_txid = broadcast_via_chain_source(&psbt)?;
 journal.set_deposit_funding_txid(id, funding_txid).await?;
 
-// 4. deposit fee quote
-let quoted_fee = module.receive_fee().await?;
-journal.set_deposit_quoted_fee(id, quoted_fee).await?;
-
-// 5. bounded watch loop; a non-paying user must not hang the task
-//    DEPOSIT_WATCH_TIMEOUT is a liveness bound, not a semantic deadline.
+// ---- watcher: bounded loop; a non-paying user must not hang the task ----
+//      DEPOSIT_WATCH_TIMEOUT is a liveness bound, not a semantic deadline.
 const DEPOSIT_WATCH_TIMEOUT: Duration = Duration::from_secs(600);
 let (final_state, next_position) = loop {
     match timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await {
@@ -395,6 +411,10 @@ pub enum DepositState {
     AddressShown,
     /// `FinalReceiveOperationState::Success`.
     Done,
+    /// User cancelled from `AwaitingAddress`/`AddressShown` while `funding_txid IS NULL`.
+    Cancelled,
+    /// Terminal: address retries exhausted or a permanent error. Releases the invariant.
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -407,15 +427,28 @@ pub enum WithdrawalState {
     Broadcast { txid: bitcoin::Txid },
     /// `FinalSendOperationState::Aborted` — funding rejected, value spendable again.
     Refunded,
-    /// `FinalSendOperationState::Failure` — programming error / malicious federation.
+    /// `FinalSendOperationState::Failure`, or a fatal `SendError` from `send()`.
     Failed,
+    /// User cancelled from `Quoting` only.
+    Cancelled,
 }
 ```
 
-Errors during `await_receive`/`await_final_send_operation_state` do **not** advance the state: the
-row stays `AwaitingAddress`/`AddressShown` or `Submitted` and is retried on boot. `DepositState`
-has no failure variant by design — `await_receive` retries aborted claims; an unrecoverable error
-is surfaced to the caller and retried, not terminalised.
+Transient errors do **not** advance the state: the row stays `AwaitingAddress`/`AddressShown` or
+`Quoting`/`Submitted` and is retried on boot.
+
+**Terminal vs retryable (explicit).**
+- *Retryable*: timeouts, transport/federation-unreachable errors, `TryAgain`/storage-busy, and
+  `FinalReceiveOperationState::Aborted` claims (reprocessed under a new receive op).
+- *Terminal (deposit)*: `receive()` exhausted `MAX_ADDRESS_ATTEMPTS`, or a permanent error (e.g.
+  the federation dropped the wallet module) → `Failed`; user action → `Cancelled` (only from
+  `AwaitingAddress`/`AddressShown` while `funding_txid IS NULL`).
+- *Terminal (withdrawal)*: a fatal `SendError` from `send()` — `WrongNetwork`, `DustValue`,
+  `UnsupportedAddress`, `InsufficientFunds` — or `FinalSendOperationState::Failure` → `Failed`;
+  user action from `Quoting` only → `Cancelled`. `NoConsensusFeerateAvailable` and
+  `FederationError(_)` are transient and stay `Quoting` for a boot retry.
+- `Cancelled`/`Failed` fall outside the partial-unique indexes, so they release the single-flight
+  invariant and unblock the next request.
 
 ### 4.4 Persistence schema
 
@@ -432,7 +465,7 @@ CREATE TABLE deposit_requests (
     position        INTEGER NOT NULL,          -- EventLogId read BEFORE receive(); NOT unique
     amount          INTEGER NOT NULL,          -- sats the caller intends to deposit
     address         TEXT,                      -- set when state = AddressShown
-    state           TEXT NOT NULL,             -- AwaitingAddress | AddressShown | Done
+    state           TEXT NOT NULL,             -- AwaitingAddress | AddressShown | Done | Cancelled | Failed
     next_position   INTEGER,                   -- returned by await_receive()
     operation_id    BLOB,                      -- claim op learned via ReceiveMeta / event
     funding_txid    BLOB,                      -- BDK peg-in transaction
@@ -459,7 +492,7 @@ CREATE TABLE withdrawal_requests (
     fee             INTEGER,                   -- send_fee() result, sats
     quote           BLOB,                      -- serialized FeeQuote
     operation_id    BLOB UNIQUE,               -- set immediately after send()
-    state           TEXT NOT NULL,             -- Quoting | Submitted | Broadcast | Refunded | Failed
+    state           TEXT NOT NULL,             -- Quoting | Submitted | Broadcast | Refunded | Failed | Cancelled
     txid            BLOB,                      -- set when state = Broadcast
     custom_meta     TEXT NOT NULL,             -- {"id": "<id>"} passed to send()
     last_error      TEXT,
@@ -490,14 +523,17 @@ indexed under a state it no longer holds.
   **single open deposit per federation**: `request_deposit` returns the existing
   `AwaitingAddress`/`AddressShown` row instead of inserting a new one. A new row may be inserted
   only in the same `dbtx` that closes the previous open row (partial unique index in §4.4).
-  Address retries (step 3 timeouts) reuse the same row. **Concurrent deposits are unsupported until
-  #9306 is in the pin.**
+  Address retries (step 3 timeouts) reuse the same row. `cancel_deposit` (from
+  `AwaitingAddress`/`AddressShown` with no `funding_txid`) and `Failed` set a terminal state
+  outside the index and release the invariant. **Concurrent deposits are unsupported until #9306
+  is in the pin.**
 - **Withdrawal `id`** = client-generated UUIDv7/ULID, persisted before `send()`. `send()` is called
   **at most once per `id`**; the `Quoting → Submitted` transition is the fence. `operation_id` is
   persisted immediately and is `UNIQUE`; on boot we re-await by it and never re-submit. The same
   `id` is embedded in `custom_meta` so `SendMeta.custom_meta` carries the correlation through the
   federation operation log. One in-flight withdrawal per federation is enforced by
-  `withdrawal_requests_one_open` (`Quoting`/`Submitted`), so our own sends cannot race each other.
+  `withdrawal_requests_one_open` (`Quoting`/`Submitted`), so our own sends cannot race each other;
+  `cancel_withdrawal` (from `Quoting`) and a fatal `SendError → Failed` release it.
 - **Crash window** (between `send()` returning and `operation_id` being persisted): on boot, do
   **not** call `send()` again. Reconcile first — scan the operation log for a `SendMeta` whose
   `custom_meta.id` matches the row's `id` (the same `find_claim`-style scan used for deposits); if
@@ -509,7 +545,7 @@ indexed under a state it no longer holds.
 | Issue | Hazard | Mitigation in this design |
 |---|---|---|
 | `fedimint/fedimint#9101` | `receive()` returns only an address (no `Result`, no `OperationId`); repeated calls return the same address until the scanner sees it paid; there is no durable pre-payment operation. Correlating a payment to a UI request by address is unsafe with concurrent receives. | Attribute the deposit to the **`EventLogId` read before `receive()`** (`Client::get_next_event_log_id()`), persist the row **before** `receive()`, and observe with `await_receive(position)` (position-scoped). Enforce **one open deposit per federation** and return the existing row; never insert a second row against a possibly-repeated position. Never use the address as the correlation key. **Concurrent deposits are unsupported until #9306 is in the pin** (fixed on `main`; not in 0.12.0). |
-| `fedimint/fedimint#9205` | Walletv2 client panics on first start when the address search outlives the DB write history (first-address derivation is a hash-prefix search that can take a long time). | Bound `receive()` at **120 s** and retry on timeout; leave the row in `AwaitingAddress` on timeout (never terminalise it); let the client/scanner run before the first `receive()`; never hold a DB transaction across the address search. |
+| `fedimint/fedimint#9205` | Walletv2 client panics on first start when the address search outlives the DB write history (first-address derivation is a hash-prefix search that can take a long time). | Bound `receive()` at **120 s** and retry on timeout up to `MAX_ADDRESS_ATTEMPTS`; the row stays `AwaitingAddress` while retrying, then moves to `Failed` (releasing the single-flight invariant) if the budget is exhausted. Let the client/scanner run before the first `receive()`; never hold a DB transaction across the address search. |
 | `fedimint/fedimint#9338` | The claim is committed in one DB transaction and its event-log announcement in another; a client stopping between them keeps the claim without the `ReceivePaymentEvent`. An event-only subscriber can miss the deposit. | `await_receive(position)` is the source of truth, not the event. On boot, **also reconcile via module operations**: scan the operation log for `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match the deposit's funding outpoint (fedimint-sdk `find_claim` pattern). `ReceivePaymentEvent` is UI-only. |
 | `fedimint/fedimint#9098` | Quote and submit are not atomic; a concurrent spend between the quote and the funding can change what is selected, so the quoted fee/total may not match what is debited. | Re-quote immediately before `send()` (`send_fee()` + `send_fee_quote()`); compare with the persisted quote and abort with a `QuoteChanged`-style error on any drift; never silently absorb the difference. Serialize withdrawals per federation (single-flight) so our own sends cannot race each other. |
 
@@ -532,6 +568,12 @@ indexed under a state it no longer holds.
   `AddressShown`, nothing new is persisted, and the task re-enters `await_receive(position)`.
 - **Withdrawal single-flight:** attempt a second withdrawal while one row is `Quoting`/`Submitted`
   and assert the open-row invariant refuses it.
+- **Deposit liveness:** exhaust `MAX_ADDRESS_ATTEMPTS` and assert `Failed` releases the invariant
+  (a new deposit can be created); `cancel_deposit` from `AddressShown` with no `funding_txid`
+  releases it; `cancel_deposit` after funding is refused.
+- **Withdrawal liveness:** a fatal `SendError` from `send()` moves `Quoting` → `Failed` and releases
+  the invariant; a transient `FederationError` stays `Quoting` and retries on boot;
+  `cancel_withdrawal` from `Quoting` releases it and is refused from `Submitted`.
 - **Balance:** blocked by §8.2 (primary module for BTC) — do not assert balance movements until
   that is resolved.
 
@@ -591,8 +633,10 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
   - `request_deposit_address() -> Result<DepositView>` — **non-blocking**: inserts/returns the single open `deposit_requests` row in `AwaitingAddress` and returns immediately. A background task runs `receive()` (120 s bound + retry) and performs the `AddressShown` write.
   - `fund_deposit(id: String) -> Result<String>` — **idempotent**: if `funding_txid` is already set, returns it without building a second BDK transaction; otherwise builds/signs/broadcasts the peg-in transaction and returns its txid.
   - `deposit_status(id: String) -> Result<DepositView>` — current state, address (null until `AddressShown`), quoted fee, gross, net credit, funding txid.
+  - `cancel_deposit(id: String) -> Result<DepositView>` — allowed only from `AwaitingAddress`/`AddressShown` while `funding_txid` is null; sets `Cancelled` and releases the single-flight invariant.
   - `withdraw(address: String, sat_amount: u64) -> Result<String>` (creates a `withdrawal_requests` row, returns its id)
   - `withdrawal_status(id: String) -> Result<WithdrawalView>` (state + operation_id + txid)
+  - `cancel_withdrawal(id: String) -> Result<WithdrawalView>` — allowed only from `Quoting`; sets `Cancelled` and releases the invariant.
   - `sync() -> Result<()>`
 - Streams: expose a polling `list_deposits()` / `list_withdrawals()` plus a callback subscription; map `anyhow::Error` to a `thiserror`-based `pegwallet_ffi::Error` (uniffi cannot expose `anyhow::Error`).
 
@@ -684,6 +728,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 6. **UniFFI async** — uniffi 0.32 async export support and per-language binding generation **unverified**.
 7. **Depending on douglaz's `wallet_core`/`wallet-fedimint`** — AGPL-3.0, not on crates.io (git dep at a pinned commit). Either re-implement a small journal inline or take the git dep with the license consequence.
 8. **`tx_builder` construction for fedimint transactions** — **RESOLVED** for walletv2: `send()` is the high-level wrapper that builds/submits internally and returns an `OperationId`; no manual `TransactionBuilder` is needed for peg-out.
+9. **Recovery path (§5)** — `ClientPreview::recover` + `Client::wait_for_all_recoveries()` is on the boot critical path but **unverified**: VERIFY.md did not exercise a restore/recovery. The step that shuts down the recovery client and reopens the partition before reading balance is unconfirmed; treat it as blocking a production boot/restore implementation.
 
 ---
 
