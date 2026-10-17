@@ -159,14 +159,29 @@ pub async fn watch_deposit(
     // Success only: `set_deposit_aborted` already persisted the cursor on Aborted.
     journal.set_deposit_next_position(id, next_position).await?;
 
-    let figures = claim_figures(client, position).await?;
-    match journal
-        .claim_bind(&federation_id, figures.outpoint, id)
+    // `await_receive` returns no operation id/meta: reuse the operation-log
+    // scan and match the claim by scriptPubKey.
+    let row = journal
+        .deposit(id)
         .await?
-    {
+        .ok_or_else(|| PegError::DepositNotFound(id.0.clone()))?;
+    let claim = scan_receive_claims(client)
+        .await?
+        .into_iter()
+        .find(|claim| {
+            claim.final_state == FinalReceiveOperationState::Success
+                && claim.outpoint.is_some()
+                && (claim.address_script.is_none()
+                    || row.address_script.is_none()
+                    || claim.address_script.as_deref() == row.address_script.as_deref())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no unbound claim found after Success"))?;
+    let outpoint = claim.outpoint.expect("checked above");
+
+    match journal.claim_bind(&federation_id, outpoint, id).await? {
         BindResult::Bound => {
             journal
-                .finish_deposit(id, figures.outpoint, figures.gross, figures.fee)
+                .finish_deposit(id, outpoint, claim.value, claim.fee)
                 .await?;
         }
         BindResult::TakenBy(_other) => {
@@ -197,6 +212,7 @@ pub async fn adopt_orphan_claims(
                 outpoint,
                 AdoptedClaim {
                     address: claim.address.clone(),
+                    address_script: claim.address_script.clone(),
                     operation_id: claim.operation_id,
                     value: claim.value,
                     fee: claim.fee,
@@ -215,32 +231,12 @@ pub async fn adopt_orphan_claims(
     Ok(())
 }
 
-struct ClaimFigures {
-    outpoint: bitcoin::OutPoint,
-    gross: bitcoin::Amount,
-    fee: bitcoin::Amount,
-    #[allow(dead_code)]
-    operation_id: OperationId,
-}
-
-/// `await_receive` returns only `(state, cursor)`, not the claim's operation
-/// id or figures. The real implementation reads `ReceivePaymentEvent` from
-/// the event log to get the operation id, then `WalletOperationMeta::Receive`
-/// for `ReceiveMeta { outpoint, value, fee, .. }`.
-async fn claim_figures(
-    _client: &Client,
-    _position: EventLogId,
-) -> anyhow::Result<ClaimFigures> {
-    anyhow::bail!(
-        "claim_figures: event-log/ReceiveMeta lookup is not implemented in the scaffold"
-    )
-}
-
 struct OrphanClaim {
     final_state: FinalReceiveOperationState,
     operation_id: OperationId,
     outpoint: Option<bitcoin::OutPoint>,
     address: Option<String>,
+    address_script: Option<Vec<u8>>,
     value: bitcoin::Amount,
     fee: bitcoin::Amount,
 }

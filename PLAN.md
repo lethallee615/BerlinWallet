@@ -1030,8 +1030,8 @@ scaffold; docs.rs links are for the pinned versions.
    <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/enum.ReceiveError.html>.
 2. **`Address<NetworkUnchecked>` has no `Display`** — display via `assume_checked().to_string()`;
    match via `script_pubkey().as_bytes()`; rows carry both `address` and `address_script` (§4.4).
-   The scaffold currently stores only the string (`journal.rs:279`); adding the script field is the
-   next code pass. docs: <https://docs.rs/bitcoin/0.32.8/bitcoin/struct.Address.html>.
+   The scaffold stores both (`journal.rs:61`, `:282`) and matches on the script
+   (`deposit.rs:176`). docs: <https://docs.rs/bitcoin/0.32.8/bitcoin/struct.Address.html>.
 3. **`add_recipient` takes `ScriptBuf`, not `Address`** — `bdk.rs:21` uses
    `destination.script_pubkey()`. docs:
    <https://docs.rs/bdk_wallet/3.2.0/bdk_wallet/struct.TxBuilder.html#method.add_recipient>.
@@ -1046,9 +1046,8 @@ scaffold; docs.rs links are for the pinned versions.
 6. **`Database::with_prefix` takes `Vec<u8>`** — `client.rs:29/36` builds the prefix explicitly.
    docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html#method.with_prefix>.
 7. **`FeeQuote`** — `PartialEq` is implemented (drift compare compiles), but it is **not**
-   `Serialize`/`Deserialize`; persist the typed `FeeQuoteWire` (§4.4). The scaffold still uses the
-   `Option<String>` placeholder (`journal.rs:116`); dropping it for `FeeQuoteWire` is the next code
-   pass. docs:
+   `Serialize`/`Deserialize`; persist the typed `FeeQuoteWire` (§4.4). The scaffold stores
+   `Option<FeeQuoteWire>` (`journal.rs:116`, `wire.rs:13`) and the round-trip test passes. docs:
    <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/transaction/struct.FeeQuote.html>.
 8. **`await_receive` returns no operation id/meta** — resolved by the reused
    `scan_receive_claims` path (§4.1 step 7); `operation_id` comes from

@@ -52,6 +52,7 @@ pub async fn send_withdrawal(
 
     let chain_fee = module.send_fee().await?;
     let quote: FeeQuote = module.send_fee_quote(value).await?;
+    journal.set_withdrawal_quote(id, (&quote).into()).await?;
 
     // Re-quote immediately before send(); abort on drift (#9098).
     let fresh_fee = module.send_fee().await?;

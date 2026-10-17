@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fedimint_client::module::transaction::FeeQuote;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
 use fedimint_eventlog::EventLogId;
@@ -10,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::ops::{DepositId, WithdrawalId};
+use crate::wire::FeeQuoteWire;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DepositOrigin {
@@ -58,6 +58,7 @@ pub struct DepositRow {
     pub position: Option<EventLogId>,
     pub amount: bitcoin::Amount,
     pub address: Option<String>,
+    pub address_script: Option<Vec<u8>>,
     pub state: DepositState,
     pub next_position: Option<EventLogId>,
     pub operation_id: Option<OperationId>,
@@ -87,6 +88,7 @@ impl DepositRow {
             position: Some(position),
             amount,
             address: None,
+            address_script: None,
             state: DepositState::AwaitingAddress,
             next_position: None,
             operation_id: None,
@@ -110,10 +112,8 @@ pub struct WithdrawalRow {
     pub address: String,
     pub value: bitcoin::Amount,
     pub fee: Option<bitcoin::Amount>,
-    /// The scaffold persists a debug rendering; `FeeQuote` is not `Serialize`
-    /// in 0.12.0 (see COMPILE.md). A production journal would use a typed
-    /// wire form.
-    pub quote: Option<String>,
+    /// Typed wire form of `FeeQuote` (which is not `Serialize`).
+    pub quote: Option<FeeQuoteWire>,
     pub operation_id: Option<OperationId>,
     pub state: WithdrawalState,
     pub txid: Option<bitcoin::Txid>,
@@ -153,6 +153,7 @@ impl WithdrawalRow {
 #[derive(Debug, Clone)]
 pub struct AdoptedClaim {
     pub address: Option<String>,
+    pub address_script: Option<Vec<u8>>,
     pub operation_id: OperationId,
     pub value: bitcoin::Amount,
     pub fee: bitcoin::Amount,
@@ -276,7 +277,9 @@ impl Journal {
         if row.state != expected {
             return Ok(ApplyResult::Skipped);
         }
-        row.address = Some(address.assume_checked().to_string());
+        let checked = address.assume_checked();
+        row.address = Some(checked.to_string());
+        row.address_script = Some(checked.script_pubkey().as_bytes().to_vec());
         row.state = DepositState::AddressShown;
         row.updated_at = now_ms();
         Ok(ApplyResult::Applied)
@@ -413,6 +416,7 @@ impl Journal {
             position: None,
             amount: claim.value,
             address: claim.address,
+            address_script: claim.address_script,
             state: DepositState::Done,
             next_position: None,
             operation_id: Some(claim.operation_id),
@@ -529,6 +533,19 @@ impl Journal {
         Ok(())
     }
 
+    pub async fn set_withdrawal_quote(
+        &self,
+        id: &WithdrawalId,
+        quote: FeeQuoteWire,
+    ) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
+        if let Some(row) = inner.withdrawals.get_mut(id) {
+            row.quote = Some(quote);
+            row.updated_at = now_ms();
+        }
+        Ok(())
+    }
+
     pub async fn set_withdrawal_failed(
         &self,
         id: &WithdrawalId,
@@ -608,8 +625,3 @@ fn now_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
-
-// Keep `FeeQuote` referenced so the documented non-serializable field is
-// explicit to readers of this scaffold.
-#[allow(dead_code)]
-fn _quote_is_not_serde(_quote: &FeeQuote) {}

@@ -12,6 +12,7 @@ pub mod error;
 pub mod journal;
 pub mod ops;
 pub mod sync;
+pub mod wire;
 pub mod withdrawal;
 
 pub use error::{classify_error, Classify, ErrorClass, PegError};
@@ -20,3 +21,4 @@ pub use journal::{
     WithdrawalRow, WithdrawalState,
 };
 pub use ops::{DepositId, WithdrawalId};
+pub use wire::FeeQuoteWire;

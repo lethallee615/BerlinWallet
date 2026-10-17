@@ -190,3 +190,64 @@ Docs: <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/
 `cargo check` was run with `PATH="$HOME/.local/bin:$PATH"` only so a clean rebuild can find
 `cmake`; the cached `aws-lc-sys` build did not need it. `LIBCLANG_PATH` and
 `BINDGEN_EXTRA_CLANG_ARGS` are already in `.cargo/config.toml [env]`.
+
+---
+
+## 14. Follow-up compile pass: `FeeQuoteWire` + `address_script`
+
+Both items now compile: `cargo check` → **EXIT 0**, and `cargo test -p pegwallet-core --lib`
+passes the `FeeQuoteWire` round-trip (`wire::tests::fee_quote_round_trip ... ok`).
+
+### 14.1 `FeeQuoteWire` — the sketched shape **held** (no deviation)
+
+Confirmed against the real source:
+
+- `FeeQuote { input: Amounts, output: Amounts, dust: Amounts }` — public fields.
+- `Amounts` implements `IntoIterator<Item = (AmountUnit, Amount)>`.
+- `AmountUnit` derives `Ord` (valid `BTreeMap` key) and is `Serialize`/`Deserialize`.
+- `Amount` is `#[serde(transparent)]` and `Serialize`/`Deserialize`.
+- `Amounts::ZERO` is `pub const`; `checked_add_unit(self, amount, unit) -> Option<Self>` is public.
+
+The real wire shape is exactly the sketch:
+
+```rust
+pub struct FeeQuoteWire {
+    pub input: BTreeMap<AmountUnit, fedimint_core::Amount>,
+    pub output: BTreeMap<AmountUnit, fedimint_core::Amount>,
+    pub dust: BTreeMap<AmountUnit, fedimint_core::Amount>,
+}
+```
+
+- `crates/pegwallet-core/src/wire.rs:13` — the struct.
+- `wire.rs:19` — `From<&FeeQuote>` via `into_iter().collect()`.
+- `wire.rs:39` — `amounts()` rebuilds each `Amounts` with `Amounts::ZERO` + `checked_add_unit`.
+- `wire.rs:54` — round-trip test (`FeeQuote` → wire → back).
+- `crates/pegwallet-core/src/journal.rs:116` — `WithdrawalRow.quote: Option<FeeQuoteWire>`
+  (the `Option<String>` placeholder is gone).
+- `crates/pegwallet-core/src/withdrawal.rs:55` — the quote is persisted as the wire form.
+- `crates/pegwallet-core/src/journal.rs:536` — `set_withdrawal_quote`.
+
+Docs: <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/transaction/struct.FeeQuote.html>,
+<https://docs.rs/fedimint-core/0.12.0/fedimint_core/module/struct.Amounts.html>,
+<https://docs.rs/fedimint-core/0.12.0/fedimint_core/module/struct.AmountUnit.html>.
+
+### 14.2 `address_script` — added and used for matching
+
+- `crates/pegwallet-core/src/journal.rs:61` — `DepositRow.address_script: Option<Vec<u8>>`.
+- `journal.rs:282` — populated in `set_deposit_address_if`:
+  `assume_checked().script_pubkey().as_bytes().to_vec()` (display string kept separately).
+- `journal.rs:156` / `journal.rs:419` — `AdoptedClaim.address_script` and the adopted row carry it.
+- `crates/pegwallet-core/src/deposit.rs:239` — `OrphanClaim.address_script`.
+- `deposit.rs:168-176` — the watcher's Success arm now reuses `scan_receive_claims` and matches
+  `claim.address_script.as_deref() == row.address_script.as_deref()`; `claim_figures` is removed.
+- The `cargo check`-verified `Address<NetworkUnchecked>` rule still holds: no `Display`, so display
+  goes through `assume_checked()`, matching through `script_pubkey().as_bytes()`.
+
+Docs: <https://docs.rs/bitcoin/0.32.8/bitcoin/struct.Address.html#method.script_pubkey>,
+<https://docs.rs/bitcoin/0.32.8/bitcoin/struct.ScriptBuf.html#method.as_bytes>.
+
+### 14.3 Remaining runtime stub (unchanged)
+
+`scan_receive_claims` is still a `bail!` stub (no network I/O), but it is now the **only**
+operation-log lookup point: both the watcher Success arm and `adopt_orphan_claims` call it.
+`claim_figures` no longer exists.
