@@ -1143,3 +1143,48 @@ Docs:
 - <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-client-module/src/secret.rs>
 - <https://docs.rs/bip39/2.2.0/bip39/struct.Mnemonic.html#method.to_seed_normalized>
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/secret/struct.PlainRootSecretStrategy.html>
+
+---
+
+## 23. Pre-join checks
+
+### 23.1 `ModuleDecoderRegistry::default()` for the client DB is correct
+
+The `Database` passed to `ClientPreview::join` / `ClientBuilder::open` is named
+`db_no_decoders`. `ClientBuilder::build_stopped` computes module decoders, decodes the federation
+config with them, then installs them:
+
+```rust
+// fedimint-client-0.12.0/src/client/builder.rs:627-630
+let decoders = self.decoders(config);
+let config = Self::config_decoded(config, &decoders)?;
+let db = db_no_decoders.with_decoders(decoders.clone());
+```
+
+`Database::with_decoders` is `fedimint-core/src/db/mod.rs:475`. `open_rocksdb`/`open_sqlite`
+(`client.rs`) therefore correctly construct `Database::new(raw, ModuleDecoderRegistry::default())`:
+that is the no-decoder input; the client builder supplies decoders from the module inits and
+federation config. An empty registry is not a federation fault.
+
+### 23.2 Pinned Git rev is the tag commit
+
+`git ls-remote https://github.com/fedimint/fedimint`:
+
+```text
+6cdc15b1c5df2e3849db532d9e5b833dfd079890  refs/tags/v0.12.0
+2ead392ba22141bbe5898cdb724ec3dbc55387a9  refs/tags/v0.12.0^{}
+8c9d15c7bf62605efb966e5e6b6b468d2ef8618b  refs/heads/master
+```
+
+Cargo's checkout is `2ead392b` — the peeled **tag** commit, not `master`. The `Cargo.lock` source
+fragment shows `?tag=v0.12.0#2ead392b`.
+
+### 23.3 C++17 build requirement
+
+`librocksdb-sys` compiles RocksDB C++17 and requires a real `g++` or `clang++`; `cc` alone is not
+enough. This is documented in PLAN §2. The Zig C++ wrapper + combined libc++/ubsan runtime used to
+verify this sandbox is **sandbox-only and uncommitted**; CI must install a C++17 compiler.
+
+Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html#method.with_decoders>,
+<https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientBuilder.html#method.open>,
+<https://github.com/fedimint/fedimint/tree/v0.12.0>.

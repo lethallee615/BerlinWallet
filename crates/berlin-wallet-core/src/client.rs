@@ -72,12 +72,16 @@ pub async fn min_withdrawal_sat(client: &Client) -> anyhow::Result<u64> {
 /// Git backend crates.
 pub async fn open_rocksdb(path: &std::path::Path) -> anyhow::Result<Database> {
     let raw = fedimint_rocksdb::RocksDb::build(path).open().await?;
+    // This is the `db_no_decoders` input to ClientBuilder::join/open. The
+    // builder installs module decoders with `Database::with_decoders` after it
+    // has decoded the federation config (`client/builder.rs:628-630`).
     Ok(Database::new(raw, ModuleDecoderRegistry::default()))
 }
 
 /// Open the hand-rolled SQLite backend (kept for mobile/embedded hosts).
 pub fn open_sqlite(path: &std::path::Path) -> anyhow::Result<Database> {
     let raw = crate::sqlite::SqliteDb::open(path)?;
+    // Same `db_no_decoders` contract as `open_rocksdb`.
     Ok(Database::new(raw, ModuleDecoderRegistry::default()))
 }
 

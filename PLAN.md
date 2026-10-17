@@ -90,6 +90,7 @@ declare `rust-version = 1.91`. The default 1.89 toolchain cannot build the graph
 - **Toolchain 1.91.1** — commit `rust-toolchain.toml` (`channel = "1.91.1"`).
 - **`cmake`** — required by `aws-lc-sys`, a hard (non-optional) dependency of **both** `fedimint-core` and `fedimint-connectors`, which force its `bindgen` feature via the `ssl` feature.
 - **`libclang`** — required by that bindgen step.
+- **C++17 compiler (`g++` or `clang++`)** — required by `librocksdb-sys`/RocksDB. `cc` alone is not enough. The sandbox-only Zig C++ wrapper used to verify this build is **not committed** and must not be a project dependency; CI/packaging must install a real C++17 compiler.
 - **bdk PSBT/fee API** — `Wallet::create_psbt` (and `build_tx`) require the `bdk-tx` feature **and** `--cfg bdk_wallet_unstable`; `bdk_wallet`'s `src/lib.rs` otherwise emits `compile_error!("The \`bdk-tx\` feature requires \`--cfg bdk_wallet_unstable\`.")`. Configure via `.cargo/config.toml` (`[build] rustflags = ["--cfg", "bdk_wallet_unstable"]`).
 
 Working sandbox setup:
