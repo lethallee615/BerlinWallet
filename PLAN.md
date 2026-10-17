@@ -32,7 +32,7 @@ pegwallet/                      # workspace root
       src/journal.rs            # crash-safe write-ahead journal (douglaz pattern)
       src/sync.rs               # concurrent BDK chain task + fedimint federation task
       src/ops.rs                # OperationId / idempotency-key mapping
-      error.rs
+      src/error.rs              # typed errors
     pegwallet-ffi/              # thin UniFFI crate (depends on pegwallet-core)
       src/lib.rs                # uniffi::export, PegWallet object
       uniffi/                   # generated bindings (TS/Swift/Kotlin/etc. via uniffi-bindgen)
@@ -235,28 +235,29 @@ Steps:
    `build_tx` error is surfaced to the caller and the row stays `AddressShown` (no `funding_txid`
    is written); the caller may retry after funding the BDK wallet or `cancel_deposit`.
 6. Subscribe to `ReceivePaymentEvent` for **UI only** (#9338).
-7. **Bounded watch loop.** `await_receive(position)` is **unbounded** — it waits until a payment
-   arrives, so a user who never pays would hang the task. Wrap it:
-   `match timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await`
-   - **timeout (`Elapsed`)** → stay in `AddressShown`, **persist nothing new** (do not advance
-     `next_position`), sleep a small exponential backoff (1s → 60s), and re-enter
-     `await_receive(position)`.
-   - **`Ok((final_state, next_pos))`** → persist `next_position = next_pos`, then **match on
-     `FinalReceiveOperationState`**:
-     - `Success` → `claim_bind(federation_id, ReceiveMeta.outpoint, R.id)`:
-       - `Bound` → persist `gross_deposited`, `operation_id`, `funding_outpoint`, `claim_fee =
-         ReceiveMeta.fee`, `net_credit = gross − claim_fee`, `state = Done`.
-       - `TakenBy(other)` → the adoption pass already recorded this claim on row `other`; set R
-         `Done` **without** inserting a second claim row and **without** a second credit (R's credit
-         fields stay empty; the credit lives on `other`).
-     - `Aborted` → the claim was rejected; the still-unspent output is reprocessed under a new
-       receive operation. Do **not** set `Done` and do **not** credit. Persist `next_position`, set
-       `last_error = "claim aborted"`, keep `state = AddressShown`, and re-enter
-       `await_receive(next_position)` with bounded retry/backoff. (`await_receive` normally loops
-       over aborted claims internally, so this branch is defensive.)
-   - **Errors** → classify: timeouts/transport/federation errors are transient (stay
-     `AddressShown`); a permanent error (e.g. the federation dropped the wallet module) moves the
-     row to `Failed` and releases the invariant.
+7. **Bounded watch loop (Aborted is handled inside the loop).** `await_receive(position)` is
+   **unbounded** — it waits until a payment arrives, so a user who never pays would hang the task.
+   Keep a local `position` cursor and loop on
+   `timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position))`:
+   - `Ok((FinalReceiveOperationState::Success, next))` → set `next_position = next` and **break**
+     out of the loop.
+   - `Ok((FinalReceiveOperationState::Aborted, next))` → persist
+     `set_deposit_aborted(id, next)` (keep `state = AddressShown`, set
+     `last_error = "claim aborted"`, and **persist `next_position = next`**), advance
+     `position = next`, sleep backoff, and continue. The still-unspent output is reprocessed under
+     a new receive operation; do **not** set `Done` and do **not** credit.
+   - `Ok(Err(err))` → classify (§4.3): transient → sleep backoff and continue with the **same**
+     `position` (stay `AddressShown`); permanent → `fail_deposit(id, &err)` and return.
+   - `Err(Elapsed)` → sleep backoff and continue with the **same** `position` (persist nothing new).
+   After the loop (Success only): persist `next_position`, then run the `claim_bind` success arm:
+   - `Bound` → persist `gross_deposited`, `operation_id`, `funding_outpoint`, `claim_fee =
+     ReceiveMeta.fee`, `net_credit = gross − claim_fee`, `state = Done`.
+   - `TakenBy(other)` → the adoption pass already recorded this claim on row `other`; set R `Done`
+     **without** inserting a second claim row and **without** a second credit (R's credit fields
+     stay empty; the credit lives on `other`).
+
+   **`next_position` is the resume cursor and is persisted on both `Success` and `Aborted`**; boot
+   resumes with `COALESCE(next_position, position)`.
 8. **Boot reconciliation (mandatory), two passes:**
    a. **Resume open rows:** for every row in `AwaitingAddress`/`AddressShown`, resume the address/
       claim steps from **`COALESCE(next_position, position)`** — `await_receive` advances past a
@@ -332,14 +333,26 @@ bdk_wallet.finalize_psbt(&mut psbt, /* options */)?;
 let funding_txid = broadcast_via_chain_source(&psbt)?;
 journal.set_deposit_funding_txid(id, funding_txid).await?;
 
-// ---- watcher: bounded loop; a non-paying user must not hang the task ----
+// ---- watcher: bounded loop; Aborted is handled INSIDE the loop ----
 //      DEPOSIT_WATCH_TIMEOUT is a liveness bound, not a semantic deadline.
 const DEPOSIT_WATCH_TIMEOUT: Duration = Duration::from_secs(600);
 let mut backoff = Duration::from_secs(1);
-let (final_state, next_position) = loop {
+let mut position = position;               // cursor advanced on Aborted
+let next_position;
+loop {
     match timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await {
-        Ok(Ok((state, next))) => break (state, next),
-        Ok(Err(err)) => match classify_error(&err) {   // same rules as §4.3
+        Ok(Ok((FinalReceiveOperationState::Success, next))) => {
+            next_position = next;
+            break;
+        }
+        Ok(Ok((FinalReceiveOperationState::Aborted, next))) => {
+            journal.set_deposit_aborted(id, next).await?; // stays AddressShown; persists next_position
+            position = next;                              // advance the cursor
+            sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(60));
+            continue;
+        }
+        Ok(Err(err)) => match classify_error(&err) {      // same rules as §4.3
             ErrorClass::Transient => {
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -353,29 +366,20 @@ let (final_state, next_position) = loop {
         Err(_elapsed) => {
             sleep(backoff).await;          // small exponential backoff
             backoff = (backoff * 2).min(Duration::from_secs(60));
-            continue;                      // stay AddressShown; persist nothing new
+            continue;                      // stay AddressShown; same position
         }
     }
-};
-journal.set_deposit_next_position(id, next_position).await?;
-match final_state {
-    FinalReceiveOperationState::Success => {
-        // outpoint/gross/claim_fee from ReceiveMeta.outpoint / .value / .fee
-        let (outpoint, gross, claim_fee) = claim_figures(id).await?;
-        match journal.claim_bind(federation_id, outpoint, id).await? {
-            BindResult::Bound => {
-                journal.finish_deposit(id, outpoint, gross, claim_fee).await?; // Done + one credit
-            }
-            BindResult::TakenBy(other) => {
-                // adoption already credited this outpoint on `other`
-                journal.close_deposit_done(id).await?; // Done; no second row / no second credit
-            }
-        }
+}
+journal.set_deposit_next_position(id, next_position).await?;   // persisted on Success and Aborted
+// Success arm: claim_bind exactly as written
+let (outpoint, gross, claim_fee) = claim_figures(id).await?;
+match journal.claim_bind(federation_id, outpoint, id).await? {
+    BindResult::Bound => {
+        journal.finish_deposit(id, outpoint, gross, claim_fee).await?; // Done + one credit
     }
-    FinalReceiveOperationState::Aborted => {
-        // rejected claim: reprocessed under a new receive op; never credit here
-        journal.set_deposit_aborted(id, next_position).await?; // stays AddressShown
-        // re-enter await_receive(next_position) with bounded backoff
+    BindResult::TakenBy(other) => {
+        // adoption already credited this outpoint on `other`
+        journal.close_deposit_done(id).await?; // Done; no second row / no second credit
     }
 }
 
