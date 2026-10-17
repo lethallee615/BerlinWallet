@@ -6,12 +6,13 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet};
 use berlin_wallet_core::client::{build_client, client_db, min_withdrawal_sat, open_rocksdb};
-use berlin_wallet_core::journal::Journal;
+use berlin_wallet_core::journal::{Journal, WithdrawalState};
 use berlin_wallet_core::network::client_network;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::{deposit, withdrawal};
+use bitcoin::hashes::Hash as _;
 use bitcoin::{Amount, Network};
 use fedimint_client::Client;
 use fedimint_client::RootSecret;
@@ -98,6 +99,7 @@ fn print_help() {
     println!();
     println!("interactive commands:");
     println!("  balance                             BDK balance");
+    println!("  ecash-balance                       federation BTC ecash balance");
     println!("  address                             reveal the next BDK address");
     println!("  min                                 federation minimum withdrawal (sat)");
     println!("  request-deposit <sat>               request a deposit address");
@@ -107,6 +109,7 @@ fn print_help() {
     println!("  request-withdraw <address> <sat>    create a withdrawal row");
     println!("  send-withdraw <withdrawal-id>       quote + send an existing row");
     println!("  cancel-withdraw <withdrawal-id>     cancel a Quoting row");
+    println!("  list-withdrawals                    list withdrawal rows");
     println!("  withdraw <address> <sat>            request + send in one step");
     println!("  status <id>                         print a deposit or withdrawal row");
     println!("  sync                                run one BDK Esplora sync");
@@ -211,6 +214,11 @@ async fn run(
                 println!("{}", wallet.lock().await.balance());
                 Ok(())
             }
+            "ecash-balance" => {
+                let balance = client.get_balance_for_unit(AmountUnit::BITCOIN).await?;
+                println!("{} msat ({} sat)", balance.msats, balance.msats / 1000);
+                Ok(())
+            }
             "address" => {
                 println!("{}", wallet.lock().await.reveal_destination()?);
                 Ok(())
@@ -265,6 +273,22 @@ async fn run(
                     .cancel_withdrawal(&WithdrawalId(id.to_owned()))
                     .await?;
                 println!("cancel result: {result:?}");
+                Ok(())
+            }
+            "list-withdrawals" => {
+                let states = [
+                    WithdrawalState::Quoting,
+                    WithdrawalState::Submitted,
+                    WithdrawalState::Broadcast {
+                        txid: bitcoin::Txid::all_zeros(),
+                    },
+                    WithdrawalState::Refunded,
+                    WithdrawalState::Failed,
+                    WithdrawalState::Cancelled,
+                ];
+                for row in journal.withdrawals_in(&states).await? {
+                    println!("{} {:?} {}", row.id.0, row.state, row.value);
+                }
                 Ok(())
             }
             "withdraw" => {

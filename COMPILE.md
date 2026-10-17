@@ -923,11 +923,12 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
 
 - `init` — create/open the BIP39 mnemonic and SQLite BDK wallet, print a regtest address/balance.
 - `join <invite>` — build a client, print federation id, wallet network, and minimum withdrawal.
-- `run <invite> [esplora-url]` — interactive session with `balance`, `address`, `min`,
-  `request-deposit <sat>`, `fund-deposit <id>`, `deposit <sat>` (both steps), `watch <id>`,
-  `request-withdraw <address> <sat>`, `send-withdraw <id>`, `withdraw <address> <sat>` (both
-  steps), `status <id>`, `sync`, `quit`.
-- Data dir: `$BERLIN_WALLET_DATA_DIR` or `.berlin-wallet`; network is fixed to regtest.
+- `run <invite> [esplora-url]` — interactive session with `balance`, `ecash-balance`, `address`,
+  `min`, `request-deposit <sat>`, `fund-deposit <id>`, `deposit <sat>` (both steps), `watch <id>`,
+  `request-withdraw <address> <sat>`, `send-withdraw <id>`, `cancel-withdraw <id>`, `withdraw
+  <address> <sat>` (both steps), `list-withdrawals`, `status <id>`, `sync`, `quit`.
+- Data dir: `$BERLIN_WALLET_DATA_DIR` or `.berlin-wallet`; `run` uses the chain-id-derived network,
+  `init` defaults to regtest.
 - Persistence: `open_database` (`main.rs`) calls `client::open_rocksdb(<data-dir>/fedimint.rocksdb)`.
   Journal and client state share that RocksDB under `[0x00]` / `[0x01] ++ u32_le(0)`. On restart,
   `build_client` sees `Client::get_config_from_db(&db)` and calls `ClientBuilder::open` instead of
@@ -1319,63 +1320,108 @@ The live federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`. The client now
 
 ---
 
-## 25. Mutinynet round-trip attempt: faucet auth is the blocker
+## 25. Mutinynet round trip: completed
 
-The join and module family are fixed (`9fe9a7a`); the remaining blocker is obtaining signet BTC.
+### 25.1 Funding
 
-### 25.1 Wallet address
-
-Current BDK address from the joined data dir:
+Faucet API auth remained blocked (`/api/onchain` → `{"error":"Missing token"}`; GitHub device flow
+kept returning `authorization_pending`). The user funded the shared BIP84 BDK address externally:
 
 ```text
 tb1qnlyj5pq3wfvhh969c5rtpe373tqdmy6stym9vt
 ```
 
-Faucet request:
+Funding transaction:
 
 ```text
-POST https://faucet.mutinynet.com/api/onchain
-{"sats":100000,"address":"tb1qnlyj5pq3wfvhh969c5rtpe373tqdmy6stym9vt"}
+txid: ec47201728e440b04a79f97978213ed31772281d9f87b6e663de04c3edea474b
+status: confirmed, block 3514048
+vout: 100000 sat to tb1qnlyj5pq3wfvhh969c5rtpe373tqdmy6stym9vt
 ```
 
-Exact response:
+BDK after sync: `confirmed: 0.00100000 BTC`.
+
+### 25.2 Deposit: Done
+
+Commands:
 
 ```text
-HTTP/2 401
-{"error":"Missing token"}
+deposit 50000
+watch 01a14b81-efbf-7113-9673-efcd0d024fba
+ecash-balance
+balance
 ```
 
-### 25.2 Device-flow auth
-
-The faucet requires GitHub OAuth or an L402 mainnet Lightning payment. GitHub device flow was
-started twice:
+Exact key output:
 
 ```text
-GET  https://faucet.mutinynet.com/auth/github/client_id
-POST https://github.com/login/device/code
-POST https://github.com/login/oauth/access_token (device_code poll)
+deposit 01a14b81-efbf-7113-9673-efcd0d024fba state=AddressShown address=Some("tb1qen7rhvlway2w3q7w6ktykd5g3wz5780jkp5f67c4zkqfdw6wjj3snydtvm")
+funding txid: 6db9c9637416547d209fa4451af68de454eb7dc4fe920f7bf1eb601cacea4aaa
+state: Done
+next_position: EventLogId(2)
+funding_outpoint: 6db9c963...:0
+claim_fee: 324 SAT
+gross_deposited: 50000 SAT
+net_credit: 49676000msat
+ecash-balance: 49570304 msat (49570 sat)
+BDK: { confirmed: 0.00049847 BTC }
 ```
 
-The user approved the displayed codes, but GitHub kept returning:
+Funding transaction vouts:
 
-```json
-{"error":"authorization_pending","error_description":"The authorization request is still pending."}
+```text
+tb1qen7rhvlway2w3q7w6ktykd5g3wz5780jkp5f67c4zkqfdw6wjj3snydtvm  50000
+tb1qtxnylczcl9tflxn6ju42c8ttn075ugck670w5p                     49847
+status: confirmed, block 3514050
 ```
 
-The first device code then returned `expired_token`; the second remained `authorization_pending`
-through repeated polls. Without a token, the faucet rejects `/api/onchain` with `{"error":"Missing
-token"}`. L402 requires a mainnet Lightning payment, which this harness cannot make.
+The deposit row reached `Done`. The ecash balance is **105,696 msat lower** than
+`net_credit` (49,676,000 vs 49,570,304 msat); this is the observed post-claim balance, recorded
+without rounding it into the row.
 
-### 25.3 Consequence for deposit/withdrawal
+### 25.3 Withdrawal: Broadcast
 
-No signet BTC arrived, so no balance transitioned:
+A stale `Quoting` row from the pre-funding attempts was cancelled first:
 
-- Deposit: `AddressShown`; `fund_deposit` fails at
-  `bdk_wallet-3.2.0/src/wallet/coin_selection.rs:138` with
-  `Insufficient funds: 0 BTC available of 0.00050054 BTC needed`.
-- Withdrawal: `send_fee_quote` fails with `Insufficient funds` at
-  `fedimint-mintv2-client/src/lib.rs:503`.
-- No `Done` deposit, no `Broadcast` withdrawal, and no txid to report.
+```text
+cancel-withdraw 01a14b84-5609-7419-a0e9-213e1743f690
+cancel result: Applied
+```
 
-This is a funding/authentication blocker, not a wallet-code failure. Once the faucet token or an
-already-funded Mutinynet address is available, the same `run` session can complete the round trip.
+Then:
+
+```text
+withdraw tb1qav6qxadyxh3pcndq788fzk79njhwvc3eycmgkf 10000
+```
+
+Exact key output:
+
+```text
+withdrawal 01a14c06-0327-77b5-948a-eed900a8055d
+value: 10000 SAT
+quote: input 800msat, output 100600msat, dust 360msat
+state: Broadcast { txid: 70a3f0c5807264b2877abe703967c975c5d10d32108da009d676fd1e18c0d6b6 }
+txid: 70a3f0c5807264b2877abe703967c975c5d10d32108da009d676fd1e18c0d6b6
+ecash-balance: 39234560 msat (39234 sat)
+```
+
+On-chain status:
+
+```text
+txid: 70a3f0c5807264b2877abe703967c975c5d10d32108da009d676fd1e18c0d6b6
+confirmed: true, block 3514059
+vouts: tb1qav6qxadyxh3pcndq788fzk79njhwvc3eycmgkf 10000
+       tb1qancqrg42fqrl62294qp3cydr08ds892lyshff6p2wkjs33m7s5aqu3tnqv 1139104
+```
+
+BDK after sync: `confirmed: 0.00059847 BTC` — exactly +10,000 sat from the withdrawal output.
+
+Ecash drop: `49,570,304 - 39,234,560 = 10,335,744 msat` = 10,000 sat value + 233.984 sat
+on-chain fee + 101.76 sat federation quote. The on-chain fee is not persisted in the withdrawal
+row; the quote is.
+
+### 25.4 Result
+
+Deposit and withdrawal both completed on Mutinynet. No failures occurred after funding; the only
+remaining faucet issue is automated OAuth, which was bypassed by the user funding the address
+directly.

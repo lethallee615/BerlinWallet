@@ -113,6 +113,7 @@ cargo check   # -> exit 0
 // berlin-wallet-core/src/client.rs
 use fedimint_client::{Client, ClientBuilder, ClientHandle, ClientHandleArc, RootSecret};
 use fedimint_client::module::module::init::ClientModuleInit; // real path (VERIFY.md §2)
+use fedimint_mintv2_client::MintClientInit as Mintv2ClientInit;
 use fedimint_walletv2_client::WalletClientInit;               // walletv2 (VERIFY.md §8)
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
