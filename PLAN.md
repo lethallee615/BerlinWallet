@@ -217,10 +217,13 @@ Steps:
    `{ id, federation_id, position, amount, state = AwaitingAddress }` **before** calling `receive()`.
 3. **Asynchronously** call `let addr = module.receive().await;` with a **120 s** bound and retry on
    timeout (#9205) up to `MAX_ADDRESS_ATTEMPTS` (5). Persist `{ address = addr, state =
-   AddressShown }` **before** exposing it via `deposit_status(id)`. The background address task
-   **stops at `AddressShown`**; it does not fund. If the retry budget is exhausted, set
-   `state = Failed` with `last_error` and release the single-flight invariant. The FFI caller is
-   not blocked (see §6).
+   AddressShown }` **before** exposing it via `deposit_status(id)`, **conditionally**: the write
+   applies only if the row is still `AwaitingAddress`. `cancel_deposit` may have set it `Cancelled`
+   while `receive()` was in flight; in that case the task writes nothing, returns, and **does not
+   spawn a watcher** (the row stays `Cancelled`, the single-flight slot stays free). The background
+   address task **stops at `AddressShown`**; it does not fund. If the retry budget is exhausted,
+   `set_deposit_failed` is likewise conditional on `AwaitingAddress`. The FFI caller is not blocked
+   (see §6).
    **Steps 4–5 run inside `fund_deposit(id)`**, not in the background address task; the background
    task still stops at `AddressShown`.
 4. **Inside `fund_deposit(id)`: quote the deposit fee and show the net before funding**:
@@ -256,8 +259,10 @@ Steps:
      **without** inserting a second claim row and **without** a second credit (R's credit fields
      stay empty; the credit lives on `other`).
 
-   **`next_position` is the resume cursor and is persisted on both `Success` and `Aborted`**; boot
-   resumes with `COALESCE(next_position, position)`.
+   **`next_position` is the resume cursor and is persisted on both `Success` and `Aborted`**, but
+   by different calls: `set_deposit_aborted` owns it on the `Aborted` path;
+   `set_deposit_next_position` owns it on the `Success` path (after the loop). Never both for the
+   same resolution. Boot resumes with `COALESCE(next_position, position)`.
 8. **Boot reconciliation (mandatory), two passes:**
    a. **Resume open rows:** for every row in `AwaitingAddress`/`AddressShown`, resume the address/
       claim steps from **`COALESCE(next_position, position)`** — `await_receive` advances past a
@@ -310,14 +315,24 @@ let address = loop {
         Err(_elapsed) => {
             attempts += 1;
             if attempts >= MAX_ADDRESS_ATTEMPTS {
-                journal.fail_deposit(id, "receive() timed out"); // Failed; releases invariant
+                // conditional: never resurrect a Cancelled row
+                journal
+                    .fail_deposit_if(id, DepositState::AwaitingAddress, "receive() timed out")
+                    .await?;
                 return Ok(());
             }
             // stay AwaitingAddress; see #9205
         }
     }
 };
-journal.set_deposit_address(id, &address, DepositState::AddressShown).await?;
+// conditional write: cancel_deposit may have won the race while receive() was in flight
+match journal
+    .set_deposit_address_if(id, &address, DepositState::AwaitingAddress)
+    .await?
+{
+    Applied => { /* row is AddressShown; spawn the watcher (stops at AddressShown) */ }
+    Skipped => return Ok(()),   // row is Cancelled; write nothing, spawn no watcher
+}
 // The background address task stops here. Funding is a separate caller action.
 
 // ---- fund_deposit(id): caller-invoked; quote -> show net -> fund ----
@@ -370,7 +385,8 @@ loop {
         }
     }
 }
-journal.set_deposit_next_position(id, next_position).await?;   // persisted on Success and Aborted
+// Success only: set_deposit_aborted already persisted the cursor on Aborted.
+journal.set_deposit_next_position(id, next_position).await?;
 // Success arm: claim_bind exactly as written
 let (outpoint, gross, claim_fee) = claim_figures(id).await?;
 match journal.claim_bind(federation_id, outpoint, id).await? {
@@ -420,19 +436,25 @@ Steps:
 3. **Re-quote immediately before `send()`** (#9098): call `send_fee()` and `send_fee_quote(value)`
    again, compare with the persisted `chain_fee`/`quote`, and return a `QuoteChanged` error on any
    mismatch — do **not** call `send()` on drift.
-4. `let operation_id = module.send(address, value, fee, custom_meta).await?;`
+4. `match module.send(address, value, fee, custom_meta).await { … }`
    (`WalletClientModule::send(&self, address: Address<NetworkUnchecked>, value: bitcoin::Amount,
    fee: Option<bitcoin::Amount>, custom_meta: serde_json::Value)
    -> Result<OperationId, SendError>`)
-   Persist `operation_id` **immediately** and set `state = Submitted`. Put our idempotency key into
-   `custom_meta` (`{"id": "<id>"}`) so `SendMeta.custom_meta` carries it through the operation log.
-5. Await:
-   `match module.await_final_send_operation_state(operation_id).await? { … }`
-   - `FinalSendOperationState::Success(txid)` → persist `txid`, `state = Broadcast`
-   - `FinalSendOperationState::Aborted` → `state = Refunded` (funding rejected; value is spendable
-     again — **re-credit**)
-   - `FinalSendOperationState::Failure` → `state = Failed` (programming error / malicious
+   - `Ok(operation_id)` → persist **immediately**, set `state = Submitted`. Put our idempotency key
+     into `custom_meta` (`{"id": "<id>"}`) so `SendMeta.custom_meta` carries it through the
+     operation log.
+   - `Err(e)` → classify (§4.3): permanent (`WrongNetwork`, `DustValue`, `UnsupportedAddress`,
+     `InsufficientFunds`) → `set_withdrawal_failed(id, &e)` and release the invariant; transient
+     (`NoConsensusFeerateAvailable`, `FederationError(_)`) → stay `Quoting`, surface the error, and
+     let boot retry.
+5. Await: `match module.await_final_send_operation_state(operation_id).await { … }`
+   - `Ok(FinalSendOperationState::Success(txid))` → persist `txid`, `state = Broadcast`
+   - `Ok(FinalSendOperationState::Aborted)` → `state = Refunded` (funding rejected; value is
+     spendable again — **re-credit**)
+   - `Ok(FinalSendOperationState::Failure)` → `state = Failed` (programming error / malicious
      federation; surface an error, do not silently retry)
+   - `Err(e)` → classify (§4.3): transient → stay `Submitted`, retry on boot; permanent →
+     `set_withdrawal_failed(id, &e)` and surface.
 6. **On boot:** for every non-terminal row with an `operation_id`, re-await
    `await_final_send_operation_state(operation_id)`. **Never re-call `send()`** for the same `id`;
    the persisted `operation_id` is the dedup anchor.
@@ -457,21 +479,43 @@ if fresh_fee != chain_fee || fresh_quote != quote {
     return Err(PegError::QuoteChanged { quoted: quote, current: fresh_quote });
 }
 
-// 4. submit once; persist the operation id immediately
+// 4. submit once; persist the operation id immediately; classify SendError (§4.3)
 // BDK gives a checked address; send() takes Address<NetworkUnchecked>.
 let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
     bdk_address.into_unchecked();
 let custom_meta = serde_json::json!({ "id": id });
-let operation_id = module
-    .send(destination, value, Some(fresh_fee), custom_meta)
-    .await?;
-journal.set_withdrawal_operation_id(id, operation_id, WithdrawalState::Submitted).await?;
+let operation_id = match module.send(destination, value, Some(fresh_fee), custom_meta).await {
+    Ok(op) => {
+        journal.set_withdrawal_operation_id(id, op, WithdrawalState::Submitted).await?;
+        op
+    }
+    Err(e) => match classify_error(&e) {
+        ErrorClass::Permanent => {
+            journal.set_withdrawal_failed(id, &e).await?; // Failed; releases invariant
+            return Err(e.into());
+        }
+        ErrorClass::Transient => {
+            // stay Quoting; boot retries the scan/quote/send
+            return Err(e.into());
+        }
+    },
+};
 
-// 5. final state
-match module.await_final_send_operation_state(operation_id).await? {
-    FinalSendOperationState::Success(txid) => journal.set_broadcast(id, txid).await?,
-    FinalSendOperationState::Aborted        => journal.set_refunded(id).await?,
-    FinalSendOperationState::Failure        => journal.set_failed(id).await?,
+// 5. final state; classify transport errors (§4.3)
+match module.await_final_send_operation_state(operation_id).await {
+    Ok(FinalSendOperationState::Success(txid)) => journal.set_broadcast(id, txid).await?,
+    Ok(FinalSendOperationState::Aborted)        => journal.set_refunded(id).await?,
+    Ok(FinalSendOperationState::Failure)        => journal.set_failed(id).await?,
+    Err(e) => match classify_error(&e) {
+        ErrorClass::Transient => {
+            // stay Submitted; boot re-awaits by operation_id
+            return Err(e.into());
+        }
+        ErrorClass::Permanent => {
+            journal.set_withdrawal_failed(id, &e).await?; // Failed; releases invariant
+            return Err(e.into());
+        }
+    },
 }
 ```
 
@@ -546,10 +590,15 @@ Transient errors do **not** advance the state: the row stays `AwaitingAddress`/`
   `FederationError(_)` are transient and stay `Quoting` for a boot retry.
 - `Cancelled`/`Failed` fall outside the partial-unique indexes, so they release the single-flight
   invariant and unblock the next request.
+- **Conditional terminal writes:** `set_deposit_address` (`AwaitingAddress → AddressShown`) and
+  `set_deposit_failed` (`AwaitingAddress → Failed`) are apply-if-state-matches in one `dbtx`.
+  `cancel_deposit` may win the race against the in-flight `receive()` task; when it does, the task's
+  write is **skipped**, it writes nothing, and it spawns no watcher. The row stays `Cancelled` and
+  the single-flight slot is free.
 
 `classify_error(&err) -> ErrorClass::{Transient, Permanent}` implements these rules; the deposit
-watcher and the withdrawal `send()` path both use it (they never propagate a raw error past the
-classification).
+watcher and the withdrawal `send()`/final-await paths both use it (they never propagate a raw error
+past the classification).
 
 ### 4.4 Persistence schema
 
@@ -723,6 +772,9 @@ adopted elsewhere.
 - **Deposit liveness:** exhaust `MAX_ADDRESS_ATTEMPTS` and assert `Failed` releases the invariant
   (a new deposit can be created); `cancel_deposit` from `AddressShown` with no `funding_txid`
   releases it; `cancel_deposit` after funding is refused.
+- **Cancel during address task:** cancel a deposit while `receive()` is in flight; assert the row
+  stays `Cancelled`, no `AddressShown`/`Failed` write lands, the single-flight slot is free (a new
+  deposit can be created), and no watcher runs.
 - **Withdrawal liveness:** a fatal `SendError` from `send()` moves `Quoting` → `Failed` and releases
   the invariant; a transient `FederationError` stays `Quoting` and retries on boot;
   `cancel_withdrawal` from `Quoting` releases it and is refused from `Submitted`.
