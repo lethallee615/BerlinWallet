@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -364,6 +364,19 @@ impl Journal {
             row.updated_at = now_ms();
         }
         Ok(BindResult::Bound)
+    }
+
+    pub async fn bound_outpoints(
+        &self,
+        federation_id: &FederationId,
+    ) -> anyhow::Result<BTreeSet<bitcoin::OutPoint>> {
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .claims
+            .keys()
+            .filter(|(fed, _)| fed == federation_id)
+            .map(|(_, outpoint)| *outpoint)
+            .collect())
     }
 
     pub async fn finish_deposit(

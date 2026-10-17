@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use bdk_wallet::signer::SignersContainer;
@@ -6,7 +7,9 @@ use fedimint_client::Client;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
 use fedimint_eventlog::EventLogId;
-use fedimint_walletv2_client::{FinalReceiveOperationState, WalletClientModule};
+use fedimint_walletv2_client::{
+    FinalReceiveOperationState, ReceiveMeta, WalletClientModule, WalletOperationMeta,
+};
 
 use crate::bdk;
 use crate::error::{classify_error, ErrorClass, PegError};
@@ -165,7 +168,7 @@ pub async fn watch_deposit(
         .deposit(id)
         .await?
         .ok_or_else(|| PegError::DepositNotFound(id.0.clone()))?;
-    let claim = scan_receive_claims(client)
+    let claim = scan_receive_claims(client, journal, federation_id)
         .await?
         .into_iter()
         .find(|claim| {
@@ -198,7 +201,7 @@ pub async fn adopt_orphan_claims(
     journal: &Journal,
     federation_id: FederationId,
 ) -> anyhow::Result<()> {
-    for claim in scan_receive_claims(client).await? {
+    for claim in scan_receive_claims(client, journal, federation_id).await? {
         if claim.final_state != FinalReceiveOperationState::Success {
             continue;
         }
@@ -231,18 +234,205 @@ pub async fn adopt_orphan_claims(
     Ok(())
 }
 
-struct OrphanClaim {
-    final_state: FinalReceiveOperationState,
-    operation_id: OperationId,
-    outpoint: Option<bitcoin::OutPoint>,
-    address: Option<String>,
-    address_script: Option<Vec<u8>>,
-    value: bitcoin::Amount,
-    fee: bitcoin::Amount,
+#[derive(Debug, Clone)]
+pub struct OrphanClaim {
+    pub final_state: FinalReceiveOperationState,
+    pub operation_id: OperationId,
+    pub outpoint: Option<bitcoin::OutPoint>,
+    pub address: Option<String>,
+    pub address_script: Option<Vec<u8>>,
+    pub value: bitcoin::Amount,
+    pub fee: bitcoin::Amount,
 }
 
-/// Scan the operation log for walletv2 `Receive` claims. Scaffold stub; the
-/// real implementation pages the operation log and reads each `ReceiveMeta`.
-async fn scan_receive_claims(_client: &Client) -> anyhow::Result<Vec<OrphanClaim>> {
-    anyhow::bail!("scan_receive_claims: operation-log scan is not implemented in the scaffold")
+#[derive(Debug, Clone)]
+struct RawClaim {
+    operation_id: OperationId,
+    final_state: Option<FinalReceiveOperationState>,
+    outpoint: Option<bitcoin::OutPoint>,
+    value: bitcoin::Amount,
+    fee: bitcoin::Amount,
+    address: Option<String>,
+    address_script: Option<Vec<u8>>,
+}
+
+fn filter_orphan_claims(
+    raw: Vec<RawClaim>,
+    is_bound: impl Fn(&bitcoin::OutPoint) -> bool,
+) -> Vec<OrphanClaim> {
+    let mut seen = BTreeSet::new();
+    raw.into_iter()
+        .filter_map(|claim| {
+            if claim.final_state != Some(FinalReceiveOperationState::Success) {
+                return None;
+            }
+            let outpoint = claim.outpoint?;
+            if !seen.insert(outpoint) || is_bound(&outpoint) {
+                return None;
+            }
+            Some(OrphanClaim {
+                final_state: FinalReceiveOperationState::Success,
+                operation_id: claim.operation_id,
+                outpoint: Some(outpoint),
+                address: claim.address,
+                address_script: claim.address_script,
+                value: claim.value,
+                fee: claim.fee,
+            })
+        })
+        .collect()
+}
+
+/// Scan the operation log for walletv2 `Receive` claims whose final state is
+/// `Success` and which no deposit row has bound yet.
+///
+/// - Operations are paged with `OperationLog::paginate_operations_rev`.
+/// - Meta is `WalletOperationMeta::Receive(ReceiveMeta { outpoint, value, fee,
+///   address, .. })`.
+/// - The final state is `OperationLogEntry::try_outcome::<FinalReceiveOperationState>()`;
+///   if the outcome is not cached yet, a bounded 500 ms
+///   `WalletClientModule::await_final_receive_operation_state` check is used.
+/// - `operation_id` is `ChronologicalOperationLogKey::operation_id` (the same
+///   id carried by `ReceivePaymentEvent`).
+pub async fn scan_receive_claims(
+    client: &Client,
+    journal: &Journal,
+    federation_id: FederationId,
+) -> anyhow::Result<Vec<OrphanClaim>> {
+    const PAGE: usize = 256;
+    let log = client.operation_log();
+    let module = client.get_first_module::<WalletClientModule>()?;
+
+    let mut last_seen = None;
+    let mut raw = Vec::new();
+
+    loop {
+        let page = log.paginate_operations_rev(PAGE, last_seen).await;
+        if page.is_empty() {
+            break;
+        }
+
+        for (key, entry) in &page {
+            let Ok(meta) = entry.try_meta::<WalletOperationMeta>() else {
+                continue;
+            };
+            let WalletOperationMeta::Receive(ReceiveMeta {
+                outpoint,
+                value,
+                fee,
+                address,
+                ..
+            }) = meta
+            else {
+                continue;
+            };
+            let Some(outpoint) = outpoint else {
+                continue;
+            };
+
+            let final_state = match entry.try_outcome::<FinalReceiveOperationState>() {
+                Ok(Some(state)) => Some(state),
+                _ => match tokio::time::timeout(
+                    Duration::from_millis(500),
+                    module.await_final_receive_operation_state(key.operation_id),
+                )
+                .await
+                {
+                    Ok(Ok(state)) => Some(state),
+                    _ => None,
+                },
+            };
+
+            let (address, address_script) = match address {
+                Some(address) => {
+                    let checked = address.assume_checked();
+                    (
+                        Some(checked.to_string()),
+                        Some(checked.script_pubkey().as_bytes().to_vec()),
+                    )
+                }
+                None => (None, None),
+            };
+
+            raw.push(RawClaim {
+                operation_id: key.operation_id,
+                final_state,
+                outpoint: Some(outpoint),
+                value,
+                fee,
+                address,
+                address_script,
+            });
+        }
+
+        last_seen = page.last().map(|(key, _)| *key);
+        if page.len() < PAGE {
+            break;
+        }
+    }
+
+    let bound = journal.bound_outpoints(&federation_id).await?;
+    Ok(filter_orphan_claims(raw, |outpoint| bound.contains(outpoint)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::hashes::Hash as _;
+
+    fn outpoint(vout: u32) -> bitcoin::OutPoint {
+        bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0u8; 32]),
+            vout,
+        }
+    }
+
+    fn success(operation_id: OperationId, outpoint: bitcoin::OutPoint) -> RawClaim {
+        RawClaim {
+            operation_id,
+            final_state: Some(FinalReceiveOperationState::Success),
+            outpoint: Some(outpoint),
+            value: bitcoin::Amount::from_sat(10_000),
+            fee: bitcoin::Amount::from_sat(100),
+            address: None,
+            address_script: Some(vec![1, 2, 3]),
+        }
+    }
+
+    #[test]
+    fn filters_successful_unbound_unique_claims() {
+        let a = outpoint(0);
+        let b = outpoint(1);
+        let c = outpoint(2);
+        let d = outpoint(3);
+
+        let op_a = OperationId::new_random();
+        let op_aborted = OperationId::new_random();
+        let op_bound = OperationId::new_random();
+        let op_pending = OperationId::new_random();
+
+        let mut aborted = success(op_aborted, b);
+        aborted.final_state = Some(FinalReceiveOperationState::Aborted);
+
+        let mut pending = success(op_pending, d);
+        pending.final_state = None;
+
+        let raw = vec![
+            success(op_a, a),
+            aborted,
+            success(op_bound, c),
+            pending,
+            success(op_a, a), // duplicate outpoint; must be de-duplicated
+        ];
+
+        let bound: BTreeSet<bitcoin::OutPoint> = [c].into_iter().collect();
+        let orphans = filter_orphan_claims(raw, |outpoint| bound.contains(outpoint));
+
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].operation_id, op_a);
+        assert_eq!(orphans[0].outpoint, Some(a));
+        assert_eq!(orphans[0].value, bitcoin::Amount::from_sat(10_000));
+        assert_eq!(orphans[0].fee, bitcoin::Amount::from_sat(100));
+        assert_eq!(orphans[0].address_script, Some(vec![1, 2, 3]));
+    }
 }

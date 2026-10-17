@@ -251,3 +251,68 @@ Docs: <https://docs.rs/bitcoin/0.32.8/bitcoin/struct.Address.html#method.script_
 `scan_receive_claims` is still a `bail!` stub (no network I/O), but it is now the **only**
 operation-log lookup point: both the watcher Success arm and `adopt_orphan_claims` call it.
 `claim_figures` no longer exists.
+
+---
+
+## 15. `scan_receive_claims` implemented (operation-log scan)
+
+**Supersedes §14.3** — the stub is gone. `cargo check` → EXIT 0; `cargo test -p pegwallet-core
+--lib` → 2 passed (`wire::tests::fee_quote_round_trip`,
+`deposit::tests::filters_successful_unbound_unique_claims`).
+
+### 15.1 Exact APIs (confirmed)
+
+| API | Signature | Location |
+|---|---|---|
+| `Client::operation_log` | `pub fn operation_log(&self) -> &OperationLog` | `fedimint-client-0.12.0/src/client.rs:719` |
+| `OperationLog::paginate_operations_rev` | `pub async fn paginate_operations_rev(&self, limit: usize, last_seen: Option<ChronologicalOperationLogKey>) -> Vec<(ChronologicalOperationLogKey, OperationLogEntry)>` | `fedimint-client-0.12.0/src/oplog.rs:131` |
+| `OperationLog::get_operation` | `pub async fn get_operation(&self, operation_id: OperationId) -> Option<OperationLogEntry>` | `fedimint-client-0.12.0/src/oplog.rs:194` |
+| `OperationLogEntry::operation_module_kind` | `pub fn operation_module_kind(&self) -> &str` | `fedimint-client-module-0.12.0/src/oplog.rs:161` |
+| `OperationLogEntry::try_meta` | `pub fn try_meta<M: DeserializeOwned>(&self) -> Result<M, serde_json::Error>` | `fedimint-client-module-0.12.0/src/oplog.rs:178` |
+| `OperationLogEntry::try_outcome` | `pub fn try_outcome<D: DeserializeOwned>(&self) -> Result<Option<D>, serde_json::Error>` | `fedimint-client-module-0.12.0/src/oplog.rs:207` |
+| `ChronologicalOperationLogKey` | `pub struct { pub creation_time: SystemTime, pub operation_id: OperationId }` | `fedimint-client-0.12.0/src/db.rs:193` |
+| `WalletClientModule::await_final_receive_operation_state` | `pub async fn ...(&self, OperationId) -> anyhow::Result<FinalReceiveOperationState>` | VERIFY §8.2 |
+
+**Trait imports / features:** none for the operation log — `operation_log`, `paginate_operations_rev`,
+`try_meta`, and `try_outcome` are inherent. The only trait import needed is in the unit test:
+`bitcoin::hashes::Hash` (for `Txid::from_byte_array`). No crate feature is required.
+
+### 15.2 Implementation
+
+`crates/pegwallet-core/src/deposit.rs`:
+
+- `pub async fn scan_receive_claims(client, journal, federation_id)` at `:297`.
+- Pages 256 operations at a time via `paginate_operations_rev` (`:310`).
+- Reads `WalletOperationMeta` with `try_meta` (`:316`), then takes
+  `ReceiveMeta { outpoint, value, fee, address, .. }`.
+- Final state from `try_outcome::<FinalReceiveOperationState>()` (`:333`); when the outcome is not
+  cached, a bounded 500 ms `await_final_receive_operation_state` check is used.
+- `operation_id` comes from `ChronologicalOperationLogKey::operation_id` (the same id carried by
+  `ReceivePaymentEvent.operation_id`).
+- `address_script` from `assume_checked().script_pubkey().as_bytes()`; display string kept too.
+- `Journal::bound_outpoints` (`journal.rs:369`) filters already-bound claims.
+- `filter_orphan_claims` (`deposit.rs:259`) keeps only `Success`, de-duplicates outpoints, and drops
+  bound ones.
+- Callers wired at `deposit.rs:171` (watcher Success arm) and `:204` (adoption pass).
+- `bail!` removed; `claim_figures` remains gone.
+
+### 15.3 Signature deviation
+
+The request said `scan_receive_claims(...) -> Vec<OrphanClaim>`; implemented as
+`-> anyhow::Result<Vec<OrphanClaim>>`. A failed operation-log read must not be reported as "no
+orphans" (fund-loss risk); both callers already propagate `Result`. `OrphanClaim` is `pub` with
+`pub` fields (`deposit.rs:238`).
+
+### 15.4 Unit test
+
+`deposit::tests::filters_successful_unbound_unique_claims` (`deposit.rs:403`) builds a fake claim
+set: Success+unbound, Aborted, Success+bound, final-state-unknown, and a duplicate outpoint. It
+asserts exactly one orphan with the expected `operation_id`, outpoint, value, fee, and
+`address_script`.
+
+Docs: <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.operation_log>,
+<https://docs.rs/fedimint-client/0.12.0/fedimint_client/oplog/struct.OperationLog.html#method.paginate_operations_rev>,
+<https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/oplog/struct.OperationLogEntry.html#method.try_meta>,
+<https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/oplog/struct.OperationLogEntry.html#method.try_outcome>,
+<https://docs.rs/fedimint-client/0.12.0/fedimint_client/db/struct.ChronologicalOperationLogKey.html>,
+<https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/struct.WalletClientModule.html#method.await_final_receive_operation_state>.
