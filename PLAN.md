@@ -70,6 +70,7 @@ berlin_wallet/                  # workspace root
 | `tracing` | `=0.1.44` | logging |
 | `async-trait` | `=0.1.88` | async traits (fedimint ecosystem) |
 | `bitcoin` | `=0.32.8` | unified at a single version across fedimint + bdk (see note below) |
+| `bip39` | `=2.2.0` | BIP39 mnemonic/seed generation (direct; do not enable `bdk_wallet` `keys-bip39`) |
 
 Do **not** enable `bdk_wallet`'s `keys-bip39` feature: it requires `bip39 ^2.2.2`, which is not
 published (crates.io index max is `2.2.0`). `bdk_wallet`'s `bdk-tx` feature requires
@@ -126,8 +127,9 @@ pub async fn build_client(
     builder.with_module(MintClientInit);
     builder.with_module(WalletClientInit::default());
     let preview = builder.preview(connectors.clone(), &invite).await?;
-    let client = preview.join(db, root_secret).await?;   // ClientPreview::join -> ClientHandle
-    Ok(Arc::new(client))
+    let client = Arc::new(preview.join(db, root_secret).await?); // -> ClientHandle
+    client.start_executor();                                    // ClientHandle::start_executor(&self)
+    Ok(client)
 }
 ```
 
@@ -135,7 +137,16 @@ Confirmed (VERIFY.md §1): `Client::builder() -> Result<ClientBuilder>`,
 `ClientBuilder::with_module<M: ClientModuleInit>(&mut self, module_init: M)`,
 `ClientBuilder::preview(self, ConnectorRegistry, &InviteCode) -> Result<ClientPreview>`,
 `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`,
-`Client::start_executor(self: &Arc<Self>)`, `Client::spawn_federation_reconnect(&self)`.
+`ClientHandle::start_executor(&self)` (`fedimint-client/src/client/handle.rs:52`) and
+`Client::spawn_federation_reconnect(&self)`.
+
+**Root secret (real path).** `Bip39RootSecretStrategy` is **not published** for fedimint 0.12.0
+(`fedimint-bip39` stops at 0.8.1), so it is not usable. The real types are:
+`fedimint_client_module::secret::{PlainRootSecretStrategy, RootSecretStrategy}` and
+`fedimint_client::RootSecret`. A 12-word BIP39 mnemonic is created with the `bip39` 2.2.0 crate;
+its 64-byte seed goes through `PlainRootSecretStrategy::to_root_secret`, then
+`RootSecret::StandardDoubleDerive`. The BDK wallet uses the **same BIP39 seed** with the standard
+BIP32/BIP84 hierarchy; fedimint salts its own root, so no raw key material is shared.
 
 Storage layout (douglaz `MultiClient`): one `Database`; fedimint client `i` lives at
 `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under `[0x00]` (separate
@@ -469,8 +480,10 @@ A withdrawal is an operation **we initiate**; the federation assigns its `Operat
 
 Steps:
 
-1. `let address = bdk_wallet.reveal_next_address(KeychainKind::External).address;`
-   Persist `{ id, federation_id, address, value, state = Quoting }`.
+1. Take the **caller-supplied destination address** (the UI/user's external
+   on-chain address); the BDK wallet is the peg-in funding source, not the
+   withdrawal destination. Persist `{ id, federation_id, address, value,
+   state = Quoting }`.
    **Before any quote**, read `client::wallet_client_config(client).await?.dust_limit` and reject
    `value < dust_limit` with `PegError::WithdrawalBelowDust`, persisting the row as `Failed`
    (which clears the open index). This mirrors `WalletClientModule::send`'s `DustValue` check but
@@ -506,10 +519,9 @@ Steps:
    the persisted `operation_id` is the dedup anchor.
 
 ```rust
-// 1. destination + row
-let bdk_address = bdk.reveal_next_address(KeychainKind::External).address;
+// 1. destination + row (address comes from the UI/user)
 journal.insert_withdrawal(WithdrawalRow {
-    id, federation_id, address: bdk_address.to_string(), value,
+    id, federation_id, address: destination_address, value,
     state: WithdrawalState::Quoting, ..Default::default()
 }).await?;
 
@@ -533,9 +545,9 @@ if fresh_fee != chain_fee || fresh_quote != quote {
 }
 
 // 4. submit once; persist the operation id immediately; classify SendError (§4.3)
-// BDK gives a checked address; send() takes Address<NetworkUnchecked>.
+// The user's address is parsed as Address<NetworkUnchecked> for send().
 let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-    bdk_address.into_unchecked();
+    destination_address.parse()?;
 let custom_meta = serde_json::json!({ "id": id });
 let operation_id = match module.send(destination, value, Some(fresh_fee), custom_meta).await {
     Ok(op) => {
@@ -720,7 +732,7 @@ CREATE INDEX deposit_requests_state ON deposit_requests (state);
 CREATE TABLE withdrawal_requests (
     id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
     federation_id   BLOB NOT NULL,
-    address         TEXT NOT NULL,             -- BDK reveal_next_address destination
+    address         TEXT NOT NULL,             -- caller-supplied external on-chain destination
     value           INTEGER NOT NULL,          -- sats (bitcoin::Amount)
     fee             INTEGER,                   -- send_fee() result, sats
     quote           BLOB,                      -- FeeQuoteWire (typed serde; FeeQuote has no serde)
@@ -918,27 +930,30 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
 
 ### Task A — BDK chain sync (`sync::bdk_chain_task`)
 
-- Loop: call chain source → obtain an `Update`. For `bdk_esplora` use
-  `bdk_esplora::EsploraAsyncExt::sync` (partial, from `Wallet::start_sync_with_revealed_spks()`) or
-  `EsploraAsyncExt::full_scan` (full, from `Wallet::start_full_scan()`) — there is **no
-  `EsploraClient` type and no `scan` method**. Then `wallet.apply_update(update)` →
-  `wallet.take_staged()` → persist ChangeSet via `WalletPersister` (rusqlite or bdk_file_store).
-- Detect the withdrawal arriving at a BDK address: `wallet.get_tx(txid)`, `wallet.list_unspent()`,
-  `WalletEvent::TxConfirmed` via `apply_update_events`. The federation-side `txid` comes from
-  `FinalSendOperationState::Success(txid)`, not from BDK.
-- Withdrawal completion is owned by `await_final_send_operation_state`; BDK sync only records that
-  the on-chain funds arrived at the destination.
+- `BdkWallet` owns a `PersistedWallet<bdk_chain::rusqlite::Connection>` plus its SQLite persister.
+  It is opened/created with BIP84 descriptors derived from the BIP39 seed at
+  `<data-dir>/bdk.sqlite`.
+- Loop: `wallet.start_sync_with_revealed_spks()` → `EsploraAsyncExt::sync(request, 4)` against the
+  configured URL → `wallet.apply_update(update)` → `wallet.persist(&mut connection)`. There is
+  **no `EsploraClient` type and no `scan` method**.
+- First pass is immediate; later passes use `BDK_SYNC_INTERVAL` (30 s) with ±10% jitter. The task
+  stops on the shared `watch::Receiver<bool>` shutdown signal.
+- Peg-in funding is built/signed and broadcast through the same Esplora URL by
+  `BdkWallet::build_and_finalize`; the journal's `funding_txid` is written only after a successful
+  broadcast.
+- Withdrawal completion is owned by `await_final_send_operation_state`; BDK sync only records the
+  on-chain funding transaction and checkpoint.
 
 ### Task B — Fedimint federation sync (`sync::fedimint_sync_task`)
 
-- `client.spawn_federation_reconnect()` (keeps guardian connections warm).
-- Drive state machines: `client.start_executor()` (executor runs all module state machines in the
-  background).
-- React to events: `client.handle_events(tracker, handler_fn)` or
-  `client.get_event_log_transient_receiver()` — filter the walletv2 `ReceivePaymentEvent` /
-  `ReceivePaymentUpdateEvent` and `SendPaymentEvent` / `SendPaymentUpdateEvent` for UI/progress.
-  **Deposits are observed to completion with `await_receive(position)`; withdrawals with
+- `client.start_executor()` is called once by `client::build_client`; the task calls
+  `client.spawn_federation_reconnect()` to keep guardian connections warm.
+- React to events: `client.get_event_log_transient_receiver()` → `try_recv()` drain on a
+  `FEDIMINT_SYNC_INTERVAL` (30 s) jittered tick; lag/closed receivers are handled without blocking
+  the executor.
+- **Deposits are observed to completion with `await_receive(position)`; withdrawals with
   `await_final_send_operation_state(operation_id)`** — events are supplementary.
+- Stops on the shared `watch::Receiver<bool>` shutdown signal.
 - Balance stream: `client.subscribe_balance_changes(unit)` — **blocked by §8.2** (primary module for BTC unverified).
 
 ### Adoption task (`sync::adoption_task`)
@@ -1095,7 +1110,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 2. BDK wallet wrapper: create/load, `reveal_next_address`, `build_tx`+sign+broadcast, persist, `start_sync_with_revealed_spks` loop.
 3. Journal + the two tables (`deposit_requests`, `withdrawal_requests`), atomic state transitions, boot reconciliation.
 4. Deposit flow: single-flight open row (one per federation) → `get_next_event_log_id()` → async `receive()` (120 s bound) → persist `AddressShown` → BDK funding (`build_tx`/sign/broadcast) → `receive_fee()` → `await_receive(position)` with a real `Success`/`Aborted` match → `Done`; boot resume + `find_claim` reconcile. Concurrent deposits unsupported until #9306.
-5. Withdrawal flow: `reveal_next_address` → `send_fee()` + `send_fee_quote()` → `send()` → persist `operation_id` → `await_final_send_operation_state`; boot re-await only.
+5. Withdrawal flow: parse the caller-supplied destination → `send_fee()` + `send_fee_quote()` → `send()` → persist `operation_id` → `await_final_send_operation_state`; boot re-await only.
 6. Two sync tasks (BDK chain + fedimint federation) sharing the journal; events are UI-only.
 7. `berlin-wallet-ffi` uniffi crate with the `PegWallet` object; generate bindings for one target language as a smoke test.
 

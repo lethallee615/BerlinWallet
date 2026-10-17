@@ -702,3 +702,231 @@ recover (PLAN §4.2).
 - <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/module/init/struct.ClientModuleInitArgs.html>
 - <https://docs.rs/fedimint-core/0.12.0/fedimint_core/config/struct.ClientConfig.html#method.get_first_module_by_kind>
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.config>
+
+---
+
+## 20. Real client, BDK wallet, sync tasks, and CLI harness
+
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (11 core tests + CLI 0 tests).
+The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
+`<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
+`bcrt1...` address.
+
+### 20.1 Client construction (confirmed signatures)
+
+```rust
+// fedimint-client-0.12.0/src/client.rs:304
+pub async fn builder() -> anyhow::Result<ClientBuilder>;
+
+// fedimint-client-0.12.0/src/client/builder.rs:182
+pub fn with_module<M: ClientModuleInit>(&mut self, module_init: M);
+
+// fedimint-client-0.12.0/src/client/builder.rs:396
+pub async fn preview(
+    self,
+    connectors: ConnectorRegistry,
+    invite_code: &InviteCode,
+) -> anyhow::Result<ClientPreview>;
+
+// fedimint-client-0.12.0/src/client/builder.rs:1483
+pub async fn join(
+    self,
+    db_no_decoders: Database,
+    pre_root_secret: RootSecret,
+) -> anyhow::Result<ClientHandle>;
+
+// fedimint-client-0.12.0/src/client/handle.rs:52
+pub fn start_executor(&self);
+```
+
+`client::build_client` (`client.rs:13`) now mirrors the requested order exactly:
+
+```rust
+let mut builder = Client::builder().await?;
+builder.with_module(MintClientInit);
+builder.with_module(WalletClientInit::default());
+let preview = builder.preview(connectors.clone(), &invite).await?;
+let client = Arc::new(preview.join(db, root_secret).await?);
+client.start_executor();
+Ok(client)
+```
+
+`ClientHandleArc = Arc<ClientHandle>`; `start_executor()` is called on the handle (it forwards to
+the inner `Client`). `client_db(&db, db_prefix)` (`client.rs:58`) still supplies
+`[0x01] ++ u32_le(db_prefix)`; `Journal::new(db, vec![0x00])` keeps the app partition separate.
+
+The CLI builds the connector registry with:
+
+```rust
+// fedimint-connectors-0.12.0/src/lib.rs:340, :113
+ConnectorRegistry::build_from_client_defaults() -> ConnectorRegistryBuilder;
+ConnectorRegistryBuilder::bind(self) -> anyhow::Result<ConnectorRegistry>;
+```
+
+and parses the invite with `InviteCode::from_str(&str)` before `builder.preview(...)`.
+
+### 20.2 Root secret: the guessed `Bip39RootSecretStrategy` does not exist
+
+`Bip39RootSecretStrategy` is **not present** in fedimint-client / fedimint-client-module 0.12.0,
+and `fedimint-bip39` is only published through **0.8.1**. The real path is:
+
+```rust
+// fedimint-client-0.12.0/src/client/builder.rs:94; re-exported at lib.rs:107
+pub enum RootSecret {
+    StandardDoubleDerive(DerivableSecret),
+    Custom(DerivableSecret),
+}
+
+// fedimint-client-module-0.12.0/src/secret.rs:54
+pub trait RootSecretStrategy {
+    type Encoding: Clone;
+    fn to_root_secret(secret: &Self::Encoding) -> DerivableSecret;
+    ...
+}
+
+// fedimint-client-module-0.12.0/src/secret.rs:80
+pub struct PlainRootSecretStrategy;
+// Encoding = [u8; 64]
+```
+
+The scaffold adds `bip39 = "=2.2.0"` only to generate/parse a 12-word mnemonic
+(`Mnemonic::generate(12)`, `Mnemonic::to_seed("") -> [u8; 64]`). It does **not** enable
+`bdk_wallet`'s `keys-bip39` feature. `seed.rs` does:
+
+```rust
+RootSecret::StandardDoubleDerive(PlainRootSecretStrategy::to_root_secret(&seed64))
+```
+
+**Seed sharing decision:** the BIP39 seed is shared between fedimint and BDK, but the derivations
+are domain-separated: fedimint hashes it through `PlainRootSecretStrategy` (the
+`"Fedimint Client Salt"` root) and then applies its federation derivation; BDK uses the standard
+BIP32/BIP84 hierarchy (`wpkh(master/84'/coin'/0'/0/*)` and `.../1/*`). No raw private key is shared.
+This keeps a single mnemonic backup while avoiding direct key reuse.
+
+### 20.3 BDK wallet and SQLite persistence
+
+```rust
+// bdk_wallet-3.2.0/src/wallet/mod.rs:288
+pub fn create<D>(descriptor: D, change_descriptor: D) -> CreateParams;
+// bdk_wallet-3.2.0/src/wallet/params.rs:158 / :190
+pub fn network(self, network: Network) -> Self;
+pub fn create_wallet<P>(self, persister: &mut P) -> Result<PersistedWallet<P>, ...>
+where P: WalletPersister;
+
+// bdk_wallet-3.2.0/src/wallet/mod.rs:446
+pub fn load() -> LoadParams;
+// bdk_wallet-3.2.0/src/wallet/params.rs:264 / :299
+pub fn descriptor<D>(self, keychain: KeychainKind, expected: Option<D>) -> Self;
+pub fn check_network(self, network: Network) -> Self;
+// bdk_wallet-3.2.0/src/wallet/persisted.rs:173
+pub fn load(persister: &mut P, params: LoadParams)
+    -> Result<Option<PersistedWallet<P>>, ...>;
+// bdk_wallet-3.2.0/src/wallet/persisted.rs:193
+pub fn persist(&mut self, persister: &mut P) -> Result<bool, P::Error>;
+
+// bdk_wallet-3.2.0/src/lib.rs:48
+pub use bdk_chain::rusqlite;
+// bdk_wallet-3.2.0/src/wallet/persisted.rs:283
+impl WalletPersister for bdk_chain::rusqlite::Connection;
+```
+
+`bdk::BdkWallet` (`bdk.rs:50`) uses `rusqlite::Connection` at `<data-dir>/bdk.sqlite`
+(`BDK_DB_FILE`, `bdk.rs:13`), creates with BIP84 descriptors and loads with the same descriptor
+checks. The descriptors are derived from `Xpriv::new_master(network, seed)`
+(`bitcoin-0.32.8/src/bip32.rs:576`).
+
+Signing/recording uses:
+
+```rust
+// bdk_wallet-3.2.0/src/wallet/mod.rs:671, :1272, :1884, :2749
+Wallet::reveal_next_address(KeychainKind::External);
+Wallet::build_tx();
+Wallet::sign_with_signers(&mut psbt, &[&ext, &int], SignOptions::default());
+Wallet::apply_unconfirmed_txs([(tx, last_seen)]);
+```
+
+`BdkWallet::build_and_finalize` (`bdk.rs:121`) is async: it signs/finalizes, **broadcasts through
+the configured Esplora URL**, then records the tx and persists. `reveal_destination` persists the
+new address index immediately (`bdk.rs:111`).
+
+### 20.4 Esplora chain source
+
+```rust
+// bdk_esplora-0.22.1/src/async_ext.rs:47
+async fn sync<I: Send, R: Into<SyncRequest<I>> + Send>(
+    &self,
+    request: R,
+    parallel_requests: usize,
+) -> Result<SyncResponse, Error>;
+
+// bdk_wallet-3.2.0/src/wallet/mod.rs:2983, :2459
+Wallet::start_sync_with_revealed_spks() -> SyncRequestBuilder<(KeychainKind, u32)>;
+Wallet::apply_update(update: impl Into<Update>) -> Result<(), CannotConnectError>;
+
+// esplora-client-0.12.3/src/lib.rs:190
+Builder::new(base_url).build_async() -> Result<AsyncClient, Error>;
+// esplora-client-0.12.3/src/async.rs:375
+AsyncClient::broadcast(&transaction) -> Result<(), Error>;
+```
+
+`BdkWallet::sync` (`bdk.rs:150`) does a **partial** sync over revealed scripts, applies the update,
+and persists. Sync and broadcast are each bounded by `ESPLORA_TIMEOUT = 30 s` (`bdk.rs:16`). It does
+not perform a full gap scan; a restored wallet with unknown historical addresses would need
+`full_scan`/`start_full_scan` added. The CLI defaults to regtest and `http://127.0.0.1:3002`
+(`main.rs`).
+
+### 20.5 Sync tasks
+
+- `sync::bdk_chain_task(wallet: Arc<Mutex<BdkWallet>>, shutdown: watch::Receiver<bool>)`
+  (`sync.rs:58`): immediate first pass, then `BDK_SYNC_INTERVAL = 30 s` with ±10% jitter; logs and
+  retries errors; exits on shutdown.
+- `sync::fedimint_sync_task(client: ClientHandleArc, shutdown: watch::Receiver<bool>)`
+  (`sync.rs:84`): calls `client.spawn_federation_reconnect()`, then drains
+  `client.get_event_log_transient_receiver()` on a `FEDIMINT_SYNC_INTERVAL = 30 s` jittered tick;
+  handles `Empty`/`Lagged`/`Closed`; exits on shutdown.
+- `sync::adoption_task` keeps its existing 60 s schedule and shutdown handling.
+
+### 20.6 CLI harness
+
+`crates/berlin-wallet-cli` (binary `berlin-wallet`) is a manual-run harness:
+
+- `init` — create/open the BIP39 mnemonic and SQLite BDK wallet, print a regtest address/balance.
+- `join <invite>` — build a client, print federation id, wallet network, and minimum withdrawal.
+- `run <invite> [esplora-url]` — interactive session with `balance`, `address`, `min`,
+  `request-deposit <sat>`, `fund-deposit <id>`, `deposit <sat>` (both steps), `watch <id>`,
+  `request-withdraw <address> <sat>`, `send-withdraw <id>`, `withdraw <address> <sat>` (both
+  steps), `status <id>`, `sync`, `quit`.
+- Data dir: `$BERLIN_WALLET_DATA_DIR` or `.berlin-wallet`; network is fixed to regtest.
+
+**Deviation / not production-ready:** the fedimint `Database` remains caller-supplied and the CLI
+uses `fedimint_core::db::mem_impl::MemDatabase` (`mem_impl.rs:36`; source note says test-only, not
+a proper MVCC implementation) because no 0.12.0 RocksDB/SQLite backend is published. Journal and
+fedimint client state are therefore **per-process** in the CLI; only the BDK wallet and mnemonic
+persist across runs. A production host must supply a real `Database` backend through
+`client::build_client` + `client_db`/`Journal::new`; the core accepts any `Database`.
+
+Also, the plan's withdrawal step originally revealed a BDK address as the destination. That was
+wrong for the product flow; `request_withdrawal` now takes a caller-supplied address
+(`withdrawal.rs:19`) and `send_withdrawal` parses it (`withdrawal.rs:54`). The BDK wallet remains
+the peg-in funding source.
+
+### 20.7 Docs links
+
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.builder>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientBuilder.html#method.with_module>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientBuilder.html#method.preview>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientPreview.html#method.join>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientHandle.html#method.start_executor>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/enum.RootSecret.html>
+- <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/secret/trait.RootSecretStrategy.html>
+- <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/secret/struct.PlainRootSecretStrategy.html>
+- <https://docs.rs/fedimint-connectors/0.12.0/fedimint_connectors/struct.ConnectorRegistry.html#method.build_from_client_defaults>
+- <https://docs.rs/bdk_wallet/3.2.0/bdk_wallet/struct.Wallet.html#method.create>
+- <https://docs.rs/bdk_wallet/3.2.0/bdk_wallet/struct.PersistedWallet.html>
+- <https://docs.rs/bdk_wallet/3.2.0/bdk_wallet/struct.Wallet.html#method.start_sync_with_revealed_spks>
+- <https://docs.rs/bdk_esplora/0.22.1/bdk_esplora/trait.EsploraAsyncExt.html#method.sync>
+- <https://docs.rs/esplora-client/0.12.3/esplora_client/struct.AsyncClient.html#method.broadcast>
+- <https://docs.rs/bdk_chain/0.23.3/bdk_chain/rusqlite/struct.Connection.html>
+- <https://docs.rs/bitcoin/0.32.8/bitcoin/bip32/struct.Xpriv.html#method.new_master>
+- <https://docs.rs/bip39/2.2.0/bip39/struct.Mnemonic.html>
+- <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/mem_impl/struct.MemDatabase.html>

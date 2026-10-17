@@ -12,6 +12,7 @@ pub mod error;
 pub mod journal;
 mod journal_db;
 pub mod ops;
+pub mod seed;
 pub mod sync;
 pub mod wire;
 pub mod withdrawal;
@@ -23,4 +24,5 @@ pub use journal::{
     JournalBackend, WithdrawalRow, WithdrawalState,
 };
 pub use ops::{DepositId, WithdrawalId};
+pub use seed::{load_or_create_mnemonic, mnemonic_seed, root_secret_from_mnemonic};
 pub use wire::FeeQuoteWire;

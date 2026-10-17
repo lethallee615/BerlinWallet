@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use bdk_wallet::signer::SignersContainer;
-use bdk_wallet::Wallet;
 use fedimint_client::db::ChronologicalOperationLogKey;
 use fedimint_client::Client;
 use fedimint_core::config::FederationId;
@@ -87,15 +85,15 @@ pub async fn run_address_task(
 
 /// Idempotently fund a deposit from the BDK wallet.
 ///
-/// Quote -> show net -> fund: `receive_fee()` is read before `build_tx`.
-/// No network I/O is performed by this scaffold; it returns the finalized
-/// transaction id for the caller's chain source.
+/// Quote -> show net -> build/sign/broadcast through the configured Esplora
+/// URL. The journal's `funding_txid` is only written after a successful
+/// broadcast, so a failed broadcast can be retried without a second journal
+/// write.
 pub async fn fund_deposit(
     journal: &Journal,
     module: &WalletClientModule,
-    wallet: &mut Wallet,
+    wallet: &mut bdk::BdkWallet,
     id: &DepositId,
-    signers: &[&SignersContainer],
 ) -> anyhow::Result<bitcoin::Txid> {
     if let Some(txid) = journal.deposit_funding_txid(id).await? {
         return Ok(txid);
@@ -113,7 +111,7 @@ pub async fn fund_deposit(
     let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> = address.parse()?;
     let destination = destination.assume_checked();
 
-    let tx = bdk::build_and_finalize(wallet, &destination, row.amount, signers)?;
+    let tx = wallet.build_and_finalize(&destination, row.amount).await?;
     let txid = tx.compute_txid();
     journal.set_deposit_funding_txid(id, txid).await?;
     Ok(txid)

@@ -24,6 +24,7 @@ bdk_file_store = "=0.22.0"
 bdk_esplora = "=0.22.1"
 bdk_electrum = "=0.23.2"
 bdk_bitcoind_rpc = "=0.22.0"
+bip39 = { version = "=2.2.0", features = ["rand"] }
 bitcoin = { version = "=0.32.8", features = ["serde"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

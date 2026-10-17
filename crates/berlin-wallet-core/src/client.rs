@@ -25,8 +25,9 @@ pub async fn build_client(
 
     let preview = builder.preview(connectors.clone(), &invite).await?;
     // `ClientPreview::join` returns a `ClientHandle`, not a `Client`.
-    let client = preview.join(db, root_secret).await?;
-    Ok(Arc::new(client))
+    let client = Arc::new(preview.join(db, root_secret).await?);
+    client.start_executor();
+    Ok(client)
 }
 
 /// Read the per-federation walletv2 client config from the joined client.

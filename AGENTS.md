@@ -51,9 +51,11 @@ Versions below are verified against the crates.io sparse index + the committed `
 | `tracing` | `=0.1.44` | logging |
 | `async-trait` | `=0.1.88` | async traits |
 | `bitcoin` | `=0.32.8` | unified at a single version across fedimint + bdk |
+| `bip39` | `=2.2.0` | BIP39 mnemonic/seed generation (direct dep; not `bdk_wallet`'s `keys-bip39`) |
 
 Do **not** enable `bdk_wallet`'s `keys-bip39` feature: it requires `bip39 ^2.2.2`, which is not
-published (crates.io index max is `2.2.0`).
+published (crates.io index max is `2.2.0`). The core uses `bip39 =2.2.0` directly for the mnemonic
+and seed only.
 
 **MSRV: 1.91** (effective). `bdk_wallet` advertises 1.85, but `fedimint-connectors 0.12.0` pulls
 `iroh 1.0.3` / `iroh-base 1.3.0` / `netwatch 0.19.3` / `portmapper 0.19.3` / `n0-*`, which all

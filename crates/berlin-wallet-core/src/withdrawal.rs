@@ -1,23 +1,25 @@
 use std::time::Duration;
 
-use bdk_wallet::Wallet;
 use fedimint_client::Client;
 use fedimint_client::module::transaction::FeeQuote;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
 use fedimint_walletv2_client::{FinalSendOperationState, WalletClientModule};
 
-use crate::bdk;
 use crate::client::wallet_client_config;
 use crate::error::{ErrorClass, PegError, classify_error};
 use crate::journal::{Journal, WithdrawalRow};
 use crate::ops::WithdrawalId;
 
-/// Reveal a BDK destination and persist a `Quoting` withdrawal row.
+/// Persist a `Quoting` withdrawal row for a caller-supplied destination.
+///
+/// The destination comes from the user/UI, not from the BDK wallet: the BDK
+/// wallet is the peg-in funding source, while a withdrawal pays out to an
+/// external on-chain address.
 pub async fn request_withdrawal(
     journal: &Journal,
-    wallet: &mut Wallet,
     federation_id: FederationId,
+    address: String,
     value: bitcoin::Amount,
 ) -> anyhow::Result<WithdrawalRow> {
     if let Some(existing) = journal.open_withdrawal(&federation_id).await? {
@@ -27,13 +29,8 @@ pub async fn request_withdrawal(
         );
     }
 
-    let address = bdk::reveal_destination(wallet);
-    let row = WithdrawalRow::new(
-        WithdrawalId::new(),
-        federation_id,
-        address.to_string(),
-        value,
-    );
+    let _: bitcoin::Address<bitcoin::address::NetworkUnchecked> = address.parse()?;
+    let row = WithdrawalRow::new(WithdrawalId::new(), federation_id, address, value);
     journal.insert_withdrawal(&row).await?;
     Ok(row)
 }

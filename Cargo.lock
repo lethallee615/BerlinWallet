@@ -496,7 +496,7 @@ version = "0.1.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "365c0acd5b2e8dd0111a46c4faea83fb3cfb6e39a49a7c73a06e090db7b2eff0"
 dependencies = [
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
 ]
 
 [[package]]
@@ -647,6 +647,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
+name = "berlin-wallet-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "berlin-wallet-core",
+ "bitcoin",
+ "fedimint-client",
+ "fedimint-connectors",
+ "fedimint-core",
+ "fedimint-walletv2-client",
+ "tokio",
+]
+
+[[package]]
 name = "berlin-wallet-core"
 version = "0.1.0"
 dependencies = [
@@ -658,6 +672,7 @@ dependencies = [
  "bdk_esplora",
  "bdk_file_store",
  "bdk_wallet",
+ "bip39",
  "bitcoin",
  "fedimint-client",
  "fedimint-client-module",
@@ -707,6 +722,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bip39"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43d193de1f7487df1914d3a568b772458861d33f9c54249612cc2893d6915054"
+dependencies = [
+ "bitcoin_hashes 0.13.1",
+ "rand 0.8.8",
+ "rand_core 0.6.4",
+ "serde",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "bitcoin"
 version = "0.32.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -718,7 +746,7 @@ dependencies = [
  "bitcoin-internals 0.3.0",
  "bitcoin-io",
  "bitcoin-units",
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
  "hex-conservative 0.2.3",
  "hex_lit",
  "secp256k1",
@@ -768,6 +796,15 @@ checksum = "9cb95693f371d089a4b5b6fc41c6f3ea6e01ee8c15388335dfac8ea685173b51"
 dependencies = [
  "bitcoin-consensus-encoding",
  "serde",
+]
+
+[[package]]
+name = "bitcoin_hashes"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "446819536d8121575eeb7e89efdbadb3f055e87e4bb66c6679a6d5cc2f4b64fd"
+dependencies = [
+ "hex-conservative 0.1.2",
 ]
 
 [[package]]
@@ -2057,7 +2094,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0081c3385121b72d5f5ab7d56cf15aef6c184e374d39b242257f0f9b353aba7e"
 dependencies = [
  "anyhow",
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
  "bls12_381",
  "fedimint-core",
  "fedimint-hkdf",
@@ -2089,7 +2126,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb66a6a0704e2c7fc4a72671a14e9268f256fb93b8fc3936f0d63516575ae3d7"
 dependencies = [
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
 ]
 
 [[package]]
@@ -2128,7 +2165,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.22.1",
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
  "bls12_381",
  "erased-serde",
  "fedimint-api-client",
@@ -2164,7 +2201,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dd8209347ac0f18058a9f10efe48392156ca031cb232974f03610f3609d1f5"
 dependencies = [
  "anyhow",
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
  "fedimint-core",
  "fedimint-tbs",
  "serde",
@@ -2748,6 +2785,12 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "hex-conservative"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "212ab92002354b4819390025006c897e8140934349e8635c9b077f47b4dcbd20"
 
 [[package]]
 name = "hex-conservative"
@@ -6240,7 +6283,7 @@ version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
- "bitcoin_hashes",
+ "bitcoin_hashes 0.14.101",
  "rand 0.8.8",
  "secp256k1-sys",
  "serde",
