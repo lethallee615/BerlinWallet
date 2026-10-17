@@ -181,69 +181,113 @@ And the position anchor (`fedimint-client 0.12.0`, VERIFY.md §1):
 pub async fn get_next_event_log_id(&self) -> EventLogId;
 ```
 
-### 4.1 Deposit — position-attributed, discovered not initiated
+### 4.1 Deposit — position-attributed, one open request per federation
 
 A deposit is **not an operation we start**. `receive()` only returns an address; the federation
-creates the operation when its scanner finds the payment. We therefore attribute the deposit to
-the **event-log position read before `receive()`**, never to an address or an invented operation id.
+creates the operation when its scanner finds the payment. We attribute the deposit to the
+**event-log position read before `receive()`**, never to an address or an invented operation id.
+
+**One open deposit per federation (correctness constraint).** `get_next_event_log_id()` returns the
+same `EventLogId` when no events were written in between, and `receive()` writes no event. Two
+deposit requests with no payment between them therefore get the **same position**: a
+`UNIQUE(federation_id, position)` constraint would reject the second insert, and two rows awaiting
+the same position would both resolve on one deposit and **double-credit**. Fix: enforce **one open
+deposit request per federation**. `request_deposit` first looks for an open row (`AwaitingAddress`
+or `AddressShown`) for that federation and returns it; it does not read a new position or insert a
+second row. This matches walletv2 under #9101, which returns the same address until the scanner sees
+it paid. **Concurrent deposits are unsupported until #9306 is in the pin.**
+
+**Funding source.** The deposit is **paid from the BDK wallet** (this is the peg-in: on-chain BDK
+funds → federation ecash). After the address is persisted, build a transaction from the BDK wallet
+to that address (`Wallet::build_tx()` → `create_psbt`/`sign_with_signers`/`finalize_psbt`),
+broadcast it via the configured chain source, and persist `funding_txid`. External funding (handing
+the address to a third party) follows the same row/observation path minus the BDK transaction step.
+
+**Fees.** Quote `module.receive_fee().await?` before funding and persist it; show
+`net = amount − quoted_fee`. At claim time persist the actual `ReceiveMeta.fee` and compute
+`net_credit = gross_deposited − claim_fee` (fall back to the quoted `receive_fee()` if the claim
+has not recorded one). The Bitcoin network fee for the funding transaction is paid by the BDK
+wallet and is **not** part of `receive_fee()`.
 
 Steps:
 
-1. `let position = client.get_next_event_log_id().await;`
-   (`Client::get_next_event_log_id(&self) -> EventLogId`)
-   Persist **before** calling `receive()`:
-   `{ id, federation_id, position, state = AwaitingAddress }`.
-2. `let addr = module.receive().await;` (`WalletClientModule::receive(&self) -> Address`)
-   Bound the call at **120 s** and retry on timeout (hazard #9205). Retries reuse the same row/id.
-3. Persist `{ address = addr, state = AddressShown }` **before** showing the address. If we crash
-   after `receive()` but before this write, the row is still `AwaitingAddress` and is retried; that
-   is safe because the address was never shown.
-4. Subscribe to `ReceivePaymentEvent` for **UI only** (pre-confirmation progress). It is not the
-   source of truth (#9338).
-5. `let (final_state, next_pos) = module.await_receive(position).await?;`
-   (`WalletClientModule::await_receive(&self, position: EventLogId)
-   -> anyhow::Result<(FinalReceiveOperationState, EventLogId)>`)
-   Persist `next_position = next_pos`. On `FinalReceiveOperationState::Success` set
-   `state = Done`. (`await_receive` retries `Aborted` claims internally and waits for the minted
-   notes, so it returns on `Success` or an error.)
-6. **On boot:** for every row in `AwaitingAddress`/`AddressShown`, resume
-   `await_receive(position)` from the persisted `position`. **Additionally**, reconcile claims via
-   the **module operations** — scan the operation log for
-   `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match the deposit's funding
-   outpoint (the fedimint-sdk `find_claim` pattern) — because #9338 can commit a claim without its
-   event-log announcement.
+1. **Single-flight check.** Look up an open deposit row for `federation_id`
+   (`state ∈ {AwaitingAddress, AddressShown}`). If one exists, return it — do not read a new
+   position and do not insert a second row.
+2. Otherwise read `let position = client.get_next_event_log_id().await;` and persist
+   `{ id, federation_id, position, amount, state = AwaitingAddress }` **before** calling `receive()`.
+3. **Asynchronously** call `let addr = module.receive().await;` with a **120 s** bound and retry on
+   timeout (#9205). Persist `{ address = addr, state = AddressShown }` **before** exposing it via
+   `deposit_status(id)`. The FFI caller is not blocked (see §6).
+4. **Fund from BDK** (default): `bdk_wallet.build_tx()` paying `addr` for `amount`; sign with
+   `sign_with_signers`, `finalize_psbt`, broadcast via the configured chain source, persist
+   `funding_txid`. External funding skips this step.
+5. `let quoted_fee = module.receive_fee().await?;` persist it and show `net`.
+6. Subscribe to `ReceivePaymentEvent` for **UI only** (#9338).
+7. `let (final_state, next_pos) = module.await_receive(position).await?;` persist
+   `next_position = next_pos`, then **match on `FinalReceiveOperationState`**:
+   - `Success` → persist `gross_deposited`, `operation_id`, `claim_fee = ReceiveMeta.fee`,
+     `net_credit = gross − claim_fee`, `state = Done`.
+   - `Aborted` → the claim was rejected; the still-unspent output is reprocessed under a new
+     receive operation. Do **not** set `Done` and do **not** credit. Persist `next_position`, set
+     `last_error = "claim aborted"`, keep `state = AddressShown`, and re-enter
+     `await_receive(next_position)` with bounded retry/backoff. (`await_receive` normally loops
+     over aborted claims internally, so this branch is defensive.)
+8. **On boot:** for every row in `AwaitingAddress`/`AddressShown`, resume the async address/claim
+   steps from the persisted `position`. **Additionally**, reconcile claims via module operations —
+   scan the operation log for `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match
+   the deposit's funding outpoint (fedimint-sdk `find_claim` pattern) — because #9338 can commit a
+   claim without its event-log announcement. Never create a second open row for the federation.
 
 ```rust
+// 0. single-flight: one open deposit per federation
+if let Some(existing) = journal.open_deposit(federation_id).await? {
+    return Ok(existing);                   // same address under #9101; no new position
+}
+
 // 1. anchor BEFORE receive()
 let position = client.get_next_event_log_id().await;
-journal.insert_deposit_if_absent(DepositRow {
-    id: deposit_id(federation_id, position),
-    federation_id,
-    position,
-    state: DepositState::AwaitingAddress,
-    ..Default::default()
+let id = new_deposit_id();                 // client ULID, not derived from position
+journal.insert_deposit(DepositRow {
+    id, federation_id, position, amount,
+    state: DepositState::AwaitingAddress, ..Default::default()
 }).await?;
 
-// 2. address, bounded at 120 s, retry on timeout
+// 2. address, bounded at 120 s, retry on timeout — runs asynchronously (§6)
 let address = loop {
     match timeout(Duration::from_secs(120), module.receive()).await {
-        Ok(addr) => break addr,       // receive() returns Address directly (no Result)
-        Err(_elapsed) => continue,    // row stays AwaitingAddress; see #9205
+        Ok(addr) => break addr,            // receive() returns Address directly (no Result)
+        Err(_elapsed) => continue,         // stay AwaitingAddress; see #9205
     }
 };
-
-// 3. persist BEFORE display
 journal.set_deposit_address(id, &address, DepositState::AddressShown).await?;
-ui.show_address(&address);
 
-// 4. UI-only progress (filter ReceivePaymentEvent); never the source of truth
-let _ui_progress = client.handle_events(/* tracker */, /* handler */);
+// 3. fund from BDK (default path)
+let mut psbt = /* bdk_wallet.build_tx() paying `address` `amount` */;
+bdk_wallet.sign_with_signers(&mut psbt, /* signers */, /* options */)?;
+bdk_wallet.finalize_psbt(&mut psbt, /* options */)?;
+let funding_txid = broadcast_via_chain_source(&psbt)?;
+journal.set_deposit_funding_txid(id, funding_txid).await?;
 
-// 5. observe to completion
+// 4. deposit fee quote
+let quoted_fee = module.receive_fee().await?;
+journal.set_deposit_quoted_fee(id, quoted_fee).await?;
+
+// 5. observe to completion; handle BOTH final states
 let (final_state, next_position) = module.await_receive(position).await?;
-debug_assert_eq!(final_state, FinalReceiveOperationState::Success);
 journal.set_deposit_next_position(id, next_position).await?;
-journal.set_deposit_state(id, DepositState::Done).await?;
+match final_state {
+    FinalReceiveOperationState::Success => {
+        // gross/claim_fee from ReceiveMeta.value / ReceiveMeta.fee
+        let (gross, claim_fee) = claim_figures(id).await?;
+        journal.finish_deposit(id, gross, claim_fee).await?; // Done; net = from_sats(gross - claim_fee)
+    }
+    FinalReceiveOperationState::Aborted => {
+        // rejected claim: reprocessed under a new receive op; never credit here
+        journal.set_deposit_aborted(id, next_position).await?; // stays AddressShown
+        // re-enter await_receive(next_position) with bounded backoff
+    }
+}
 ```
 
 ### 4.2 Withdrawal — op-id-attributed, initiated
@@ -353,21 +397,28 @@ Logical tables in the app DB (prefix `[0x00]`), implemented as prefixed raw rows
 
 ```sql
 CREATE TABLE deposit_requests (
-    id              BLOB PRIMARY KEY,          -- deterministic: hash(federation_id || position)
+    id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
     federation_id   BLOB NOT NULL,
-    position        INTEGER NOT NULL,          -- EventLogId read BEFORE receive()
+    position        INTEGER NOT NULL,          -- EventLogId read BEFORE receive(); NOT unique
+    amount          INTEGER NOT NULL,          -- sats the caller intends to deposit
     address         TEXT,                      -- set when state = AddressShown
     state           TEXT NOT NULL,             -- AwaitingAddress | AddressShown | Done
     next_position   INTEGER,                   -- returned by await_receive()
     operation_id    BLOB,                      -- claim op learned via ReceiveMeta / event
-    txid            BLOB,                      -- funding txid
+    funding_txid    BLOB,                      -- BDK peg-in transaction
+    quoted_fee      INTEGER,                   -- receive_fee() quote, sats
+    claim_fee       INTEGER,                   -- actual ReceiveMeta.fee, sats
     gross_deposited INTEGER,                   -- sats (bitcoin::Amount)
     net_credit      INTEGER,                   -- msat (fedimint_core::Amount)
     last_error      TEXT,
     created_at      INTEGER NOT NULL,          -- unix ms
     updated_at      INTEGER NOT NULL,          -- unix ms
-    UNIQUE (federation_id, position)
+    -- NO UNIQUE(federation_id, position): get_next_event_log_id() can repeat
 );
+-- At most ONE open deposit per federation (enforced in the same dbtx as insert/close):
+CREATE UNIQUE INDEX deposit_requests_one_open
+    ON deposit_requests (federation_id)
+    WHERE state IN ('AwaitingAddress', 'AddressShown');
 CREATE INDEX deposit_requests_state ON deposit_requests (state);
 
 CREATE TABLE withdrawal_requests (
@@ -389,16 +440,22 @@ CREATE INDEX withdrawal_requests_state ON withdrawal_requests (state);
 CREATE INDEX withdrawal_requests_fed_state ON withdrawal_requests (federation_id, state);
 ```
 
-`Broadcast { txid }` is stored as `state='Broadcast'` plus the `txid` column. Every state
+`get_next_event_log_id()` is **not** a unique key; the `deposit_requests_one_open` partial index is
+the invariant. A new deposit row may be inserted only in the same `dbtx` that closes the previous
+open row. `Broadcast { txid }` is stored as `state='Broadcast'` plus the `txid` column. Every state
 transition writes the row and its pending-index entry in one `dbtx` (`begin_transaction …
 commit_tx`), so a crash cannot leave a row indexed under a state it no longer holds.
 
 ### 4.5 Idempotency keys
 
-- **Deposit `id`** = deterministic from `(federation_id, position)` (composite `UNIQUE`, or
-  `hash(federation_id || position)`). The `position` is the anchor: it is read *before* `receive()`
-  and is stable across restarts. `insert_deposit_if_absent` makes step 1 idempotent; address
-  retries (step 2 timeouts) reuse the same row. A new receive request = a new `position` = a new row.
+- **Deposit `id`** = client-generated UUIDv7/ULID. `position` is an observation cursor, **not** a
+  unique key: `get_next_event_log_id()` returns the same value until something is written, and
+  `receive()` writes no event, so two requests can share a position. The idempotency fence is the
+  **single open deposit per federation**: `request_deposit` returns the existing
+  `AwaitingAddress`/`AddressShown` row instead of inserting a new one. A new row may be inserted
+  only in the same `dbtx` that closes the previous open row (partial unique index in §4.4).
+  Address retries (step 3 timeouts) reuse the same row. **Concurrent deposits are unsupported until
+  #9306 is in the pin.**
 - **Withdrawal `id`** = client-generated UUIDv7/ULID, persisted before `send()`. `send()` is called
   **at most once per `id`**; the `Quoting → Submitted` transition is the fence. `operation_id` is
   persisted immediately and is `UNIQUE`; on boot we re-await by it and never re-submit. The same
@@ -414,10 +471,26 @@ commit_tx`), so a crash cannot leave a row indexed under a state it no longer ho
 
 | Issue | Hazard | Mitigation in this design |
 |---|---|---|
-| `fedimint/fedimint#9101` | `receive()` returns only an address (no `Result`, no `OperationId`); repeated calls return the same address until the scanner sees it paid; there is no durable pre-payment operation. Correlating a payment to a UI request by address is unsafe with concurrent receives. | Attribute the deposit to the **`EventLogId` read before `receive()`** (`Client::get_next_event_log_id()`), persist the row **before** `receive()`, and observe with `await_receive(position)` (position-scoped). Never use the address as the correlation key; a new receive request always gets a new position/row. (Fixed on `main` by `#9306`; not in the 0.12.0 pin.) |
+| `fedimint/fedimint#9101` | `receive()` returns only an address (no `Result`, no `OperationId`); repeated calls return the same address until the scanner sees it paid; there is no durable pre-payment operation. Correlating a payment to a UI request by address is unsafe with concurrent receives. | Attribute the deposit to the **`EventLogId` read before `receive()`** (`Client::get_next_event_log_id()`), persist the row **before** `receive()`, and observe with `await_receive(position)` (position-scoped). Enforce **one open deposit per federation** and return the existing row; never insert a second row against a possibly-repeated position. Never use the address as the correlation key. **Concurrent deposits are unsupported until #9306 is in the pin** (fixed on `main`; not in 0.12.0). |
 | `fedimint/fedimint#9205` | Walletv2 client panics on first start when the address search outlives the DB write history (first-address derivation is a hash-prefix search that can take a long time). | Bound `receive()` at **120 s** and retry on timeout; leave the row in `AwaitingAddress` on timeout (never terminalise it); let the client/scanner run before the first `receive()`; never hold a DB transaction across the address search. |
 | `fedimint/fedimint#9338` | The claim is committed in one DB transaction and its event-log announcement in another; a client stopping between them keeps the claim without the `ReceivePaymentEvent`. An event-only subscriber can miss the deposit. | `await_receive(position)` is the source of truth, not the event. On boot, **also reconcile via module operations**: scan the operation log for `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match the deposit's funding outpoint (fedimint-sdk `find_claim` pattern). `ReceivePaymentEvent` is UI-only. |
 | `fedimint/fedimint#9098` | Quote and submit are not atomic; a concurrent spend between the quote and the funding can change what is selected, so the quoted fee/total may not match what is debited. | Re-quote immediately before `send()` (`send_fee()` + `send_fee_quote()`); compare with the persisted quote and abort with a `QuoteChanged`-style error on any drift; never silently absorb the difference. Serialize withdrawals per federation (single-flight) so our own sends cannot race each other. |
+
+### 4.7 Testing
+
+- **Local federation: devimint.** Bring up a federation with the repo's devimint harness; run the
+  on-chain flow on **regtest first**, then **signet** with small amounts. Do not use mainnet.
+- **Deposit:** assert a second `request_deposit` while a row is `AwaitingAddress`/`AddressShown`
+  returns the same row/address (single-flight) and never inserts a second open row; crash/restart
+  at each transition (`AwaitingAddress → AddressShown → Done`); kill between the claim commit and
+  its event-log entry (#9338) and assert boot reconciliation credits exactly once; assert
+  `net_credit = gross_deposited − claim_fee` and that `receive_fee()` was applied.
+- **Withdrawal:** move the feerate between `send_fee_quote()` and `send()` to exercise quote drift
+  (#9098) and assert the send is refused/re-quoted; crash after `send()` but before `operation_id`
+  is persisted and assert boot reconciliation adopts the operation instead of re-sending; assert
+  `Aborted → Refunded` re-credits exactly once.
+- **Balance:** blocked by §8.2 (primary module for BTC) — do not assert balance movements until
+  that is resolved.
 
 ---
 
@@ -448,7 +521,7 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
   `ReceivePaymentUpdateEvent` and `SendPaymentEvent` / `SendPaymentUpdateEvent` for UI/progress.
   **Deposits are observed to completion with `await_receive(position)`; withdrawals with
   `await_final_send_operation_state(operation_id)`** — events are supplementary.
-- Balance stream: `client.subscribe_balance_changes(unit)`.
+- Balance stream: `client.subscribe_balance_changes(unit)` — **blocked by §8.2** (primary module for BTC unverified).
 
 ### Crash-safe persistence (douglaz patterns, `journal.rs`)
 
@@ -472,15 +545,18 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
 - Methods:
   - `join_federation(invite_code: String) -> Result<String>`
   - `balance_sat() -> u64`
-  - `request_deposit_address() -> Result<DepositView>` (creates a `deposit_requests` row, returns `AwaitingAddress`/`AddressShown`)
-  - `deposit_status(id: String) -> Result<DepositView>` (state + address + credited amount)
+  - `request_deposit_address() -> Result<DepositView>` — **non-blocking**: inserts/returns the single open `deposit_requests` row in `AwaitingAddress` and returns immediately. A background task runs `receive()` (120 s bound + retry) and performs the `AddressShown` write.
+  - `fund_deposit(id: String) -> Result<String>` — builds/signs/broadcasts the BDK peg-in transaction to the stored address and returns its txid.
+  - `deposit_status(id: String) -> Result<DepositView>` — current state, address (null until `AddressShown`), quoted fee, gross, net credit, funding txid.
   - `withdraw(address: String, sat_amount: u64) -> Result<String>` (creates a `withdrawal_requests` row, returns its id)
   - `withdrawal_status(id: String) -> Result<WithdrawalView>` (state + operation_id + txid)
   - `sync() -> Result<()>`
 - Streams: expose a polling `list_deposits()` / `list_withdrawals()` plus a callback subscription; map `anyhow::Error` to a `thiserror`-based `pegwallet_ffi::Error` (uniffi cannot expose `anyhow::Error`).
 
-Note: `request_deposit_address()` maps to step 1–3 (position + `receive()` + persist). The UI must
-show the address only after the `AddressShown` write commits.
+Note: `request_deposit_address()` does **not** wait up to 120 s. It returns the `AwaitingAddress`
+row at once; the UI polls `deposit_status(id)` (or subscribes) until the address is available. The
+address is shown only after the `AddressShown` write commits. BDK funding is a separate
+`fund_deposit(id)` call so it cannot block the address request.
 
 **Guessing at:** uniffi 0.32 async export support and per-language binding glue; start with blocking
 methods + polling, then add async streams once bindings are verified.
@@ -549,7 +625,7 @@ methods + polling, then add async streams once bindings are verified.
 Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 1. **Wallet-module flow** — **RESOLVED** (VERIFY.md §8): walletv2 uses `receive()` + `await_receive(position)` for deposits and `send()` + `await_final_send_operation_state(id)` for withdrawals. There is no `peg_in`/`allocate_deposit_address_pooled`/`withdraw` in the v2 module.
-2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — `get_balance_for_unit(AmountUnit::Bitcoin)` needs a primary module; both claim `supports_being_primary`. **Unverified.**
+2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — **BLOCKING for the balance implementation**: `get_balance_for_unit(AmountUnit::Bitcoin)` and `subscribe_balance_changes(unit)` need a primary module, and both modules claim `supports_being_primary`. Do not implement balance until this is resolved against the source/config.
 3. **`ClientBuilder::open` vs `join` signatures** — `join` is confirmed: `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`; `preview_with_existing_config` is confirmed. The `ClientBuilder::open` restore flow is **unverified** (VERIFY.md did not exercise it).
 4. **BDK persistence call shape** — **RESOLVED** (VERIFY.md §1): `PersistedWallet::create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` and `PersistedWallet::load(&mut P, LoadParams) -> Result<Option<Self>, LoadWithPersistError<P::Error>>`.
 5. **Chain source choice** — esplora/electrum/bitcoind-rpc; a product decision. `bdk_esplora::EsploraAsyncExt::sync`/`full_scan` is the verified esplora path.
@@ -564,7 +640,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 1. Workspace + `pegwallet-core` with pinned deps; `Client` construction with `MintClientInit` + `fedimint_walletv2_client::WalletClientInit`.
 2. BDK wallet wrapper: create/load, `reveal_next_address`, `build_tx`+sign+broadcast, persist, `start_sync_with_revealed_spks` loop.
 3. Journal + the two tables (`deposit_requests`, `withdrawal_requests`), atomic state transitions, boot reconciliation.
-4. Deposit flow: `get_next_event_log_id()` → `receive()` (120 s bound) → persist address → `await_receive(position)` → `Done`; boot resume + `find_claim` reconcile.
+4. Deposit flow: single-flight open row (one per federation) → `get_next_event_log_id()` → async `receive()` (120 s bound) → persist `AddressShown` → BDK funding (`build_tx`/sign/broadcast) → `receive_fee()` → `await_receive(position)` with a real `Success`/`Aborted` match → `Done`; boot resume + `find_claim` reconcile. Concurrent deposits unsupported until #9306.
 5. Withdrawal flow: `reveal_next_address` → `send_fee()` + `send_fee_quote()` → `send()` → persist `operation_id` → `await_final_send_operation_state`; boot re-await only.
 6. Two sync tasks (BDK chain + fedimint federation) sharing the journal; events are UI-only.
 7. `pegwallet-ffi` uniffi crate with the `PegWallet` object; generate bindings for one target language as a smoke test.
@@ -572,7 +648,8 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 ---
 
 **Bottom line:** the wallet module is `fedimint-walletv2-client` (VERIFY.md §8). Deposits are
-position-attributed and discovered (`get_next_event_log_id()` before `receive()`, then
-`await_receive(position)`); withdrawals are op-id-attributed and initiated (`send()` then
-`await_final_send_operation_state`). The v1 `fedimint-wallet-client` names are superseded and must
-not be used. No peg logic has been implemented; `VERIFY.md` documents what was and was not verified.
+position-attributed, BDK-funded and discovered (`get_next_event_log_id()` before `receive()`, one
+open deposit per federation, then `await_receive(position)` with real `Success`/`Aborted` handling);
+withdrawals are op-id-attributed and initiated (`send()` then `await_final_send_operation_state`).
+The v1 `fedimint-wallet-client` names are superseded and must not be used. No peg logic has been
+implemented; `VERIFY.md` documents what was and was not verified.
