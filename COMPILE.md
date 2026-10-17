@@ -362,3 +362,32 @@ most `SCAN_STATE_WAIT_PER_OP = 500 ms` each and `SCAN_TOTAL_STATE_WAIT = 2 s` pe
 Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind.html#method.as_str>,
 <https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/constant.KIND.html>,
 <https://docs.rs/fedimint-client/0.12.0/fedimint_client/db/struct.ChronologicalOperationLogKey.html>.
+
+---
+
+## 17. Watermark advances only on a terminal pass; adoption is scheduled
+
+`cargo check` + `cargo test -p pegwallet-core --lib` → **EXIT 0** (4 tests).
+
+### 17.1 Terminal-only watermark advance
+
+- `should_advance_watermark(reached_terminal, state_wait_exhausted)` (`deposit.rs:318`) returns
+  `reached_terminal && !state_wait_exhausted`.
+- `scan_receive_claims` (`deposit.rs:352`) sets `reached_terminal` on:
+  - an empty page,
+  - the watermark + `SCAN_OVERLAP` boundary, or
+  - a short page (end of the log).
+- It sets `state_wait_exhausted` when the 2 s state-wait budget is hit. The watermark is advanced
+  only when `should_advance_watermark` is true; a truncated pass (state-wait budget or a future
+  page cap) or an errored pass (`?` returns before the update) leaves the watermark unchanged, so
+  the next pass re-covers the gap.
+- Test: `deposit::tests::truncated_pass_does_not_advance_watermark_and_next_pass_finds_claim`
+  (`deposit.rs:577`).
+
+### 17.2 Adoption schedule
+
+`sync::adoption_task` (`sync.rs:21`) runs `deposit::adopt_orphan_claims` on
+`tokio::time::interval(ADOPTION_INTERVAL)` where `ADOPTION_INTERVAL = 60 s` (`sync.rs:15`). The
+first tick is immediate, so it covers boot as well as the periodic cadence. This is the schedule
+the Success-arm deferral relies on: a row left `AddressShown` because the claim was not yet
+visible is bound by the next tick, which releases the single-flight slot.

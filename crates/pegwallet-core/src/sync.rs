@@ -1,5 +1,39 @@
-//! Concurrent sync tasks (PLAN.md §5). Stubs for the type-checking scaffold;
-//! no network I/O is performed here.
+//! Concurrent sync tasks (PLAN.md §5).
+//!
+//! `adoption_task` is real: it schedules the orphan-claim adoption pass. The
+//! BDK chain and fedimint federation tasks remain scaffolds (no network I/O).
+
+use std::time::Duration;
+
+use fedimint_client::{Client, ClientHandleArc};
+use fedimint_core::config::FederationId;
+
+use crate::deposit;
+use crate::journal::Journal;
+
+/// Cadence of the orphan-claim adoption pass.
+pub const ADOPTION_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Boot + every [`ADOPTION_INTERVAL`] (`tokio::time::interval`'s first tick is
+/// immediate). This is what drains a deposit whose Success arm deferred because
+/// the claim was not yet visible: the next tick binds it and the row leaves
+/// `AddressShown`, releasing the single-flight slot.
+pub async fn adoption_task(
+    client: ClientHandleArc,
+    journal: Journal,
+    federation_id: FederationId,
+) {
+    let mut ticker = tokio::time::interval(ADOPTION_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let client_ref: &Client = &**client;
+        if let Err(err) =
+            deposit::adopt_orphan_claims(client_ref, &journal, federation_id).await
+        {
+            tracing::warn!(?err, "adoption pass failed; will retry next tick");
+        }
+    }
+}
 
 pub async fn bdk_chain_task() -> anyhow::Result<()> {
     anyhow::bail!("bdk_chain_task: not implemented in the scaffold")

@@ -311,6 +311,14 @@ fn is_older_than(
             && key.operation_id < watermark.operation_id)
 }
 
+/// Advance the watermark only when the pass reached its terminal condition
+/// (the watermark+overlap boundary or the end of the log) and did not exhaust
+/// the state-wait budget. A truncated or errored pass leaves it unchanged so
+/// the next pass re-covers the gap.
+fn should_advance_watermark(reached_terminal: bool, state_wait_exhausted: bool) -> bool {
+    reached_terminal && !state_wait_exhausted
+}
+
 fn select_claim_for_success(
     claims: Vec<OrphanClaim>,
     address_script: Option<&[u8]>,
@@ -355,10 +363,13 @@ pub async fn scan_receive_claims(
     let mut last_seen = None;
     let mut state_wait = Duration::ZERO;
     let mut raw = Vec::new();
+    let reached_terminal: bool;
+    let mut state_wait_exhausted = false;
 
     'scan: loop {
         let page = log.paginate_operations_rev(SCAN_PAGE, last_seen).await;
         if page.is_empty() {
+            reached_terminal = true;
             break;
         }
 
@@ -374,7 +385,10 @@ pub async fn scan_receive_claims(
             if let Some(watermark) = watermark {
                 if is_older_than(key, &watermark) {
                     match overlap_budget {
-                        Some(0) => break 'scan,
+                        Some(0) => {
+                            reached_terminal = true;
+                            break 'scan;
+                        }
                         Some(n) => overlap_budget = Some(n - 1),
                         None => {}
                     }
@@ -407,6 +421,7 @@ pub async fn scan_receive_claims(
                 Ok(Some(state)) => Some(state),
                 _ => {
                     if state_wait >= SCAN_TOTAL_STATE_WAIT {
+                        state_wait_exhausted = true;
                         None
                     } else {
                         let budget =
@@ -451,12 +466,15 @@ pub async fn scan_receive_claims(
 
         last_seen = page.last().map(|(key, _)| *key);
         if page.len() < SCAN_PAGE {
+            reached_terminal = true;
             break;
         }
     }
 
-    if let Some(newest) = newest_key {
-        journal.set_scan_watermark(&federation_id, newest).await?;
+    if should_advance_watermark(reached_terminal, state_wait_exhausted) {
+        if let Some(newest) = newest_key {
+            journal.set_scan_watermark(&federation_id, newest).await?;
+        }
     }
 
     let bound = journal.bound_outpoints(&federation_id).await?;
@@ -553,5 +571,26 @@ mod tests {
             select_claim_for_success(vec![orphan_with_script(vec![1, 2, 3])], Some(&[1, 2, 3]))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn truncated_pass_does_not_advance_watermark_and_next_pass_finds_claim() {
+        // A pass that stopped before its boundary (or exhausted the state-wait
+        // budget) must not advance the watermark.
+        assert!(!should_advance_watermark(false, false));
+        assert!(!should_advance_watermark(false, true));
+        assert!(!should_advance_watermark(true, true));
+        assert!(should_advance_watermark(true, false));
+
+        // First (truncated) pass: the claim is beyond the truncation point,
+        // so it is not seen. The watermark is unchanged; the next pass
+        // re-covers the gap and finds it.
+        let op = OperationId::new_random();
+        let o = outpoint(0);
+        assert!(filter_orphan_claims(Vec::new(), |_| false).is_empty());
+
+        let second_pass = filter_orphan_claims(vec![success(op, o)], |_| false);
+        assert_eq!(second_pass.len(), 1);
+        assert_eq!(second_pass[0].operation_id, op);
     }
 }

@@ -261,8 +261,9 @@ Steps:
      select by `address_script`.
    - **The claim can lag `await_receive` returning Success.** If no matching claim is visible, do
      **not** fail the row: retry the scan with backoff (`SCAN_RETRY_ATTEMPTS`). If it is still
-     absent, leave R `AddressShown` (the cursor is persisted) and return; the **adoption pass**
-     will bind the claim and R takes the existing `TakenBy` path.
+     absent, leave R `AddressShown` (the cursor is persisted) and return; the scheduled
+     **adoption pass** (`sync::adoption_task`, boot + every `ADOPTION_INTERVAL` = 60 s) will bind
+     the claim and R takes the existing `TakenBy` path.
    - `operation_id` comes from `ReceivePaymentEvent.operation_id` carried by the scan.
    - `claim_bind(federation_id, claim.outpoint, R.id)`:
      - `Bound` → finish R from `ReceiveMeta { outpoint, value, fee }`: `gross_deposited = value`,
@@ -295,9 +296,10 @@ Steps:
         still open (`AddressShown`), close R as `Done` with the claim figures (only if R's credit
         fields are unset; never overwrite an existing credit).
       This records (i) a payment that lands after `cancel_deposit`/`Failed`, and (ii) the **second
-      output of a double-payment**. Run this pass at boot **and** on a periodic timer / after each
-      claim settles, because a second payment can arrive while the app is running. Never adopt an
-      `Aborted` claim.
+      output of a double-payment**. **Schedule:** `sync::adoption_task` runs this pass at boot and
+      every `ADOPTION_INTERVAL` (60 s), and it may also be run after a claim settles. The Success
+      arm's deferral relies on this schedule; without it, a deferred row would stay `AddressShown`
+      and block the single-flight slot. Never adopt an `Aborted` claim.
 
    **Invariant:** every claim in the operation log is represented by **exactly one**
    `deposit_requests` row, keyed `(federation_id, funding_outpoint)`; adoption is idempotent via
@@ -777,7 +779,10 @@ adopted elsewhere.
   `ChronologicalOperationLogKey` per federation (`Journal::scan_watermark` /
   `set_scan_watermark`) and resumes from it with a bounded `SCAN_OVERLAP` (32) of older
   operations; because `paginate_operations_rev` is reverse-chronological, a pass starts at "now"
-  and stops at the previous watermark + overlap. It checks
+  and stops at the previous watermark + overlap. **Advance the watermark only when the pass
+  reaches its terminal condition** (that boundary or the end of the log) and did not exhaust the
+  state-wait budget; a truncated or errored pass leaves it unchanged so the next pass re-covers
+  the gap. It checks
   `OperationLogEntry::operation_module_kind()` and skips anything whose kind is not `"walletv2"`
   **before** `try_meta`, so a non-wallet op cannot error the scan. The uncached-outcome fallback
   is bounded: only walletv2 `Receive` ops are awaited, at most 500 ms each and
