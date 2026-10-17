@@ -216,14 +216,16 @@ Steps:
 2. Otherwise read `let position = client.get_next_event_log_id().await;` and persist
    `{ id, federation_id, position, amount, state = AwaitingAddress }` **before** calling `receive()`.
 3. **Asynchronously** call `let addr = module.receive().await;` with a **120 s** bound and retry on
-   timeout (#9205) up to `MAX_ADDRESS_ATTEMPTS` (5). Persist `{ address = addr, state =
-   AddressShown }` **before** exposing it via `deposit_status(id)`, **conditionally**: the write
-   applies only if the row is still `AwaitingAddress`. `cancel_deposit` may have set it `Cancelled`
-   while `receive()` was in flight; in that case the task writes nothing, returns, and **does not
-   spawn a watcher** (the row stays `Cancelled`, the single-flight slot stays free). The background
-   address task **stops at `AddressShown`**; it does not fund. If the retry budget is exhausted,
-   `set_deposit_failed` is likewise conditional on `AwaitingAddress`. The FFI caller is not blocked
-   (see §6).
+   timeout (#9205) up to `MAX_ADDRESS_ATTEMPTS` (5). `receive()` returns `Address`, **not**
+   `Result`, so there is no error to classify in this task: the only terminal path is retry-budget
+   exhaustion. Persist `{ address = addr (display), address_script = addr.script_pubkey() (bytes),
+   state = AddressShown }` **before** exposing it via `deposit_status(id)`, **conditionally**: the
+   write applies only if the row is still `AwaitingAddress`. `cancel_deposit` may have set it
+   `Cancelled` while `receive()` was in flight; in that case the task writes nothing, returns, and
+   **does not spawn a watcher** (the row stays `Cancelled`, the single-flight slot stays free). The
+   background address task **stops at `AddressShown`**; it does not fund. If the retry budget is
+   exhausted, `set_deposit_failed` is likewise conditional on `AwaitingAddress`. The FFI caller is
+   not blocked (see §6).
    **Steps 4–5 run inside `fund_deposit(id)`**, not in the background address task; the background
    task still stops at `AddressShown`.
 4. **Inside `fund_deposit(id)`: quote the deposit fee and show the net before funding**:
@@ -252,12 +254,21 @@ Steps:
    - `Ok(Err(err))` → classify (§4.3): transient → sleep backoff and continue with the **same**
      `position` (stay `AddressShown`); permanent → `fail_deposit(id, &err)` and return.
    - `Err(Elapsed)` → sleep backoff and continue with the **same** `position` (persist nothing new).
-   After the loop (Success only): persist `next_position`, then run the `claim_bind` success arm:
-   - `Bound` → persist `gross_deposited`, `operation_id`, `funding_outpoint`, `claim_fee =
-     ReceiveMeta.fee`, `net_credit = gross − claim_fee`, `state = Done`.
-   - `TakenBy(other)` → the adoption pass already recorded this claim on row `other`; set R `Done`
-     **without** inserting a second claim row and **without** a second credit (R's credit fields
-     stay empty; the credit lives on `other`).
+   After the loop (Success only): persist `next_position`, then resolve the claim through the
+   **reused `scan_receive_claims` pass** (this fixes `await_receive` returning no operation id or
+   meta):
+   - `let claims = scan_receive_claims(client).await?;` take the unbound claim (single-flight
+     means at most one open row; if several are unbound, prefer the one whose
+     `ReceiveMeta.address` matches R's `address_script`; leave the rest to the adoption pass).
+   - `operation_id` comes from `ReceivePaymentEvent.operation_id` carried by the scan.
+   - `claim_bind(federation_id, claim.outpoint, R.id)`:
+     - `Bound` → finish R from `ReceiveMeta { outpoint, value, fee }`: `gross_deposited = value`,
+       `claim_fee = fee`, `net_credit = value − fee`, `funding_outpoint = outpoint`,
+       `operation_id`, `state = Done`.
+     - `TakenBy(other)` → the adoption pass already recorded this claim on row `other`; set R
+       `Done` **without** inserting a second claim row and **without** a second credit (R's credit
+       fields stay empty; the credit lives on `other`).
+   - further unbound claims are left to `adopt_orphan_claims` (§4.1 step 8b).
 
    **`next_position` is the resume cursor and is persisted on both `Success` and `Aborted`**, but
    by different calls: `set_deposit_aborted` owns it on the `Aborted` path;
@@ -267,7 +278,8 @@ Steps:
    a. **Resume open rows:** for every row in `AwaitingAddress`/`AddressShown`, resume the address/
       claim steps from **`COALESCE(next_position, position)`** — `await_receive` advances past a
       rejected claim, so resuming from raw `position` can re-read an old claim.
-   b. **Adopt orphan claims:** scan the operation log for every
+   b. **Adopt orphan claims:** reuse the **same** `scan_receive_claims(client)` as the watcher
+      Success arm (one scan, two callers; `claim_figures` is gone). For every
       `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` whose final state is
       `FinalReceiveOperationState::Success`. For each, call
       `claim_bind(federation_id, outpoint, adopted_row_id)`, inserting the `origin = Adopted`,
@@ -387,14 +399,18 @@ loop {
 }
 // Success only: set_deposit_aborted already persisted the cursor on Aborted.
 journal.set_deposit_next_position(id, next_position).await?;
-// Success arm: claim_bind exactly as written
-let (outpoint, gross, claim_fee) = claim_figures(id).await?;
+// Success arm: reuse the operation-log scan (await_receive returns no meta)
+let claim = scan_receive_claims(client).await?
+    .into_iter()
+    .find(|c| c.final_state == FinalReceiveOperationState::Success && c.outpoint.is_some())
+    .ok_or_else(|| anyhow::anyhow!("no unbound claim after Success"))?;
+let outpoint = claim.outpoint.expect("checked above");
 match journal.claim_bind(federation_id, outpoint, id).await? {
     BindResult::Bound => {
-        journal.finish_deposit(id, outpoint, gross, claim_fee).await?; // Done + one credit
+        journal.finish_deposit(id, outpoint, claim.value, claim.fee).await?; // Done + one credit
     }
-    BindResult::TakenBy(other) => {
-        // adoption already credited this outpoint on `other`
+    BindResult::TakenBy(_other) => {
+        // adoption already credited this outpoint
         journal.close_deposit_done(id).await?; // Done; no second row / no second credit
     }
 }
@@ -554,7 +570,8 @@ pub enum DepositState {
     Done,
     /// User cancelled from `AwaitingAddress`/`AddressShown` while `funding_txid IS NULL`.
     Cancelled,
-    /// Terminal: address retries exhausted or a permanent error. Releases the invariant.
+    /// Terminal: address retries exhausted (address task) or a permanent watcher error.
+    /// Releases the invariant.
     Failed,
 }
 
@@ -581,8 +598,11 @@ Transient errors do **not** advance the state: the row stays `AwaitingAddress`/`
 **Terminal vs retryable (explicit).**
 - *Retryable*: timeouts, transport/federation-unreachable errors, `TryAgain`/storage-busy, and
   `FinalReceiveOperationState::Aborted` claims (reprocessed under a new receive op).
-- *Terminal (deposit)*: `receive()` exhausted `MAX_ADDRESS_ATTEMPTS`, or a permanent error (e.g.
-  the federation dropped the wallet module) → `Failed`; user action → `Cancelled` (only from
+- *Terminal (deposit address task)*: `receive()` returns `Address`, **not** `Result`, so there is
+  no error to classify; its only terminal path is retry-budget exhaustion
+  (`MAX_ADDRESS_ATTEMPTS`) → `Failed`.
+- *Terminal (deposit watcher)*: a permanent `await_receive` error (e.g. the federation dropped the
+  wallet module) → `Failed`; user action → `Cancelled` (only from
   `AwaitingAddress`/`AddressShown` while `funding_txid IS NULL`).
 - *Terminal (withdrawal)*: a fatal `SendError` from `send()` — `WrongNetwork`, `DustValue`,
   `UnsupportedAddress`, `InsufficientFunds` — or `FinalSendOperationState::Failure` → `Failed`;
@@ -596,9 +616,11 @@ Transient errors do **not** advance the state: the row stays `AwaitingAddress`/`
   write is **skipped**, it writes nothing, and it spawns no watcher. The row stays `Cancelled` and
   the single-flight slot is free.
 
-`classify_error(&err) -> ErrorClass::{Transient, Permanent}` implements these rules; the deposit
-watcher and the withdrawal `send()`/final-await paths both use it (they never propagate a raw error
-past the classification).
+`classify_error<E: Classify>(&err) -> ErrorClass::{Transient, Permanent}` implements these rules.
+The address task has no error value to classify (`receive() -> Address`); the deposit watcher
+(`await_receive -> anyhow::Result`) and the withdrawal `send()`/final-await paths use the
+`Classify` trait (implemented for `SendError`, `ReceiveError`, and `anyhow::Error`) and never
+propagate a raw error past the classification.
 
 ### 4.4 Persistence schema
 
@@ -615,7 +637,8 @@ CREATE TABLE deposit_requests (
     origin          TEXT NOT NULL,             -- Requested | Adopted
     position        INTEGER,                   -- EventLogId read BEFORE receive(); NULL for Adopted
     amount          INTEGER NOT NULL,          -- sats the caller intends to deposit (gross for Adopted)
-    address         TEXT,                      -- set when state = AddressShown (from ReceiveMeta for Adopted)
+    address         TEXT,                      -- display only; assume_checked().to_string()
+    address_script  BLOB,                      -- scriptPubKey bytes; matching key
     state           TEXT NOT NULL,             -- AwaitingAddress | AddressShown | Done | Cancelled | Failed
     next_position   INTEGER,                   -- returned by await_receive()
     operation_id    BLOB,                      -- claim op learned via ReceiveMeta / event
@@ -646,7 +669,7 @@ CREATE TABLE withdrawal_requests (
     address         TEXT NOT NULL,             -- BDK reveal_next_address destination
     value           INTEGER NOT NULL,          -- sats (bitcoin::Amount)
     fee             INTEGER,                   -- send_fee() result, sats
-    quote           BLOB,                      -- serialized FeeQuote
+    quote           BLOB,                      -- FeeQuoteWire (typed serde; FeeQuote has no serde)
     operation_id    BLOB UNIQUE,               -- set immediately after send()
     state           TEXT NOT NULL,             -- Quoting | Submitted | Broadcast | Refunded | Failed | Cancelled
     txid            BLOB,                      -- set when state = Broadcast
@@ -672,6 +695,29 @@ Likewise `withdrawal_requests_one_open` serializes our own sends per federation 
 column. Every state transition writes the row and its pending-index entry in one `dbtx`
 (`begin_transaction … commit_tx`), so a crash cannot leave a row indexed under a state it no longer
 holds.
+
+**`FeeQuoteWire` (typed quote encoding).** `FeeQuote` is `Debug + Clone + PartialEq + Eq` but
+**not** `Serialize`, so the `quote` column carries a typed wire struct, not the `Option<String>`
+placeholder from COMPILE.md:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FeeQuoteWire {
+    pub input: BTreeMap<AmountUnit, Amount>,
+    pub output: BTreeMap<AmountUnit, Amount>,
+    pub dust: BTreeMap<AmountUnit, Amount>,
+}
+// From<&FeeQuote>: each Amounts field via `Amounts::into_iter()`.
+// From<FeeQuoteWire>: rebuild each Amounts with `Amounts::ZERO` + `checked_add_unit`.
+```
+
+`Amounts` exposes `IntoIterator<Item = (AmountUnit, Amount)>`; `AmountUnit` and `Amount` are
+serde-serializable. The `.quote` row field is `Option<FeeQuoteWire>`.
+
+**Address storage.** `bitcoin::Address<NetworkUnchecked>` implements `Serialize` but not
+`Display`, so the row stores two fields: `address` (display, from `assume_checked().to_string()`)
+and `address_script` (scriptPubKey bytes, `script_pubkey().as_bytes()`). Matching uses
+`address_script`; display uses `address`.
 
 **Conflict-safe claim binding (`claim_bind`).** The watch loop and the adoption pass are both
 writers of the claim key, so both go through one primitive:
@@ -853,6 +899,7 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
   - `cancel_withdrawal(id: String) -> Result<WithdrawalView>` — allowed only from `Quoting`; sets `Cancelled` and releases the invariant.
   - `sync() -> Result<()>`
 - Streams: expose a polling `list_deposits()` / `list_withdrawals()` plus a callback subscription; map `anyhow::Error` to a `thiserror`-based `pegwallet_ffi::Error` (uniffi cannot expose `anyhow::Error`).
+- **`ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only.** The FFI crate must enable `fedimint-client`'s `uniffi` feature (or reach the executor through `ClientHandle::start_executor(&self)` / `Deref<Target = Client>` instead). `ClientHandleArc` is `Arc<ClientHandle>`; `ClientHandle` derefs to `Client`.
 
 Note: `request_deposit_address()` does **not** wait up to 120 s. It returns the `AwaitingAddress`
 row at once; the UI polls `deposit_status(id)` (or subscribes) until the address is available. The
@@ -875,14 +922,14 @@ methods + polling, then add async streams once bindings are verified.
 ## 7. Module map (confirmed function/module names)
 
 **fedimint-client (0.12.0)**
-- `Client::builder()`, `ClientBuilder::with_module()`, `ClientBuilder::preview()`, `ClientPreview::join()` (**→ `ClientHandle`**)
+- `Client::builder()`, `ClientBuilder::with_module()`, `ClientBuilder::preview()`, `ClientPreview::join()` (**→ `ClientHandle`; `ClientHandleArc = Arc<ClientHandle>`; `ClientHandle` derefs to `Client`**)
 - `Client::get_balance_for_unit()`, `get_first_module::<M>()`, `get_first_module_arc::<M>()`
 - `Client::get_next_event_log_id() -> EventLogId`
 - `Client::finalize_and_submit_transaction(op_id, op_type, meta_gen, tx_builder) -> OutPointRange`
 - `Client::transaction_updates(op_id) -> TransactionUpdates`
 - `Client::await_primary_bitcoin_module_output(s)(...)`
 - `Client::subscribe_balance_changes(unit) -> BoxStream<Amount>`
-- `Client::spawn_federation_reconnect()`, `start_executor()` (**receiver `self: &Arc<Self>`**), `db()`, `executor()`, `operation_log()`, `handle_events()`, `get_event_log_transient_receiver()`
+- `Client::spawn_federation_reconnect()`, `start_executor()` (**receiver `self: &Arc<Self>`; use `ClientHandle::start_executor(&self)`, since `ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only**), `db()`, `executor()`, `operation_log()`, `handle_events()`, `get_event_log_transient_receiver()`
 - `Client::chain_id()`, `federation_id()`, `config()`
 - `ClientContext`, `OperationId` = `fedimint_core::core::OperationId`, `OutPointRange` = `fedimint_core::OutPointRange`, `TransactionBuilder` = `fedimint_client::module::transaction::TransactionBuilder`
 
@@ -906,11 +953,12 @@ methods + polling, then add async streams once bindings are verified.
 **bdk_wallet (3.2.0)**
 - `Wallet::create(desc, change_desc)` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`)
 - `reveal_next_address(KeychainKind::External)`, `next_unused_address`, `list_unspent()`, `get_utxo()`, `get_tx()`
-- `build_tx()`, `create_psbt()` (**requires `bdk-tx` + `--cfg bdk_wallet_unstable`**), `sign_with_signers()`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`
+- `build_tx()` → `TxBuilder`; `add_recipient(ScriptBuf, Amount)` (pass `address.script_pubkey()`); `create_psbt()` (**requires `bdk-tx` + `--cfg bdk_wallet_unstable`**), `sign_with_signers(&mut Psbt, &[&SignersContainer], SignOptions)`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`; `psbt.extract_tx() -> Result<Transaction, _>`
 - `finalize_psbt()` is **not deprecated** in 3.2.0 (source check: the `#[deprecated]` at `wallet/mod.rs:1958` is `policies`). `try_finalize_psbt()` is an additional per-input inspection API (no `SignOptions`, returns `FinalizePsbtOutcome`), not a replacement.
 - `start_sync_with_revealed_spks()`, `start_full_scan()`
 - `WalletEvent::TxConfirmed` etc. via `apply_update_events()`
 - `Update` = `bdk_wallet::Update` (crate root — not `bdk_wallet::chain::Update`)
+- `bitcoin::Address<NetworkUnchecked>` has **no `Display`**: display via `assume_checked().to_string()`, match via `script_pubkey().as_bytes()` (stored as `address_script`)
 - Persistence via `bdk_wallet::rusqlite` (`PersistedWallet::create`/`load`) or `bdk_file_store`
 
 **bdk_esplora (0.22.1) — chain source**
@@ -921,6 +969,10 @@ methods + polling, then add async streams once bindings are verified.
 **fedimint-core (0.12.0)**
 - `Database::with_prefix(&self, prefix: Vec<u8>) -> Self`
 - `AmountUnit` = `fedimint_core::module::AmountUnit`
+
+**fedimint-client-module (0.12.0)**
+- `FeeQuote` = `fedimint_client::module::transaction::FeeQuote`: `Debug + Clone + PartialEq + Eq`, **not** `Serialize`/`Deserialize`
+- persist the typed `FeeQuoteWire` (`input/output/dust: BTreeMap<AmountUnit, Amount>`), converting via `Amounts::into_iter()` / `checked_add_unit`
 
 **douglaz/fedimint-wallets (crash-safe patterns)** — source-derived, not compile-verified
 - `MultiClient`, `FedimintJournal`, `runtime::Runtime` as above.
@@ -946,6 +998,10 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 10. **`WalletClientConfig` construction/defaults** — **UNVERIFIED**: `WalletClientInit::default()` is assumed. `WalletClientConfig` carries `dust_limit` and `fee_consensus`; `dust_limit` drives `SendError::DustValue` and `max_sendable_amount(...)`, so a wrong default makes small withdrawals fail. Verify the decoded config path (`client.config().get_module_cfg(id).cast::<WalletClientConfig>()`) and how the module is constructed before implementing peg-out dust checks.
 11. **`ReceiveMeta` full field set** — **UNVERIFIED** beyond `outpoint` and `fee` (VERIFY §8.3/§8.5 exercise those two): the adopted-row path also reads `address`, `value`, and `change_outpoint_range`. Confirm the exact `ReceiveMeta` fields on the pinned 0.12.0 before relying on them; orphan adoption depends on `outpoint` (dedup key), `value` (gross), `fee` (claim fee), and `address` (display).
 12. **Deposit detection without a local bitcoind RPC** — **UNVERIFIED**: `WalletClientInit::default()` is assumed to carry no `DynBitcoindRpc`. The `receive`/`await_receive` path is expected to read **federation-reported chain state** (the federation's wallet module watches the chain), not a local RPC; confirm this before assuming deposits are detected without `ClientBuilder::with_bitcoind_rpc`.
+13. **`await_receive` has no operation id/meta** — **RESOLVED in design**: the Success arm reuses `scan_receive_claims(client)` (the same scan as adoption), takes the unbound claim, and reads `ReceivePaymentEvent.operation_id` + `ReceiveMeta { outpoint, value, fee }`; `claim_figures` is gone (§4.1 step 7).
+14. **`classify_error` parameter type** — **RESOLVED**: one concrete parameter cannot cover `SendError`, `ReceiveError`, and `anyhow::Error`; the design uses `Classify` + generic `classify_error<E: Classify>` (§4.3).
+15. **`Address<NetworkUnchecked>` has no `Display`** — **RESOLVED in design**: store `address` (display via `assume_checked().to_string()`) and `address_script` (scriptPubKey bytes) (§4.4).
+16. **`FeeQuote` is not `Serialize`** — **RESOLVED in design**: persist `FeeQuoteWire` (§4.4); `PartialEq` is present, so the drift compare is unchanged.
 
 ---
 
@@ -961,9 +1017,69 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 ---
 
+## 10. Compile-verified deviations (folded from COMPILE.md)
+
+The scaffold `crates/pegwallet-core` compiles with `cargo check` (**EXIT 0**). This section records
+every place the plan's sketches were reconciled with the real APIs. `file:line` refers to the
+scaffold; docs.rs links are for the pinned versions.
+
+1. **`classify_error` parameter type** — one concrete parameter cannot cover `SendError`,
+   `ReceiveError`, and `anyhow::Error`; the design uses `Classify` + generic
+   `classify_error<E: Classify>` (`crates/pegwallet-core/src/error.rs:15/56`).
+   docs: <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/enum.SendError.html>,
+   <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/enum.ReceiveError.html>.
+2. **`Address<NetworkUnchecked>` has no `Display`** — display via `assume_checked().to_string()`;
+   match via `script_pubkey().as_bytes()`; rows carry both `address` and `address_script` (§4.4).
+   The scaffold currently stores only the string (`journal.rs:279`); adding the script field is the
+   next code pass. docs: <https://docs.rs/bitcoin/0.32.8/bitcoin/struct.Address.html>.
+3. **`add_recipient` takes `ScriptBuf`, not `Address`** — `bdk.rs:21` uses
+   `destination.script_pubkey()`. docs:
+   <https://docs.rs/bdk_wallet/3.2.0/bdk_wallet/struct.TxBuilder.html#method.add_recipient>.
+4. **`ClientPreview::join` returns `ClientHandle`** — `ClientHandleArc = Arc<ClientHandle>`; the
+   scaffold wraps with `Arc::new` (`client.rs:23-24`). docs:
+   <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientPreview.html#method.join>.
+5. **`start_executor`** — `Client::start_executor(self: &Arc<Self>)`; `ClientHandle` has its own
+   `start_executor(&self)`, and `ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only
+   (`client.rs:42-44`). docs:
+   <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.start_executor>,
+   <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientHandle.html#method.start_executor>.
+6. **`Database::with_prefix` takes `Vec<u8>`** — `client.rs:29/36` builds the prefix explicitly.
+   docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html#method.with_prefix>.
+7. **`FeeQuote`** — `PartialEq` is implemented (drift compare compiles), but it is **not**
+   `Serialize`/`Deserialize`; persist the typed `FeeQuoteWire` (§4.4). The scaffold still uses the
+   `Option<String>` placeholder (`journal.rs:116`); dropping it for `FeeQuoteWire` is the next code
+   pass. docs:
+   <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/transaction/struct.FeeQuote.html>.
+8. **`await_receive` returns no operation id/meta** — resolved by the reused
+   `scan_receive_claims` path (§4.1 step 7); `operation_id` comes from
+   `ReceivePaymentEvent.operation_id`; figures from `ReceiveMeta { outpoint, value, fee }`. docs:
+   <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/struct.WalletClientModule.html#method.await_receive>,
+   <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/enum.WalletOperationMeta.html>.
+9. **Journal scaffold is in-memory** — all transitions, single-open invariants, conditional writes,
+   and `claim_bind`/`TakenBy` are real (`journal.rs:172-174`); the fedimint `Database` raw-row/dbtx
+   persistence layer is deferred. docs:
+   <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html>,
+   <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.DatabaseTransaction.html>.
+10. **`WalletClientConfig`** — not constructed; `WalletClientInit::default()` is assumed
+    (`client.rs:19`); dust/fee limits remain unverified (§8.10). docs:
+    <https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/config/struct.WalletClientConfig.html>.
+11. **`receive()` returns `Address`, not `Result`** — no error to classify; the address task's only
+    terminal path is retry-budget exhaustion (`deposit.rs:56-77`); see §4.3. docs:
+    <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/struct.WalletClientModule.html#method.receive>.
+12. **Confirmed signatures that needed no change**: `await_receive`, `send`, `send_fee`,
+    `send_fee_quote`, `await_final_send_operation_state`, `receive_fee`, `build_tx` /
+    `sign_with_signers` / `finalize_psbt` / `extract_tx`, `EventLogId`
+    (`Copy + Ord + Serialize + Deserialize`), `OperationId` (manual serde), `FederationId`
+    (`Copy + Ord + Serialize + Deserialize`), `FeeQuote` (`Clone + PartialEq + Eq + Debug`).
+13. **Build note** — `cargo check` was run with `cmake` on `PATH`; `LIBCLANG_PATH` and
+    `BINDGEN_EXTRA_CLANG_ARGS` are in `.cargo/config.toml [env]`.
+
+---
+
 **Bottom line:** the wallet module is `fedimint-walletv2-client` (VERIFY.md §8). Deposits are
 position-attributed, BDK-funded and discovered (`get_next_event_log_id()` before `receive()`, one
-open deposit per federation, then `await_receive(position)` with real `Success`/`Aborted` handling);
-withdrawals are op-id-attributed and initiated (`send()` then `await_final_send_operation_state`).
-The v1 `fedimint-wallet-client` names are superseded and must not be used. No peg logic has been
-implemented; `VERIFY.md` documents what was and was not verified.
+open deposit per federation, then `await_receive(position)` with real `Success`/`Aborted` handling;
+the claim is resolved by the reused `scan_receive_claims` pass); withdrawals are op-id-attributed and
+initiated (`send()` then `await_final_send_operation_state`). The v1 `fedimint-wallet-client` names
+are superseded and must not be used. The `crates/pegwallet-core` scaffold compiles (`cargo check`,
+EXIT 0); §10 folds every compile-verified deviation from `COMPILE.md`.
