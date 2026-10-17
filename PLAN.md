@@ -36,7 +36,6 @@ pegwallet/                      # workspace root
     pegwallet-ffi/              # thin UniFFI crate (depends on pegwallet-core)
       src/lib.rs                # uniffi::export, PegWallet object
       uniffi/                   # generated bindings (TS/Swift/Kotlin/etc. via uniffi-bindgen)
-  crates/
     pegwallet-cli/              # optional dev CLI (not required by spec)
 ```
 
@@ -244,9 +243,12 @@ Steps:
      `await_receive(position)`.
    - **`Ok((final_state, next_pos))`** → persist `next_position = next_pos`, then **match on
      `FinalReceiveOperationState`**:
-     - `Success` → persist `gross_deposited`, `operation_id`, `funding_outpoint =
-       ReceiveMeta.outpoint`, `claim_fee = ReceiveMeta.fee`, `net_credit = gross − claim_fee`,
-       `state = Done`.
+     - `Success` → `claim_bind(federation_id, ReceiveMeta.outpoint, R.id)`:
+       - `Bound` → persist `gross_deposited`, `operation_id`, `funding_outpoint`, `claim_fee =
+         ReceiveMeta.fee`, `net_credit = gross − claim_fee`, `state = Done`.
+       - `TakenBy(other)` → the adoption pass already recorded this claim on row `other`; set R
+         `Done` **without** inserting a second claim row and **without** a second credit (R's credit
+         fields stay empty; the credit lives on `other`).
      - `Aborted` → the claim was rejected; the still-unspent output is reprocessed under a new
        receive operation. Do **not** set `Done` and do **not** credit. Persist `next_position`, set
        `last_error = "claim aborted"`, keep `state = AddressShown`, and re-enter
@@ -261,9 +263,14 @@ Steps:
       rejected claim, so resuming from raw `position` can re-read an old claim.
    b. **Adopt orphan claims:** scan the operation log for every
       `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` whose final state is
-      `FinalReceiveOperationState::Success`. For each claim whose `(federation_id, outpoint)`
-      matches **no** `deposit_requests` row, insert an `origin = Adopted`, `state = Done` row with
-      `operation_id`, `funding_outpoint`, `txid`, `gross_deposited`, `claim_fee`, and `net_credit`.
+      `FinalReceiveOperationState::Success`. For each, call
+      `claim_bind(federation_id, outpoint, adopted_row_id)`, inserting the `origin = Adopted`,
+      `state = Done` row in the **same `dbtx`**:
+      - `Bound` → the adopted row is inserted and credited (`operation_id`, `funding_outpoint`,
+        `txid`, `gross_deposited`, `claim_fee`, `net_credit`).
+      - `TakenBy(R.id)` → adoption loses: **do not insert** a second row; bind to R and, if R is
+        still open (`AddressShown`), close R as `Done` with the claim figures (only if R's credit
+        fields are unset; never overwrite an existing credit).
       This records (i) a payment that lands after `cancel_deposit`/`Failed`, and (ii) the **second
       output of a double-payment**. Run this pass at boot **and** on a periodic timer / after each
       claim settles, because a second payment can arrive while the app is running. Never adopt an
@@ -271,8 +278,9 @@ Steps:
 
    **Invariant:** every claim in the operation log is represented by **exactly one**
    `deposit_requests` row, keyed `(federation_id, funding_outpoint)`; adoption is idempotent via
-   `deposit_requests_claim`. `Cancelled`/`Failed` rows are terminal and never block the next
-   request; an `Adopted` row is `Done` and does not hold the single-flight slot.
+   `deposit_requests_claim`. Both writers go through `claim_bind` (§4.4); the loser gets `TakenBy`
+   and must not insert or credit again. `Cancelled`/`Failed` rows are terminal and never block the
+   next request; an `Adopted` row is `Done` and does not hold the single-flight slot.
 
    **Double-payment behaviour (chosen):** a second payment to the same address is a second funding
    output → a second claim → a **second row**. The original request row records the first claim and
@@ -352,9 +360,17 @@ let (final_state, next_position) = loop {
 journal.set_deposit_next_position(id, next_position).await?;
 match final_state {
     FinalReceiveOperationState::Success => {
-        // gross/claim_fee from ReceiveMeta.value / ReceiveMeta.fee
-        let (gross, claim_fee) = claim_figures(id).await?;
-        journal.finish_deposit(id, gross, claim_fee).await?; // Done; net = from_sats(gross - claim_fee)
+        // outpoint/gross/claim_fee from ReceiveMeta.outpoint / .value / .fee
+        let (outpoint, gross, claim_fee) = claim_figures(id).await?;
+        match journal.claim_bind(federation_id, outpoint, id).await? {
+            BindResult::Bound => {
+                journal.finish_deposit(id, outpoint, gross, claim_fee).await?; // Done + one credit
+            }
+            BindResult::TakenBy(other) => {
+                // adoption already credited this outpoint on `other`
+                journal.close_deposit_done(id).await?; // Done; no second row / no second credit
+            }
+        }
     }
     FinalReceiveOperationState::Aborted => {
         // rejected claim: reprocessed under a new receive op; never credit here
@@ -371,11 +387,17 @@ for row in journal.deposits_in(&[DepositState::AwaitingAddress, DepositState::Ad
 for claim in scan_receive_claims(&client).await? {
     if claim.final_state != FinalReceiveOperationState::Success { continue; }
     let Some(outpoint) = claim.meta.outpoint else { continue; };
-    journal.adopt_claim_if_absent(AdoptedClaim {
-        federation_id, address: claim.meta.address,
-        funding_outpoint: outpoint, operation_id: claim.operation_id,
+    // insert-if-absent + claim_bind in one dbtx; rolls back on TakenBy
+    match journal.claim_adopt_if_absent(federation_id, outpoint, AdoptedClaim {
+        address: claim.meta.address, operation_id: claim.operation_id,
         value: claim.meta.value, fee: claim.meta.fee,
-    }).await?;   // unique(federation_id, funding_outpoint); origin=Adopted, state=Done
+    }).await? {
+        BindResult::Bound => {}                    // adopted + credited
+        BindResult::TakenBy(row) => {
+            // adoption lost: no second row; close the open owner if it has no credit yet
+            journal.close_deposit_done_if_open(row, claim.meta.value, claim.meta.fee).await?;
+        }
+    }
 }
 ```
 
@@ -598,6 +620,20 @@ column. Every state transition writes the row and its pending-index entry in one
 (`begin_transaction … commit_tx`), so a crash cannot leave a row indexed under a state it no longer
 holds.
 
+**Conflict-safe claim binding (`claim_bind`).** The watch loop and the adoption pass are both
+writers of the claim key, so both go through one primitive:
+`claim_bind(federation_id, funding_outpoint, row_id) -> BindResult::{Bound, TakenBy(row_id)}`,
+implemented as an insert-if-absent on `(federation_id, funding_outpoint)` inside one `dbtx`
+(`deposit_requests_claim` is the durable backstop):
+- key absent → bind the outpoint to `row_id`, return `Bound`;
+- key already maps to `row_id` → `Bound` (idempotent);
+- key maps to another row → `TakenBy(existing)`; the caller must **not** insert a second claim row.
+
+**Invariant:** credit is keyed by `(federation_id, funding_outpoint)` — **exactly one credit row
+per outpoint**, no matter which path records it. An unbound open row (`AddressShown` with
+`funding_outpoint IS NULL`) is not a credit; it must still be closed to `Done` when its claim is
+adopted elsewhere.
+
 ### 4.5 Idempotency keys
 
 - **Deposit `id`** = client-generated UUIDv7/ULID. `position` is an observation cursor, **not** a
@@ -611,11 +647,13 @@ holds.
   outside the index and release the invariant. **Concurrent deposits are unsupported until #9306
   is in the pin.**
 - **Claim invariant / orphan adoption:** every operation-log claim is represented by exactly one
-  row, keyed `(federation_id, funding_outpoint)`. Boot reconciliation (and the periodic pass)
-  inserts an `origin = Adopted`, `state = Done` row for any successful claim with no row; the
-  unique key makes re-scans idempotent. A double-payment to the same address produces two claims
-  and therefore **two rows** (the original request row + one adopted row), both credited; the
-  second is never observed by `await_receive(position)`.
+  row, keyed `(federation_id, funding_outpoint)`. Both the watch loop and the adoption pass write
+  through `claim_bind` (§4.4): `Bound` owns the credit; `TakenBy(other)` means the other path
+  already owns it, so the open row is closed `Done` **without** a second claim row or a second
+  credit. Adoption inserts an `origin = Adopted`, `state = Done` row only when `Bound`; on
+  `TakenBy` it rolls back its insert and closes the open owner. A double-payment to the same
+  address produces two claims and therefore **two rows** (the original request row + one adopted
+  row), both credited; the second is never observed by `await_receive(position)`.
 - **Withdrawal `id`** = client-generated UUIDv7/ULID, persisted before `send()`. `send()` is called
   **at most once per `id`**; the `Quoting → Submitted` transition is the fence. `operation_id` is
   persisted immediately and is `UNIQUE`; on boot we re-await by it and never re-submit. The same
@@ -690,6 +728,10 @@ holds.
 - **Double payment:** send two outputs to the same address; assert the first closes the request row
   as `Done` and the second is adopted as a separate `Done` row, with both credits recorded and no
   duplicate row on re-scan.
+- **Adoption/watch race:** run the periodic adoption scan concurrently with a settling watch loop
+  for the same claim (same `(federation_id, funding_outpoint)`); repeat to exercise both
+  interleavings; assert exactly one credit row, the open row closes `Done` (not stuck
+  `AddressShown`), and the single-flight slot is released.
 - **Balance:** blocked by §8.2 (primary module for BTC) — do not assert balance movements until
   that is resolved.
 
