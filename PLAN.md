@@ -236,11 +236,13 @@ Steps:
    arrives, so a user who never pays would hang the task. Wrap it:
    `match timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await`
    - **timeout (`Elapsed`)** → stay in `AddressShown`, **persist nothing new** (do not advance
-     `next_position`), and re-enter `await_receive(position)`.
+     `next_position`), sleep a small exponential backoff (1s → 60s), and re-enter
+     `await_receive(position)`.
    - **`Ok((final_state, next_pos))`** → persist `next_position = next_pos`, then **match on
      `FinalReceiveOperationState`**:
-     - `Success` → persist `gross_deposited`, `operation_id`, `claim_fee = ReceiveMeta.fee`,
-       `net_credit = gross − claim_fee`, `state = Done`.
+     - `Success` → persist `gross_deposited`, `operation_id`, `funding_outpoint =
+       ReceiveMeta.outpoint`, `claim_fee = ReceiveMeta.fee`, `net_credit = gross − claim_fee`,
+       `state = Done`.
      - `Aborted` → the claim was rejected; the still-unspent output is reprocessed under a new
        receive operation. Do **not** set `Done` and do **not** credit. Persist `next_position`, set
        `last_error = "claim aborted"`, keep `state = AddressShown`, and re-enter
@@ -249,12 +251,31 @@ Steps:
    - **Errors** → classify: timeouts/transport/federation errors are transient (stay
      `AddressShown`); a permanent error (e.g. the federation dropped the wallet module) moves the
      row to `Failed` and releases the invariant.
-8. **On boot:** for every row in `AwaitingAddress`/`AddressShown`, resume the async address/claim
-   steps from the persisted `position`. **Additionally**, reconcile claims via module operations —
-   scan the operation log for `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match
-   the deposit's funding outpoint (fedimint-sdk `find_claim` pattern) — because #9338 can commit a
-   claim without its event-log announcement. Never create a second open row for the federation.
-   `Cancelled`/`Failed` rows are terminal and never block the next request.
+8. **Boot reconciliation (mandatory), two passes:**
+   a. **Resume open rows:** for every row in `AwaitingAddress`/`AddressShown`, resume the address/
+      claim steps from **`COALESCE(next_position, position)`** — `await_receive` advances past a
+      rejected claim, so resuming from raw `position` can re-read an old claim.
+   b. **Adopt orphan claims:** scan the operation log for every
+      `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` whose final state is
+      `FinalReceiveOperationState::Success`. For each claim whose `(federation_id, outpoint)`
+      matches **no** `deposit_requests` row, insert an `origin = Adopted`, `state = Done` row with
+      `operation_id`, `funding_outpoint`, `txid`, `gross_deposited`, `claim_fee`, and `net_credit`.
+      This records (i) a payment that lands after `cancel_deposit`/`Failed`, and (ii) the **second
+      output of a double-payment**. Run this pass at boot **and** on a periodic timer / after each
+      claim settles, because a second payment can arrive while the app is running. Never adopt an
+      `Aborted` claim.
+
+   **Invariant:** every claim in the operation log is represented by **exactly one**
+   `deposit_requests` row, keyed `(federation_id, funding_outpoint)`; adoption is idempotent via
+   `deposit_requests_claim`. `Cancelled`/`Failed` rows are terminal and never block the next
+   request; an `Adopted` row is `Done` and does not hold the single-flight slot.
+
+   **Double-payment behaviour (chosen):** a second payment to the same address is a second funding
+   output → a second claim → a **second row**. The original request row records the first claim and
+   reaches `Done`; the second claim is adopted as `origin = Adopted`, `state = Done`, with the same
+   address and its own `funding_outpoint`/`txid`/credit. Both credits are recorded; neither is
+   dropped. `await_receive(position)` returns only the first claim, so the second is never observed
+   by the request's watch loop — reconciliation is what records it.
 
 ```rust
 // ---- request_deposit: caller gets the open row immediately; this part runs in background ----
@@ -302,10 +323,15 @@ journal.set_deposit_funding_txid(id, funding_txid).await?;
 // ---- watcher: bounded loop; a non-paying user must not hang the task ----
 //      DEPOSIT_WATCH_TIMEOUT is a liveness bound, not a semantic deadline.
 const DEPOSIT_WATCH_TIMEOUT: Duration = Duration::from_secs(600);
+let mut backoff = Duration::from_secs(1);
 let (final_state, next_position) = loop {
     match timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await {
         Ok(result) => break result?,       // Ok((final_state, next_position))
-        Err(_elapsed) => continue,         // stay AddressShown; persist nothing new
+        Err(_elapsed) => {
+            sleep(backoff).await;          // small exponential backoff
+            backoff = (backoff * 2).min(Duration::from_secs(60));
+            continue;                      // stay AddressShown; persist nothing new
+        }
     }
 };
 journal.set_deposit_next_position(id, next_position).await?;
@@ -320,6 +346,21 @@ match final_state {
         journal.set_deposit_aborted(id, next_position).await?; // stays AddressShown
         // re-enter await_receive(next_position) with bounded backoff
     }
+}
+
+// ---- boot reconciliation (mandatory): resume open rows, then adopt orphan claims ----
+for row in journal.deposits_in(&[DepositState::AwaitingAddress, DepositState::AddressShown]).await? {
+    let cursor = row.next_position.unwrap_or(row.position.expect("requested rows have a position"));
+    resume_deposit_watch(row.id, cursor).await;      // COALESCE(next_position, position)
+}
+for claim in scan_receive_claims(&client).await? {
+    if claim.final_state != FinalReceiveOperationState::Success { continue; }
+    let Some(outpoint) = claim.meta.outpoint else { continue; };
+    journal.adopt_claim_if_absent(AdoptedClaim {
+        federation_id, address: claim.meta.address,
+        funding_outpoint: outpoint, operation_id: claim.operation_id,
+        value: claim.meta.value, fee: claim.meta.fee,
+    }).await?;   // unique(federation_id, funding_outpoint); origin=Adopted, state=Done
 }
 ```
 
@@ -400,9 +441,24 @@ Related walletv2 methods (VERIFY.md §8.2): `receive_fee() -> Result<bitcoin::Am
 `tx_chain() -> FederationResult<Vec<TxInfo>>`,
 `pending_tx_chain() -> FederationResult<Vec<TxInfo>>`.
 
+**Dust and fee limits come from `WalletClientConfig`.** `dust_limit` drives `SendError::DustValue`
+and `max_sendable_amount(...)`, so a wrong value makes small withdrawals fail. The config is decoded
+from the federation config (`client.config().get_module_cfg(id).cast::<WalletClientConfig>()`,
+VERIFY §8.5); `WalletClientInit::default()` is assumed and `WalletClientConfig`
+construction/defaults are **UNVERIFIED** (§8.10). Validate `value >= dust_limit` against the decoded
+config before `send()`.
+
 ### 4.3 State enums
 
 ```rust
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DepositOrigin {
+    /// Created by `request_deposit`.
+    Requested,
+    /// Created by boot reconciliation for an operation-log claim with no row.
+    Adopted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DepositState {
     /// Row inserted; `position` persisted; `receive()` has not returned an address yet.
@@ -462,13 +518,15 @@ the close — not by a database engine. The SQL is shown only to make the constr
 CREATE TABLE deposit_requests (
     id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
     federation_id   BLOB NOT NULL,
-    position        INTEGER NOT NULL,          -- EventLogId read BEFORE receive(); NOT unique
-    amount          INTEGER NOT NULL,          -- sats the caller intends to deposit
-    address         TEXT,                      -- set when state = AddressShown
+    origin          TEXT NOT NULL,             -- Requested | Adopted
+    position        INTEGER,                   -- EventLogId read BEFORE receive(); NULL for Adopted
+    amount          INTEGER NOT NULL,          -- sats the caller intends to deposit (gross for Adopted)
+    address         TEXT,                      -- set when state = AddressShown (from ReceiveMeta for Adopted)
     state           TEXT NOT NULL,             -- AwaitingAddress | AddressShown | Done | Cancelled | Failed
     next_position   INTEGER,                   -- returned by await_receive()
     operation_id    BLOB,                      -- claim op learned via ReceiveMeta / event
-    funding_txid    BLOB,                      -- BDK peg-in transaction
+    funding_outpoint BLOB,                     -- ReceiveMeta.outpoint: the claim's funding output
+    funding_txid    BLOB,                      -- BDK peg-in transaction (Requested only)
     quoted_fee      INTEGER,                   -- receive_fee() quote, sats
     claim_fee       INTEGER,                   -- actual ReceiveMeta.fee, sats
     gross_deposited INTEGER,                   -- sats (bitcoin::Amount)
@@ -482,6 +540,10 @@ CREATE TABLE deposit_requests (
 CREATE UNIQUE INDEX deposit_requests_one_open
     ON deposit_requests (federation_id)
     WHERE state IN ('AwaitingAddress', 'AddressShown');
+-- Exactly one row per claim (every operation-log claim is represented once):
+CREATE UNIQUE INDEX deposit_requests_claim
+    ON deposit_requests (federation_id, funding_outpoint)
+    WHERE funding_outpoint IS NOT NULL;
 CREATE INDEX deposit_requests_state ON deposit_requests (state);
 
 CREATE TABLE withdrawal_requests (
@@ -509,11 +571,13 @@ CREATE UNIQUE INDEX withdrawal_requests_one_open
 
 `get_next_event_log_id()` is **not** a unique key; the `deposit_requests_one_open` invariant is
 enforced in the journal code. A new deposit row may be inserted only in the same `dbtx` that closes
-the previous open row. Likewise `withdrawal_requests_one_open` serializes our own sends per
-federation (at most one `Quoting`/`Submitted` row). `Broadcast { txid }` is stored as
-`state='Broadcast'` plus the `txid` column. Every state transition writes the row and its
-pending-index entry in one `dbtx` (`begin_transaction … commit_tx`), so a crash cannot leave a row
-indexed under a state it no longer holds.
+the previous open row. `deposit_requests_claim` enforces **exactly one row per claim**
+(`federation_id`, `funding_outpoint`), so orphan adoption is an insert-if-absent on that key.
+Likewise `withdrawal_requests_one_open` serializes our own sends per federation (at most one
+`Quoting`/`Submitted` row). `Broadcast { txid }` is stored as `state='Broadcast'` plus the `txid`
+column. Every state transition writes the row and its pending-index entry in one `dbtx`
+(`begin_transaction … commit_tx`), so a crash cannot leave a row indexed under a state it no longer
+holds.
 
 ### 4.5 Idempotency keys
 
@@ -527,6 +591,12 @@ indexed under a state it no longer holds.
   `AwaitingAddress`/`AddressShown` with no `funding_txid`) and `Failed` set a terminal state
   outside the index and release the invariant. **Concurrent deposits are unsupported until #9306
   is in the pin.**
+- **Claim invariant / orphan adoption:** every operation-log claim is represented by exactly one
+  row, keyed `(federation_id, funding_outpoint)`. Boot reconciliation (and the periodic pass)
+  inserts an `origin = Adopted`, `state = Done` row for any successful claim with no row; the
+  unique key makes re-scans idempotent. A double-payment to the same address produces two claims
+  and therefore **two rows** (the original request row + one adopted row), both credited; the
+  second is never observed by `await_receive(position)`.
 - **Withdrawal `id`** = client-generated UUIDv7/ULID, persisted before `send()`. `send()` is called
   **at most once per `id`**; the `Quoting → Submitted` transition is the fence. `operation_id` is
   persisted immediately and is `UNIQUE`; on boot we re-await by it and never re-submit. The same
@@ -535,10 +605,31 @@ indexed under a state it no longer holds.
   `withdrawal_requests_one_open` (`Quoting`/`Submitted`), so our own sends cannot race each other;
   `cancel_withdrawal` (from `Quoting`) and a fatal `SendError → Failed` release it.
 - **Crash window** (between `send()` returning and `operation_id` being persisted): on boot, do
-  **not** call `send()` again. Reconcile first — scan the operation log for a `SendMeta` whose
-  `custom_meta.id` matches the row's `id` (the same `find_claim`-style scan used for deposits); if
-  found, adopt that `operation_id` and continue at step 4. If no such operation exists, `send()`
-  did not commit and the row can be re-quoted and re-sent under the same `id`.
+  **not** call `send()` again until the reconciliation scan has **completed cleanly at least once**.
+  Run a bounded retry loop (e.g. `MAX_SCAN_ATTEMPTS = 5`, exponential backoff) over the operation
+  log for a `SendMeta` whose `custom_meta.id` matches the row's `id`:
+  - `Ok(Some(op))` → adopt `op`, persist it as `Submitted`, continue at step 5.
+  - `Ok(None)` after a clean, complete scan → `send()` did not commit; **only now** may the row be
+    re-quoted and re-sent under the same `id`.
+  - `Err(_)` / an incomplete scan is **inconclusive**: keep the row `Quoting`/`Submitted` and retry
+    the scan later — **never re-send on an inconclusive scan**.
+
+  ```rust
+  async fn reconcile_before_resend(id: IdempotencyKey) -> Result<Option<OperationId>> {
+      let mut backoff = Duration::from_secs(1);
+      for _ in 0..MAX_SCAN_ATTEMPTS {
+          match scan_for_send(id).await {
+              Ok(Some(op)) => return Ok(Some(op)),  // adopt; never re-send
+              Ok(None) => return Ok(None),          // clean, complete scan: safe to re-send
+              Err(_) => {
+                  sleep(backoff).await;
+                  backoff = (backoff * 2).min(Duration::from_secs(60));
+              }
+          }
+      }
+      anyhow::bail!("reconciliation scan inconclusive; refusing to re-send")
+  }
+  ```
 
 ### 4.6 Known hazards
 
@@ -574,6 +665,12 @@ indexed under a state it no longer holds.
 - **Withdrawal liveness:** a fatal `SendError` from `send()` moves `Quoting` → `Failed` and releases
   the invariant; a transient `FederationError` stays `Quoting` and retries on boot;
   `cancel_withdrawal` from `Quoting` releases it and is refused from `Submitted`.
+- **Orphan claims:** pay after `cancel_deposit`/`Failed` and assert the next reconciliation pass
+  inserts an `origin = Adopted`, `state = Done` row and records the credit exactly once; repeated
+  passes are idempotent (`deposit_requests_claim`).
+- **Double payment:** send two outputs to the same address; assert the first closes the request row
+  as `Done` and the second is adopted as a separate `Done` row, with both credits recorded and no
+  duplicate row on re-scan.
 - **Balance:** blocked by §8.2 (primary module for BTC) — do not assert balance movements until
   that is resolved.
 
@@ -729,6 +826,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 7. **Depending on douglaz's `wallet_core`/`wallet-fedimint`** — AGPL-3.0, not on crates.io (git dep at a pinned commit). Either re-implement a small journal inline or take the git dep with the license consequence.
 8. **`tx_builder` construction for fedimint transactions** — **RESOLVED** for walletv2: `send()` is the high-level wrapper that builds/submits internally and returns an `OperationId`; no manual `TransactionBuilder` is needed for peg-out.
 9. **Recovery path (§5)** — `ClientPreview::recover` + `Client::wait_for_all_recoveries()` is on the boot critical path but **unverified**: VERIFY.md did not exercise a restore/recovery. The step that shuts down the recovery client and reopens the partition before reading balance is unconfirmed; treat it as blocking a production boot/restore implementation.
+10. **`WalletClientConfig` construction/defaults** — **UNVERIFIED**: `WalletClientInit::default()` is assumed. `WalletClientConfig` carries `dust_limit` and `fee_consensus`; `dust_limit` drives `SendError::DustValue` and `max_sendable_amount(...)`, so a wrong default makes small withdrawals fail. Verify the decoded config path (`client.config().get_module_cfg(id).cast::<WalletClientConfig>()`) and how the module is constructed before implementing peg-out dust checks.
 
 ---
 
