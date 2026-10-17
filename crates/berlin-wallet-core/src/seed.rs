@@ -114,4 +114,26 @@ mod tests {
             "canonical BIP39 and plain-seed strategies must derive the same root"
         );
     }
+
+    #[test]
+    fn bip39_matches_canonical_golden_vector() {
+        // Standard BIP39 test vector, empty passphrase. This is the canonical
+        // fedimint-bip39 v0.12.0 derivation:
+        // DerivableSecret::new_root(to_seed_normalized(""),
+        // b"Fedimint Client Salt"), then the raw-bytes child derivation.
+        let mnemonic = Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .expect("valid mnemonic");
+        let root = Bip39RootSecretStrategy::<12>::to_root_secret(&mnemonic);
+        assert_eq!(
+            root.to_random_bytes::<32>(),
+            [
+                0x6c, 0x63, 0x84, 0x4c, 0xf0, 0x9e, 0xf2, 0x98, 0xe8, 0x4a, 0x57, 0x50, 0xc2, 0x7d,
+                0x9d, 0xc0, 0x5d, 0xcf, 0x45, 0xc9, 0x9c, 0xb8, 0x2e, 0x0c, 0x27, 0xf9, 0x03, 0xaa,
+                0xc3, 0xa5, 0x7d, 0xba,
+            ],
+            "canonical BIP39 root-secret bytes changed"
+        );
+    }
 }

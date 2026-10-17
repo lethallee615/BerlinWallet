@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (18 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (19 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (18 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (19 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (18 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (19 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (18 core tests + CLI 0 tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (19 core tests + CLI 0 tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -1095,3 +1095,51 @@ Docs:
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.chain_id>
 - <https://docs.rs/bitcoin/0.32.8/bitcoin/enum.Network.html>
 - <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-server-core/src/bitcoin_rpc.rs>
+
+
+---
+
+## 22. Root secret byte-exact diff vs `fedimint-bip39` v0.12.0
+
+### 22.1 Line-by-line diff
+
+Git source: `fedimint-bip39/src/lib.rs` at tag `v0.12.0` (not on crates.io for 0.12.0).
+Mirror: `crates/berlin-wallet-core/src/seed.rs`.
+
+| Element | Canonical Git (`fedimint-bip39/src/lib.rs`) | Mirror (`seed.rs`) |
+|---|---|---|
+| Seed input | `secret.to_seed_normalized(EMPTY_PASSPHRASE)` at `:21-27` | `secret.to_seed_normalized(EMPTY_PASSPHRASE)` at `:61-72` |
+| Passphrase | `const EMPTY_PASSPHRASE: &str = ""` (`:23`) | identical |
+| Salt | `const FEDIMINT_CLIENT_NONCE: &[u8] = b"Fedimint Client Salt"` (`:24`) | identical |
+| Root constructor | `DerivableSecret::new_root(seed.as_ref(), FEDIMINT_CLIENT_NONCE)` (`:25-28`) | identical |
+| `consensus_encode` | `secret.to_entropy().consensus_encode(writer)` (`:30-32`) | identical |
+| `consensus_decode_partial` | `Vec::<u8>::consensus_decode_partial(..., ModuleRegistry::default())?` then `Mnemonic::from_entropy(&bytes).map_err(DecodeError::from_err)` (`:34-41`) | identical |
+| `random` | `Mnemonic::generate_in_with(rng, Language::English, WORD_COUNT).expect(...)` (`:43-50`) | identical |
+| `RootSecret` variant | `RootSecret::StandardDoubleDerive(Bip39RootSecretStrategy::<12>::to_root_secret(mnemonic))` (`fedimint-cli/src/lib.rs:420`) | identical (`seed.rs:90`) |
+
+**Salt check for the Plain test.** `PlainRootSecretStrategy` uses the same salt:
+`fedimint-client-module/src/secret.rs:86` has
+`const FEDIMINT_CLIENT_NONCE: &[u8] = b"Fedimint Client Salt";` and
+`DerivableSecret::new_root(secret.as_ref(), FEDIMINT_CLIENT_NONCE)`. Therefore comparing the
+mirrored BIP39 strategy against `PlainRootSecretStrategy` is valid; their salts are identical.
+`bip39_strategy_matches_plain_seed_strategy` (`seed.rs`) asserts the 32-byte derived root is equal.
+
+**Byte-exact golden vector.** `seed::tests::bip39_matches_canonical_golden_vector` pins:
+
+```text
+mnemonic: abandon abandon ... about (12 words, empty passphrase)
+root.to_random_bytes::<32>() =
+6c 63 84 4c f0 9e f2 98 e8 4a 57 50 c2 7d 9d c0
+5d cf 45 c9 9c b8 2e 0c 27 f9 03 aa c3 a5 7d ba
+```
+
+**Dependency note.** Git `fedimint-bip39` depends on `bip39 = "2.2.2"` via its workspace, which is
+not published (crates.io max `2.2.0`). The mirror uses `bip39 =2.2.0`; the BIP39 `to_seed` output
+is identical for the same mnemonic/passphrase, so this is a packaging difference, not a derivation
+difference.
+
+Docs:
+- <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-bip39/src/lib.rs>
+- <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-client-module/src/secret.rs>
+- <https://docs.rs/bip39/2.2.0/bip39/struct.Mnemonic.html#method.to_seed_normalized>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/secret/struct.PlainRootSecretStrategy.html>
