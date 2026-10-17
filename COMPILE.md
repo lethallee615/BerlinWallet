@@ -1316,3 +1316,66 @@ The live federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`. The client now
   scope for this wallet. The join still succeeds with the lnv2 module present in the config.
 
 `lnv2` client crate source: `modules/fedimint-lnv2-client` at Git `v0.12.0`.
+
+---
+
+## 25. Mutinynet round-trip attempt: faucet auth is the blocker
+
+The join and module family are fixed (`9fe9a7a`); the remaining blocker is obtaining signet BTC.
+
+### 25.1 Wallet address
+
+Current BDK address from the joined data dir:
+
+```text
+tb1qnlyj5pq3wfvhh969c5rtpe373tqdmy6stym9vt
+```
+
+Faucet request:
+
+```text
+POST https://faucet.mutinynet.com/api/onchain
+{"sats":100000,"address":"tb1qnlyj5pq3wfvhh969c5rtpe373tqdmy6stym9vt"}
+```
+
+Exact response:
+
+```text
+HTTP/2 401
+{"error":"Missing token"}
+```
+
+### 25.2 Device-flow auth
+
+The faucet requires GitHub OAuth or an L402 mainnet Lightning payment. GitHub device flow was
+started twice:
+
+```text
+GET  https://faucet.mutinynet.com/auth/github/client_id
+POST https://github.com/login/device/code
+POST https://github.com/login/oauth/access_token (device_code poll)
+```
+
+The user approved the displayed codes, but GitHub kept returning:
+
+```json
+{"error":"authorization_pending","error_description":"The authorization request is still pending."}
+```
+
+The first device code then returned `expired_token`; the second remained `authorization_pending`
+through repeated polls. Without a token, the faucet rejects `/api/onchain` with `{"error":"Missing
+token"}`. L402 requires a mainnet Lightning payment, which this harness cannot make.
+
+### 25.3 Consequence for deposit/withdrawal
+
+No signet BTC arrived, so no balance transitioned:
+
+- Deposit: `AddressShown`; `fund_deposit` fails at
+  `bdk_wallet-3.2.0/src/wallet/coin_selection.rs:138` with
+  `Insufficient funds: 0 BTC available of 0.00050054 BTC needed`.
+- Withdrawal: `send_fee_quote` fails with `Insufficient funds` at
+  `fedimint-mintv2-client/src/lib.rs:503`.
+- No `Done` deposit, no `Broadcast` withdrawal, and no txid to report.
+
+This is a funding/authentication blocker, not a wallet-code failure. Once the faucet token or an
+already-funded Mutinynet address is available, the same `run` session can complete the round trip.
