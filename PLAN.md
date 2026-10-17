@@ -219,20 +219,27 @@ Steps:
 3. **Asynchronously** call `let addr = module.receive().await;` with a **120 s** bound and retry on
    timeout (#9205). Persist `{ address = addr, state = AddressShown }` **before** exposing it via
    `deposit_status(id)`. The FFI caller is not blocked (see §6).
-4. **Fund from BDK** (default): `bdk_wallet.build_tx()` paying `addr` for `amount`; sign with
-   `sign_with_signers`, `finalize_psbt`, broadcast via the configured chain source, persist
-   `funding_txid`. External funding skips this step.
+4. **Fund from BDK** (default, **idempotent**): `fund_deposit(id)` first checks `funding_txid`; if
+   it is already set, return it and do **not** build a second transaction. Otherwise
+   `bdk_wallet.build_tx()` paying `addr` for `amount`; sign with `sign_with_signers`,
+   `finalize_psbt`, broadcast via the configured chain source, and persist `funding_txid`.
+   External funding skips this step.
 5. `let quoted_fee = module.receive_fee().await?;` persist it and show `net`.
 6. Subscribe to `ReceivePaymentEvent` for **UI only** (#9338).
-7. `let (final_state, next_pos) = module.await_receive(position).await?;` persist
-   `next_position = next_pos`, then **match on `FinalReceiveOperationState`**:
-   - `Success` → persist `gross_deposited`, `operation_id`, `claim_fee = ReceiveMeta.fee`,
-     `net_credit = gross − claim_fee`, `state = Done`.
-   - `Aborted` → the claim was rejected; the still-unspent output is reprocessed under a new
-     receive operation. Do **not** set `Done` and do **not** credit. Persist `next_position`, set
-     `last_error = "claim aborted"`, keep `state = AddressShown`, and re-enter
-     `await_receive(next_position)` with bounded retry/backoff. (`await_receive` normally loops
-     over aborted claims internally, so this branch is defensive.)
+7. **Bounded watch loop.** `await_receive(position)` is **unbounded** — it waits until a payment
+   arrives, so a user who never pays would hang the task. Wrap it:
+   `match timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await`
+   - **timeout (`Elapsed`)** → stay in `AddressShown`, **persist nothing new** (do not advance
+     `next_position`), and re-enter `await_receive(position)`.
+   - **`Ok((final_state, next_pos))`** → persist `next_position = next_pos`, then **match on
+     `FinalReceiveOperationState`**:
+     - `Success` → persist `gross_deposited`, `operation_id`, `claim_fee = ReceiveMeta.fee`,
+       `net_credit = gross − claim_fee`, `state = Done`.
+     - `Aborted` → the claim was rejected; the still-unspent output is reprocessed under a new
+       receive operation. Do **not** set `Done` and do **not** credit. Persist `next_position`, set
+       `last_error = "claim aborted"`, keep `state = AddressShown`, and re-enter
+       `await_receive(next_position)` with bounded retry/backoff. (`await_receive` normally loops
+       over aborted claims internally, so this branch is defensive.)
 8. **On boot:** for every row in `AwaitingAddress`/`AddressShown`, resume the async address/claim
    steps from the persisted `position`. **Additionally**, reconcile claims via module operations —
    scan the operation log for `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match
@@ -262,7 +269,10 @@ let address = loop {
 };
 journal.set_deposit_address(id, &address, DepositState::AddressShown).await?;
 
-// 3. fund from BDK (default path)
+// 3. fund from BDK (idempotent: never build a second tx)
+if let Some(funding_txid) = journal.deposit_funding_txid(id).await? {
+    return Ok(funding_txid);
+}
 let mut psbt = /* bdk_wallet.build_tx() paying `address` `amount` */;
 bdk_wallet.sign_with_signers(&mut psbt, /* signers */, /* options */)?;
 bdk_wallet.finalize_psbt(&mut psbt, /* options */)?;
@@ -273,8 +283,15 @@ journal.set_deposit_funding_txid(id, funding_txid).await?;
 let quoted_fee = module.receive_fee().await?;
 journal.set_deposit_quoted_fee(id, quoted_fee).await?;
 
-// 5. observe to completion; handle BOTH final states
-let (final_state, next_position) = module.await_receive(position).await?;
+// 5. bounded watch loop; a non-paying user must not hang the task
+//    DEPOSIT_WATCH_TIMEOUT is a liveness bound, not a semantic deadline.
+const DEPOSIT_WATCH_TIMEOUT: Duration = Duration::from_secs(600);
+let (final_state, next_position) = loop {
+    match timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await {
+        Ok(result) => break result?,       // Ok((final_state, next_position))
+        Err(_elapsed) => continue,         // stay AddressShown; persist nothing new
+    }
+};
 journal.set_deposit_next_position(id, next_position).await?;
 match final_state {
     FinalReceiveOperationState::Success => {
@@ -302,20 +319,23 @@ Steps:
    `let quote = module.send_fee_quote(value).await?;` (`value: bitcoin::Amount`).
    Show `value`, `chain_fee`, the `FeeQuote`, and the **net/total debit**. For a sweep use
    `max_sendable_amount(balance, fee)`.
-3. `let operation_id = module.send(address, value, fee, custom_meta).await?;`
+3. **Re-quote immediately before `send()`** (#9098): call `send_fee()` and `send_fee_quote(value)`
+   again, compare with the persisted `chain_fee`/`quote`, and return a `QuoteChanged` error on any
+   mismatch — do **not** call `send()` on drift.
+4. `let operation_id = module.send(address, value, fee, custom_meta).await?;`
    (`WalletClientModule::send(&self, address: Address<NetworkUnchecked>, value: bitcoin::Amount,
    fee: Option<bitcoin::Amount>, custom_meta: serde_json::Value)
    -> Result<OperationId, SendError>`)
    Persist `operation_id` **immediately** and set `state = Submitted`. Put our idempotency key into
    `custom_meta` (`{"id": "<id>"}`) so `SendMeta.custom_meta` carries it through the operation log.
-4. Await:
+5. Await:
    `match module.await_final_send_operation_state(operation_id).await? { … }`
    - `FinalSendOperationState::Success(txid)` → persist `txid`, `state = Broadcast`
    - `FinalSendOperationState::Aborted` → `state = Refunded` (funding rejected; value is spendable
      again — **re-credit**)
    - `FinalSendOperationState::Failure` → `state = Failed` (programming error / malicious
      federation; surface an error, do not silently retry)
-5. **On boot:** for every non-terminal row with an `operation_id`, re-await
+6. **On boot:** for every non-terminal row with an `operation_id`, re-await
    `await_final_send_operation_state(operation_id)`. **Never re-call `send()`** for the same `id`;
    the persisted `operation_id` is the dedup anchor.
 
@@ -332,17 +352,24 @@ let chain_fee = module.send_fee().await?;                 // bitcoin::Amount
 let quote = module.send_fee_quote(value).await?;          // FeeQuote
 ui.show_net(value, chain_fee, &quote);
 
-// 3. submit once; persist the operation id immediately
+// 3. re-quote immediately before send(); abort on drift (#9098)
+let fresh_fee = module.send_fee().await?;
+let fresh_quote = module.send_fee_quote(value).await?;
+if fresh_fee != chain_fee || fresh_quote != quote {
+    return Err(PegError::QuoteChanged { quoted: quote, current: fresh_quote });
+}
+
+// 4. submit once; persist the operation id immediately
 // BDK gives a checked address; send() takes Address<NetworkUnchecked>.
 let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
     bdk_address.into_unchecked();
 let custom_meta = serde_json::json!({ "id": id });
 let operation_id = module
-    .send(destination, value, Some(chain_fee), custom_meta)
+    .send(destination, value, Some(fresh_fee), custom_meta)
     .await?;
 journal.set_withdrawal_operation_id(id, operation_id, WithdrawalState::Submitted).await?;
 
-// 4. final state
+// 5. final state
 match module.await_final_send_operation_state(operation_id).await? {
     FinalSendOperationState::Success(txid) => journal.set_broadcast(id, txid).await?,
     FinalSendOperationState::Aborted        => journal.set_refunded(id).await?,
@@ -392,8 +419,11 @@ is surfaced to the caller and retried, not terminalised.
 
 ### 4.4 Persistence schema
 
-Logical tables in the app DB (prefix `[0x00]`), implemented as prefixed raw rows with a
-`serde_json` envelope (`ROW_VERSION = 1`, per douglaz `FedimintJournal`).
+**The DDL below is illustrative.** The real journal is not SQL: it is prefixed KV rows in
+fedimint's `Database` (prefix `[0x00]`) with a `serde_json` envelope (`ROW_VERSION = 1`, per
+douglaz `FedimintJournal`). The partial-unique invariants (`deposit_requests_one_open`,
+`withdrawal_requests_one_open`) are enforced **in code, inside the same `dbtx`** as the insert and
+the close — not by a database engine. The SQL is shown only to make the constraints explicit.
 
 ```sql
 CREATE TABLE deposit_requests (
@@ -438,13 +468,19 @@ CREATE TABLE withdrawal_requests (
 );
 CREATE INDEX withdrawal_requests_state ON withdrawal_requests (state);
 CREATE INDEX withdrawal_requests_fed_state ON withdrawal_requests (federation_id, state);
+-- At most ONE in-flight withdrawal per federation (same dbtx as insert/close):
+CREATE UNIQUE INDEX withdrawal_requests_one_open
+    ON withdrawal_requests (federation_id)
+    WHERE state IN ('Quoting', 'Submitted');
 ```
 
-`get_next_event_log_id()` is **not** a unique key; the `deposit_requests_one_open` partial index is
-the invariant. A new deposit row may be inserted only in the same `dbtx` that closes the previous
-open row. `Broadcast { txid }` is stored as `state='Broadcast'` plus the `txid` column. Every state
-transition writes the row and its pending-index entry in one `dbtx` (`begin_transaction …
-commit_tx`), so a crash cannot leave a row indexed under a state it no longer holds.
+`get_next_event_log_id()` is **not** a unique key; the `deposit_requests_one_open` invariant is
+enforced in the journal code. A new deposit row may be inserted only in the same `dbtx` that closes
+the previous open row. Likewise `withdrawal_requests_one_open` serializes our own sends per
+federation (at most one `Quoting`/`Submitted` row). `Broadcast { txid }` is stored as
+`state='Broadcast'` plus the `txid` column. Every state transition writes the row and its
+pending-index entry in one `dbtx` (`begin_transaction … commit_tx`), so a crash cannot leave a row
+indexed under a state it no longer holds.
 
 ### 4.5 Idempotency keys
 
@@ -460,7 +496,8 @@ commit_tx`), so a crash cannot leave a row indexed under a state it no longer ho
   **at most once per `id`**; the `Quoting → Submitted` transition is the fence. `operation_id` is
   persisted immediately and is `UNIQUE`; on boot we re-await by it and never re-submit. The same
   `id` is embedded in `custom_meta` so `SendMeta.custom_meta` carries the correlation through the
-  federation operation log.
+  federation operation log. One in-flight withdrawal per federation is enforced by
+  `withdrawal_requests_one_open` (`Quoting`/`Submitted`), so our own sends cannot race each other.
 - **Crash window** (between `send()` returning and `operation_id` being persisted): on boot, do
   **not** call `send()` again. Reconcile first — scan the operation log for a `SendMeta` whose
   `custom_meta.id` matches the row's `id` (the same `find_claim`-style scan used for deposits); if
@@ -489,6 +526,12 @@ commit_tx`), so a crash cannot leave a row indexed under a state it no longer ho
   (#9098) and assert the send is refused/re-quoted; crash after `send()` but before `operation_id`
   is persisted and assert boot reconciliation adopts the operation instead of re-sending; assert
   `Aborted → Refunded` re-credits exactly once.
+- **Funding idempotency:** call `fund_deposit(id)` twice and assert only one BDK transaction exists
+  and the same `funding_txid` is returned.
+- **Unbounded wait:** let a deposit go unpaid past `DEPOSIT_WATCH_TIMEOUT` and assert the row stays
+  `AddressShown`, nothing new is persisted, and the task re-enters `await_receive(position)`.
+- **Withdrawal single-flight:** attempt a second withdrawal while one row is `Quoting`/`Submitted`
+  and assert the open-row invariant refuses it.
 - **Balance:** blocked by §8.2 (primary module for BTC) — do not assert balance movements until
   that is resolved.
 
@@ -546,7 +589,7 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
   - `join_federation(invite_code: String) -> Result<String>`
   - `balance_sat() -> u64`
   - `request_deposit_address() -> Result<DepositView>` — **non-blocking**: inserts/returns the single open `deposit_requests` row in `AwaitingAddress` and returns immediately. A background task runs `receive()` (120 s bound + retry) and performs the `AddressShown` write.
-  - `fund_deposit(id: String) -> Result<String>` — builds/signs/broadcasts the BDK peg-in transaction to the stored address and returns its txid.
+  - `fund_deposit(id: String) -> Result<String>` — **idempotent**: if `funding_txid` is already set, returns it without building a second BDK transaction; otherwise builds/signs/broadcasts the peg-in transaction and returns its txid.
   - `deposit_status(id: String) -> Result<DepositView>` — current state, address (null until `AddressShown`), quoted fee, gross, net credit, funding txid.
   - `withdraw(address: String, sat_amount: u64) -> Result<String>` (creates a `withdrawal_requests` row, returns its id)
   - `withdrawal_status(id: String) -> Result<WithdrawalView>` (state + operation_id + txid)
@@ -557,6 +600,14 @@ Note: `request_deposit_address()` does **not** wait up to 120 s. It returns the 
 row at once; the UI polls `deposit_status(id)` (or subscribes) until the address is available. The
 address is shown only after the `AddressShown` write commits. BDK funding is a separate
 `fund_deposit(id)` call so it cannot block the address request.
+
+**Units at the FFI boundary.** `balance_sat()` returns **sats**; `DepositView.net_credit_msat`
+returns **msat** (`fedimint_core::Amount`). 1 sat = 1000 msat. Convert exactly with
+`fedimint_core::Amount::from_sats(gross_sats - claim_fee_sats)` (×1000) and read with `.msats()`;
+never round `net_credit` down to sats for accounting. `balance_sat()` is display-only:
+`balance_msat / 1000` (floor). The remainder (`balance_msat % 1000`) stays in the federation
+balance — it is not discarded, not rounded into the next send, and not sent anywhere. Expose
+`balance_msat()` if exact accounting is needed.
 
 **Guessing at:** uniffi 0.32 async export support and per-language binding glue; start with blocking
 methods + polling, then add async streams once bindings are verified.
@@ -598,6 +649,7 @@ methods + polling, then add async streams once bindings are verified.
 - `Wallet::create(desc, change_desc)` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`)
 - `reveal_next_address(KeychainKind::External)`, `next_unused_address`, `list_unspent()`, `get_utxo()`, `get_tx()`
 - `build_tx()`, `create_psbt()` (**requires `bdk-tx` + `--cfg bdk_wallet_unstable`**), `sign_with_signers()`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`
+- `finalize_psbt()` is **not deprecated** in 3.2.0 (source check: the `#[deprecated]` at `wallet/mod.rs:1958` is `policies`). `try_finalize_psbt()` is an additional per-input inspection API (no `SignOptions`, returns `FinalizePsbtOutcome`), not a replacement.
 - `start_sync_with_revealed_spks()`, `start_full_scan()`
 - `WalletEvent::TxConfirmed` etc. via `apply_update_events()`
 - `Update` = `bdk_wallet::Update` (crate root — not `bdk_wallet::chain::Update`)

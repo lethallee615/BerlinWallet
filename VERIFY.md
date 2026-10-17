@@ -118,6 +118,11 @@ location (`fedimint *-0.12.0`, `bdk_*` as pinned). "✓ compiled" means `cargo c
 | `Update` ✓ | re-exported at **`bdk_wallet::Update`** (not `bdk_wallet::chain::Update`) | `lib.rs` |
 | `PersistedWallet::create` / `load` | `pub fn create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` / `pub fn load(&mut P, LoadParams) -> Result<Option<Self>, …>` | `wallet/persisted.rs:151/173` |
 
+> **`finalize_psbt` is not deprecated** in bdk_wallet 3.2.0 (verified in source: the
+> `#[deprecated]` at `wallet/mod.rs:1958` belongs to `policies`). `try_finalize_psbt` is an
+> additional per-input inspection API (no `SignOptions`, returns `FinalizePsbtOutcome`), not a
+> replacement; keep using `finalize_psbt` (VERIFY-confirmed).
+
 ### bdk_esplora 0.22.1
 | Name | Real signature | Source |
 |---|---|---|
