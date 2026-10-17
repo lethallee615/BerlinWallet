@@ -5,11 +5,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet};
-use berlin_wallet_core::client::{build_client, client_db, min_withdrawal_sat};
+use berlin_wallet_core::client::{build_client, client_db, min_withdrawal_sat, open_rocksdb};
 use berlin_wallet_core::journal::Journal;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
-use berlin_wallet_core::sqlite::SqliteDb;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::{deposit, withdrawal};
 use bitcoin::{Amount, Network};
@@ -18,7 +17,6 @@ use fedimint_client::RootSecret;
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
-use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_walletv2_client::WalletClientModule;
 use tokio::sync::{Mutex, watch};
 
@@ -50,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
             println!("bdk db: {}", data_dir.join(BDK_DB_FILE).display());
             println!(
                 "fedimint db: {}",
-                data_dir.join("fedimint.sqlite").display()
+                data_dir.join("fedimint.rocksdb").display()
             );
             println!("bdk address: {}", bdk.reveal_destination()?);
             println!("bdk balance: {}", bdk.balance());
@@ -76,9 +74,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn open_database(data_dir: &Path) -> anyhow::Result<Database> {
-    let raw = SqliteDb::open(data_dir.join("fedimint.sqlite"))?;
-    Ok(Database::new(raw, ModuleDecoderRegistry::default()))
+async fn open_database(data_dir: &Path) -> anyhow::Result<Database> {
+    open_rocksdb(&data_dir.join("fedimint.rocksdb")).await
 }
 
 fn data_dir() -> PathBuf {
@@ -112,7 +109,7 @@ fn print_help() {
 }
 
 async fn join(invite: &str, root_secret: RootSecret, data_dir: &Path) -> anyhow::Result<()> {
-    let db = open_database(data_dir)?;
+    let db = open_database(data_dir).await?;
     let connectors = ConnectorRegistry::build_from_client_defaults()
         .bind()
         .await?;
@@ -132,7 +129,7 @@ async fn run(
     root_secret: RootSecret,
     data_dir: &Path,
 ) -> anyhow::Result<()> {
-    let db = open_database(data_dir)?;
+    let db = open_database(data_dir).await?;
     let journal = Journal::new(db.clone(), vec![0x00]);
     let connectors = ConnectorRegistry::build_from_client_defaults()
         .bind()

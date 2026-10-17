@@ -88,7 +88,7 @@ cargo check   # -> exit 0
 ## Architecture
 
 - One `fedimint_client::Client` per federation, stored in an `Arc<RwLock>` map keyed by `FederationId` (mirrors douglaz `MultiClient`).
-- Storage: one shared `Database`; fedimint client `i` lives at `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under a separate prefix `[0x00]`. The CLI uses the persistent `SqliteDb` backend at `<data-dir>/fedimint.sqlite`; production can inject any `Database` (RocksDB/SQLite).
+- Storage: one shared `Database`; fedimint client `i` lives at `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under a separate prefix `[0x00]`. The CLI uses the RocksDB backend at `<data-dir>/fedimint.rocksdb` (`fedimint-rocksdb` git tag `v0.12.0` with all fedimint crates patched); the hand-rolled `SqliteDb` remains for mobile. Production can inject any `Database`.
 - Crash-safe journal: raw byte API + serde_json versioned envelopes (`ROW_VERSION = 1`); rows keyed `[tag] ++ id_bytes`; intent + pending index committed in ONE `dbtx` (`begin_transaction … commit_tx`); idempotency keys + deterministic `OperationId`s; `FederationInfo` registry rows so restart can reopen existing partitions rather than re-joining.
 - Root secret: canonical `Bip39RootSecretStrategy` (mirrored from fedimint-bip39 `v0.12.0`) → `RootSecret::StandardDoubleDerive`; BDK uses the same BIP39 seed via BIP84, with no raw key reuse.
 - Two long-running tokio sync tasks sharing the journal (plus the adoption task):

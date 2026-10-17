@@ -707,11 +707,11 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (15 core tests + CLI 0 tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (16 core tests + CLI 0 tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
-`bcrt1...` address. The SQLite backend tests (below) reopen the database and verify journal rows
-and raw rows survive the drop.
+`bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
+the retained SQLite fallback tests cover the same invariant.
 
 ### 20.1 Client construction (confirmed signatures)
 
@@ -927,73 +927,73 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
   `request-withdraw <address> <sat>`, `send-withdraw <id>`, `withdraw <address> <sat>` (both
   steps), `status <id>`, `sync`, `quit`.
 - Data dir: `$BERLIN_WALLET_DATA_DIR` or `.berlin-wallet`; network is fixed to regtest.
-- Persistence: `open_database` (`main.rs`) creates
-  `fedimint_core::db::Database::new(SqliteDb::open(<data-dir>/fedimint.sqlite), ...)`. Journal and
-  client state share that file under `[0x00]` / `[0x01] ++ u32_le(0)`. On restart,
+- Persistence: `open_database` (`main.rs`) calls `client::open_rocksdb(<data-dir>/fedimint.rocksdb)`.
+  Journal and client state share that RocksDB under `[0x00]` / `[0x01] ++ u32_le(0)`. On restart,
   `build_client` sees `Client::get_config_from_db(&db)` and calls `ClientBuilder::open` instead of
   joining again. The CLI's `join`/`run` commands therefore reopen the same client and journal.
 - The withdrawal destination is caller-supplied: `request_withdrawal` (`withdrawal.rs:19`) stores
   the address and `send_withdrawal` (`withdrawal.rs:121`) parses it. The BDK wallet remains the
   peg-in funding source.
 
-### 20.7 Persistent SQLite `IRawDatabase` backend
+### 20.7 Primary RocksDB backend + retained SQLite fallback
 
-**Published-backend findings (before choosing):**
+**Availability re-check (before changing anything):**
 
-- `fedimint-rocksdb` exists on crates.io only through **0.8.1**; there is **no 0.12.0** release.
-- `fedimint-sqlite` is not published, and there is no `fedimint-sqlite` crate in the fedimint
-  `v0.12.0` tree (raw GitHub path returns 404).
-- `fedimint-rocksdb` **does** exist at Git tag `v0.12.0`. Adding it directly as a git dependency is
-  not type-compatible with our crates.io `fedimint-core 0.12.0`: the git crate resolves
-  `fedimint-core` from its own git workspace, producing a second crate instance and a different
-  `Database` type. Making that work would require patching the entire fedimint graph to git (and
-  building native RocksDB). Vendoring the RocksDB crate is possible but heavier than this step.
-- Chosen option: a minimal persistent backend over the already-pinned `rusqlite` 0.31.0,
-  implementing `IRawDatabase`/`IRawDatabaseTransaction`.
+- `fedimint-rocksdb` on crates.io: versions through **0.8.1 only**; no **0.12.0** release.
+- `fedimint-sqlite`: **does not exist** at tag `v0.12.0` and is not published. The earlier 404 was
+  correct; the root tree has no `fedimint-sqlite` directory.
+- The `v0.12.0` workspace does publish DB backends as workspace crates:
+  `fedimint-rocksdb` and `fedimint-cursed-redb` (plus `fedimint-db-locked`). None of those are on
+  crates.io at 0.12.0 (`fedimint-cursed-redb` is not on crates.io at all).
+- The Git tag **does** contain `fedimint-rocksdb` 0.12.0 and `fedimint-db-locked` 0.12.0.
 
+**Chosen:** `fedimint-rocksdb` from Git tag `v0.12.0`, with `[patch.crates-io]` entries for every
+`fedimint-*` workspace package so the whole graph resolves to one Git-fedimint-core instance. This
+replaces the earlier SQLite primary while keeping the hand-rolled SQLite backend available.
+
+Patch set:
+- All 88 `fedimint-*` workspace packages are patched to
+  `git = "https://github.com/fedimint/fedimint", tag = "v0.12.0"`.
+- `fedimint-threshold-crypto` is **not** a workspace package (it is an external package dependency
+  named via `package = "fedimint-threshold-crypto"`); its patch entry was removed because Cargo
+  refused to resolve it from the Git workspace.
+- Cargo emits unused-patch warnings for server/gateway/testing crates that are not in the client
+  graph. They are harmless but noisy; removing them would defeat the "every crate" requirement.
+
+Cascade effects observed:
+- `fedimint-core`, `fedimint-client`, modules, connectors, eventlog, etc. now come from the same
+  Git revision (`2ead392b`), so there is one `Database`/`IRawDatabase` type.
+- New/replaced transitive packages: `fedimint-db-locked`, `fs-lock`, `fs4`, `bon`,
+  `rocksdb 0.24.0`, `librocksdb-sys 0.17.3+10.4.2`, plus the RocksDB native compression deps
+  (`zstd-sys`, `lz4-sys`, `libz-sys`, `bzip2-sys`). The lockfile now points the fedimint packages
+  at the Git source.
+- Build requirement: a C++17 compiler is mandatory. This sandbox had `cc` but no `c++`/`g++`;
+  verification used a local Zig 0.17 C++ wrapper and a combined libc++/libc++abi/libunwind/ubsan
+  static runtime. CI/packaging must install `g++` or `clang++`; do not depend on the wrapper.
+- `RocksDb::open()` uses `block_in_place`, so the RocksDB test uses a multi-thread Tokio runtime.
+
+Wiring:
 ```rust
-// fedimint-core-0.12.0/src/db/mod.rs
-pub trait IRawDatabase: Debug + MaybeSend + MaybeSync + 'static { // :264
-    type Transaction<'a>: IRawDatabaseTransaction + Debug;
-    async fn begin_transaction<'a>(&'a self) -> Self::Transaction<'a>;
-    fn checkpoint(&self, backup_path: &Path) -> DatabaseResult<()>;
+// client.rs
+pub async fn open_rocksdb(path: &Path) -> anyhow::Result<Database> {
+    let raw = fedimint_rocksdb::RocksDb::build(path).open().await?;
+    Ok(Database::new(raw, ModuleDecoderRegistry::default()))
 }
-pub trait IRawDatabaseTransaction: MaybeSend + IDatabaseTransactionOps { // :1253
-    async fn commit_tx(self) -> DatabaseResult<()>;
-}
-pub trait IDatabaseTransactionOpsCore: MaybeSend { // :883
-    async fn raw_insert_bytes(...); async fn raw_get_bytes(...);
-    async fn raw_remove_entry(...); async fn raw_find_by_prefix(...);
-    async fn raw_find_by_prefix_sorted_descending(...);
-    async fn raw_find_by_range(...); async fn raw_remove_by_prefix(...);
-}
-pub fn new(raw: impl IRawDatabase + 'static, // :419
-           module_decoders: ModuleDecoderRegistry) -> Self;
 ```
+The CLI uses `<data-dir>/fedimint.rocksdb`; `ClientBuilder::open` reopens the stored client config on
+restart. `client::open_sqlite` and `sqlite::SqliteDb` remain available (and tested) for mobile or
+environments where RocksDB is not appropriate.
 
-`SqliteDb` (`sqlite.rs:25`) stores one SQLite file:
+Persistence tests:
+- `client::tests::rocksdb_journal_rows_survive_reopen` — inserts a journal row, drops the
+  `Database`, reopens the RocksDB path, and reads the row back.
+- `sqlite::tests::journal_rows_survive_reopen` / `raw_rows_survive_reopen` — SQLite fallback.
+- `sqlite::tests::write_conflict_is_reported` — SQLite optimistic conflict.
+- Client-config persistence is wired through the same `Database` + `ClientBuilder::open`; an
+  end-to-end federation restart was not run in this environment (no guardian).
 
-- `kv(key BLOB PRIMARY KEY, value BLOB, version INTEGER)` and `meta(id=1, version INTEGER)`.
-- `begin_transaction` loads a snapshot of every `(value, version)`.
-- `commit_tx` opens `BEGIN IMMEDIATE`, checks the current version of every exact key read and every
-  written key against the snapshot, then applies buffered puts/deletes. A mismatch returns
-  `DatabaseError::WriteConflict`; read-only transactions skip the check. This gives
-  `retry_on_conflict` a real backend that can actually raise a conflict.
-- `raw_*` calls are served from the snapshot plus buffered writes; prefix/range streams are
-  collected into a `PrefixStream`.
-
-**Tradeoffs:** each transaction copies the whole KV table (`O(keys)`), and conflict detection is
-optimistic per key (disjoint prefixes such as `[0x00]` journal and `[0x01]` client do not conflict).
-It is not RocksDB-scale or a multi-version read engine, but it is persistent, optimistic, and
-adequate for the single-process core/CLI. The CLI uses it at `<data-dir>/fedimint.sqlite`;
-`ClientBuilder::open` reopens the stored client config on restart.
-
-Tests (`sqlite.rs`):
-- `journal_rows_survive_reopen` (`sqlite.rs:359`) — writes a journal row, drops the `Database`,
-  reopens the file, reads the row.
-- `write_conflict_is_reported` (`sqlite.rs:394`) — two transactions from the same version; the
-  second commit returns `DatabaseError::WriteConflict`.
-- `raw_rows_survive_reopen` (`sqlite.rs:418`) — raw key/value rows persist.
+RocksDB APIs: <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-rocksdb/src/lib.rs>,
+<https://docs.rs/rocksdb/0.24.0/rocksdb/struct.OptimisticTransactionDB.html>.
 
 ---
 ### 20.8 Docs links

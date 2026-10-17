@@ -1,3 +1,67 @@
 [workspace]
 resolver = "3"
 members = ["crates/berlin-wallet-core", "crates/berlin-wallet-cli"]
+
+[patch.crates-io]
+fedimint-aead = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-api-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-bip39 = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-bitcoind = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-build = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-client-module = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-client-rpc = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-connectors = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-core = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-cursed-redb = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-db-locked = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-derive = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-derive-secret = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-dummy-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-dummy-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-dummy-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-empty-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-eventlog = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-gateway-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-gateway-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-gateway-server-db = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-gateway-ui = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-gw-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-gwv2-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-lightning = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-ln-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-ln-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-ln-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-lnurl = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-lnv2-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-lnv2-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-lnv2-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-logging = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-meta-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-meta-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-meta-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-metrics = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-mint-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-mint-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-mint-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-mintv2-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-mintv2-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-mintv2-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-portalloc = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-rocksdb = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-server-bitcoin-rpc = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-server-core = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-server-ui = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-testing = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-testing-core = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-ui-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-unknown-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-unknown-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-util-error = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-wallet-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-wallet-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-wallet-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-walletv2-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-walletv2-common = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
+fedimint-walletv2-server = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }

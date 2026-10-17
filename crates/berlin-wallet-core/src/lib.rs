@@ -18,7 +18,7 @@ pub mod sync;
 pub mod wire;
 pub mod withdrawal;
 
-pub use client::min_withdrawal_sat;
+pub use client::{min_withdrawal_sat, open_rocksdb, open_sqlite};
 pub use error::{Classify, ErrorClass, PegError, classify_error};
 pub use journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositOrigin, DepositRow, DepositState, Journal,

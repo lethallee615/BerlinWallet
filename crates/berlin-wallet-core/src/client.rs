@@ -4,6 +4,7 @@ use fedimint_client::{Client, ClientHandleArc, RootSecret};
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
+use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_mint_client::MintClientInit;
 use fedimint_walletv2_client::WalletClientInit;
 use fedimint_walletv2_common::KIND as WALLET_V2_KIND;
@@ -64,6 +65,22 @@ pub async fn min_withdrawal_sat(client: &Client) -> anyhow::Result<u64> {
 }
 
 /// App journal partition.
+/// Open the primary persistent RocksDB-backed database.
+///
+/// `fedimint-rocksdb` is not published at 0.12.0; the workspace patches every
+/// fedimint crate to the `v0.12.0` Git tag so `fedimint-core` unifies with the
+/// Git backend crates.
+pub async fn open_rocksdb(path: &std::path::Path) -> anyhow::Result<Database> {
+    let raw = fedimint_rocksdb::RocksDb::build(path).open().await?;
+    Ok(Database::new(raw, ModuleDecoderRegistry::default()))
+}
+
+/// Open the hand-rolled SQLite backend (kept for mobile/embedded hosts).
+pub fn open_sqlite(path: &std::path::Path) -> anyhow::Result<Database> {
+    let raw = crate::sqlite::SqliteDb::open(path)?;
+    Ok(Database::new(raw, ModuleDecoderRegistry::default()))
+}
+
 pub fn journal_db(db: &Database) -> Database {
     db.with_prefix(vec![0x00])
 }
@@ -80,4 +97,44 @@ pub fn client_db(db: &Database, db_prefix: u32) -> Database {
 /// (`ClientHandle::inner_arc` is `#[cfg(feature = "uniffi")]` only.)
 pub fn start_executor(handle: &ClientHandleArc) {
     handle.start_executor();
+}
+
+#[cfg(test)]
+mod tests {
+    use fedimint_core::config::FederationId;
+    use fedimint_eventlog::EventLogId;
+
+    use super::*;
+    use crate::journal::{DepositRow, Journal};
+    use crate::ops::DepositId;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rocksdb_journal_rows_survive_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("berlin-wallet-rocksdb-{}", uuid::Uuid::now_v7()));
+        let federation_id = FederationId::dummy();
+        let id = DepositId::new();
+        let amount = bitcoin::Amount::from_sat(75_000);
+
+        {
+            let db = open_rocksdb(&path).await.expect("open rocksdb");
+            let journal = Journal::new(db, vec![0x00]);
+            let row =
+                DepositRow::requested(id.clone(), federation_id, EventLogId::LOG_START, amount);
+            journal.insert_deposit(&row).await.expect("insert");
+        }
+
+        let db = open_rocksdb(&path).await.expect("reopen rocksdb");
+        let journal = Journal::new(db, vec![0x00]);
+        let row = journal
+            .deposit(&id)
+            .await
+            .expect("read")
+            .expect("row must survive reopen");
+        assert_eq!(row.id, id);
+        assert_eq!(row.amount, amount);
+        assert_eq!(row.federation_id, federation_id);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
 }

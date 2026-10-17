@@ -152,7 +152,7 @@ so no raw key material is shared.
 Storage layout (douglaz `MultiClient`): one `Database`; fedimint client `i` lives at
 `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under `[0x00]`. The core
 accepts any `Database`; the CLI uses the persistent SQLite backend
-(`<data-dir>/fedimint.sqlite`, see COMPILE.md §20.7).
+(`<data-dir>/fedimint.rocksdb`; the SQLite backend remains available for mobile, see COMPILE.md §20.7).
 
 ---
 
