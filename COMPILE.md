@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (11 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (15 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (11 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (15 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (11 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (15 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,10 +707,11 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (11 core tests + CLI 0 tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (15 core tests + CLI 0 tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
-`bcrt1...` address.
+`bcrt1...` address. The SQLite backend tests (below) reopen the database and verify journal rows
+and raw rows survive the drop.
 
 ### 20.1 Client construction (confirmed signatures)
 
@@ -735,25 +736,42 @@ pub async fn join(
     pre_root_secret: RootSecret,
 ) -> anyhow::Result<ClientHandle>;
 
+// fedimint-client-0.12.0/src/client/builder.rs:483
+pub async fn open(
+    self,
+    connectors: ConnectorRegistry,
+    db_no_decoders: Database,
+    pre_root_secret: RootSecret,
+) -> anyhow::Result<ClientHandle>;
+
+// fedimint-client-0.12.0/src/client.rs:459
+pub async fn get_config_from_db(db: &Database) -> Option<ClientConfig>;
+
 // fedimint-client-0.12.0/src/client/handle.rs:52
 pub fn start_executor(&self);
 ```
 
-`client::build_client` (`client.rs:13`) now mirrors the requested order exactly:
+`client::build_client` (`client.rs:13`) joins a fresh database or opens an existing one:
 
 ```rust
 let mut builder = Client::builder().await?;
 builder.with_module(MintClientInit);
 builder.with_module(WalletClientInit::default());
-let preview = builder.preview(connectors.clone(), &invite).await?;
-let client = Arc::new(preview.join(db, root_secret).await?);
+let client = if Client::get_config_from_db(&db).await.is_some() {
+    builder.open(connectors, db, root_secret).await?
+} else {
+    builder.preview(connectors, &invite).await?
+        .join(db, root_secret).await?
+};
+let client = Arc::new(client);
 client.start_executor();
-Ok(client)
 ```
 
-`ClientHandleArc = Arc<ClientHandle>`; `start_executor()` is called on the handle (it forwards to
-the inner `Client`). `client_db(&db, db_prefix)` (`client.rs:58`) still supplies
-`[0x01] ++ u32_le(db_prefix)`; `Journal::new(db, vec![0x00])` keeps the app partition separate.
+`ClientBuilder::open` verifies the stored pre-root-secret hash, so a restart with the same mnemonic
+opens the existing client; a different mnemonic is rejected. `ClientHandleArc =
+Arc<ClientHandle>`; `start_executor()` is called on the handle (it forwards to the inner `Client`).
+`client_db(&db, db_prefix)` (`client.rs:72`) still supplies `[0x01] ++ u32_le(db_prefix)`;
+`Journal::new(db, vec![0x00])` keeps the app partition separate.
 
 The CLI builds the connector registry with:
 
@@ -765,40 +783,48 @@ ConnectorRegistryBuilder::bind(self) -> anyhow::Result<ConnectorRegistry>;
 
 and parses the invite with `InviteCode::from_str(&str)` before `builder.preview(...)`.
 
-### 20.2 Root secret: the guessed `Bip39RootSecretStrategy` does not exist
+### 20.2 Canonical BIP39 root secret
 
-`Bip39RootSecretStrategy` is **not present** in fedimint-client / fedimint-client-module 0.12.0,
-and `fedimint-bip39` is only published through **0.8.1**. The real path is:
+`Bip39RootSecretStrategy` is **not published on crates.io for 0.12.0** (`fedimint-bip39` stops at
+0.8.1), but it exists at Git tag `v0.12.0` in `fedimint-bip39/src/lib.rs`. Its canonical
+derivation is:
 
 ```rust
-// fedimint-client-0.12.0/src/client/builder.rs:94; re-exported at lib.rs:107
-pub enum RootSecret {
-    StandardDoubleDerive(DerivableSecret),
-    Custom(DerivableSecret),
-}
+// fedimint-bip39 v0.12.0 (Git tag), mirrored in seed.rs
+impl<const WORD_COUNT: usize> RootSecretStrategy for Bip39RootSecretStrategy<WORD_COUNT> {
+    type Encoding = Mnemonic;
 
-// fedimint-client-module-0.12.0/src/secret.rs:54
-pub trait RootSecretStrategy {
-    type Encoding: Clone;
-    fn to_root_secret(secret: &Self::Encoding) -> DerivableSecret;
+    fn to_root_secret(secret: &Mnemonic) -> DerivableSecret {
+        const FEDIMINT_CLIENT_NONCE: &[u8] = b"Fedimint Client Salt";
+        const EMPTY_PASSPHRASE: &str = "";
+        DerivableSecret::new_root(
+            secret.to_seed_normalized(EMPTY_PASSPHRASE).as_ref(),
+            FEDIMINT_CLIENT_NONCE,
+        )
+    }
     ...
 }
-
-// fedimint-client-module-0.12.0/src/secret.rs:80
-pub struct PlainRootSecretStrategy;
-// Encoding = [u8; 64]
 ```
 
-The scaffold adds `bip39 = "=2.2.0"` only to generate/parse a 12-word mnemonic
-(`Mnemonic::generate(12)`, `Mnemonic::to_seed("") -> [u8; 64]`). It does **not** enable
-`bdk_wallet`'s `keys-bip39` feature. `seed.rs` does:
+The scaffold mirrors that implementation (`seed::Bip39RootSecretStrategy`), and a test asserts it
+is identical to `PlainRootSecretStrategy::to_root_secret(&mnemonic.to_seed(""))`:
+`seed::tests::bip39_strategy_matches_plain_seed_strategy`. `root_secret_from_mnemonic` then wraps it
+in:
 
 ```rust
-RootSecret::StandardDoubleDerive(PlainRootSecretStrategy::to_root_secret(&seed64))
+RootSecret::StandardDoubleDerive(Bip39RootSecretStrategy::<12>::to_root_secret(mnemonic))
 ```
 
+`PlainRootSecretStrategy` (`fedimint-client-module-0.12.0/src/secret.rs:80`) performs the same
+inner `DerivableSecret::new_root(seed, "Fedimint Client Salt")`; using the mirrored canonical BIP39
+strategy makes the wire-compatible derivation explicit.
+
+The scaffold adds `bip39 = "=2.2.0"` for the mnemonic/seed only; it does **not** enable
+`bdk_wallet`'s `keys-bip39` feature. `RootSecret` remains
+`fedimint_client::RootSecret` (`client/builder.rs:94`, re-exported at `lib.rs:107`).
+
 **Seed sharing decision:** the BIP39 seed is shared between fedimint and BDK, but the derivations
-are domain-separated: fedimint hashes it through `PlainRootSecretStrategy` (the
+are domain-separated: fedimint hashes it through the canonical BIP39 strategy (the
 `"Fedimint Client Salt"` root) and then applies its federation derivation; BDK uses the standard
 BIP32/BIP84 hierarchy (`wpkh(master/84'/coin'/0'/0/*)` and `.../1/*`). No raw private key is shared.
 This keeps a single mnemonic backup while avoiding direct key reuse.
@@ -845,9 +871,9 @@ Wallet::sign_with_signers(&mut psbt, &[&ext, &int], SignOptions::default());
 Wallet::apply_unconfirmed_txs([(tx, last_seen)]);
 ```
 
-`BdkWallet::build_and_finalize` (`bdk.rs:121`) is async: it signs/finalizes, **broadcasts through
+`BdkWallet::build_and_finalize` (`bdk.rs:132`) is async: it signs/finalizes, **broadcasts through
 the configured Esplora URL**, then records the tx and persists. `reveal_destination` persists the
-new address index immediately (`bdk.rs:111`).
+new address index immediately (`bdk.rs:122`). `BdkWallet::is_our_address` (`bdk.rs:113`) is the only gate for a local withdrawal script scan.
 
 ### 20.4 Esplora chain source
 
@@ -869,7 +895,7 @@ Builder::new(base_url).build_async() -> Result<AsyncClient, Error>;
 AsyncClient::broadcast(&transaction) -> Result<(), Error>;
 ```
 
-`BdkWallet::sync` (`bdk.rs:150`) does a **partial** sync over revealed scripts, applies the update,
+`BdkWallet::sync` (`bdk.rs:161`) does a **partial** sync over revealed scripts, applies the update,
 and persists. Sync and broadcast are each bounded by `ESPLORA_TIMEOUT = 30 s` (`bdk.rs:16`). It does
 not perform a full gap scan; a restored wallet with unknown historical addresses would need
 `full_scan`/`start_full_scan` added. The CLI defaults to regtest and `http://127.0.0.1:3002`
@@ -878,12 +904,16 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
 ### 20.5 Sync tasks
 
 - `sync::bdk_chain_task(wallet: Arc<Mutex<BdkWallet>>, shutdown: watch::Receiver<bool>)`
-  (`sync.rs:58`): immediate first pass, then `BDK_SYNC_INTERVAL = 30 s` with ±10% jitter; logs and
+  (`sync.rs:59`): immediate first pass, then `BDK_SYNC_INTERVAL = 30 s` with ±10% jitter; logs and
   retries errors; exits on shutdown.
-- `sync::fedimint_sync_task(client: ClientHandleArc, shutdown: watch::Receiver<bool>)`
-  (`sync.rs:84`): calls `client.spawn_federation_reconnect()`, then drains
-  `client.get_event_log_transient_receiver()` on a `FEDIMINT_SYNC_INTERVAL = 30 s` jittered tick;
-  handles `Empty`/`Lagged`/`Closed`; exits on shutdown.
+- `sync::fedimint_sync_task(client: ClientHandleArc, journal: Journal, shutdown: watch::Receiver<bool>)`
+  (`sync.rs:85`): calls `client.spawn_federation_reconnect()`, drains
+  `client.get_event_log_transient_receiver()`, then calls
+  `withdrawal::reconcile_submitted(client, &journal)` on a `FEDIMINT_SYNC_INTERVAL = 30 s` jittered
+  tick; handles `Empty`/`Lagged`/`Closed`; exits on shutdown.
+- Withdrawal reconciliation uses `await_final_send_operation_state(Success(txid))` and calls
+  `journal.set_broadcast(txid)`; it does **not** require the destination to be in the BDK wallet.
+  A local BDK scan is valid only when `BdkWallet::is_our_address(address)` is true.
 - `sync::adoption_task` keeps its existing 60 s schedule and shutdown handling.
 
 ### 20.6 CLI harness
@@ -897,25 +927,83 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
   `request-withdraw <address> <sat>`, `send-withdraw <id>`, `withdraw <address> <sat>` (both
   steps), `status <id>`, `sync`, `quit`.
 - Data dir: `$BERLIN_WALLET_DATA_DIR` or `.berlin-wallet`; network is fixed to regtest.
+- Persistence: `open_database` (`main.rs`) creates
+  `fedimint_core::db::Database::new(SqliteDb::open(<data-dir>/fedimint.sqlite), ...)`. Journal and
+  client state share that file under `[0x00]` / `[0x01] ++ u32_le(0)`. On restart,
+  `build_client` sees `Client::get_config_from_db(&db)` and calls `ClientBuilder::open` instead of
+  joining again. The CLI's `join`/`run` commands therefore reopen the same client and journal.
+- The withdrawal destination is caller-supplied: `request_withdrawal` (`withdrawal.rs:19`) stores
+  the address and `send_withdrawal` (`withdrawal.rs:121`) parses it. The BDK wallet remains the
+  peg-in funding source.
 
-**Deviation / not production-ready:** the fedimint `Database` remains caller-supplied and the CLI
-uses `fedimint_core::db::mem_impl::MemDatabase` (`mem_impl.rs:36`; source note says test-only, not
-a proper MVCC implementation) because no 0.12.0 RocksDB/SQLite backend is published. Journal and
-fedimint client state are therefore **per-process** in the CLI; only the BDK wallet and mnemonic
-persist across runs. A production host must supply a real `Database` backend through
-`client::build_client` + `client_db`/`Journal::new`; the core accepts any `Database`.
+### 20.7 Persistent SQLite `IRawDatabase` backend
 
-Also, the plan's withdrawal step originally revealed a BDK address as the destination. That was
-wrong for the product flow; `request_withdrawal` now takes a caller-supplied address
-(`withdrawal.rs:19`) and `send_withdrawal` parses it (`withdrawal.rs:54`). The BDK wallet remains
-the peg-in funding source.
+**Published-backend findings (before choosing):**
 
-### 20.7 Docs links
+- `fedimint-rocksdb` exists on crates.io only through **0.8.1**; there is **no 0.12.0** release.
+- `fedimint-sqlite` is not published, and there is no `fedimint-sqlite` crate in the fedimint
+  `v0.12.0` tree (raw GitHub path returns 404).
+- `fedimint-rocksdb` **does** exist at Git tag `v0.12.0`. Adding it directly as a git dependency is
+  not type-compatible with our crates.io `fedimint-core 0.12.0`: the git crate resolves
+  `fedimint-core` from its own git workspace, producing a second crate instance and a different
+  `Database` type. Making that work would require patching the entire fedimint graph to git (and
+  building native RocksDB). Vendoring the RocksDB crate is possible but heavier than this step.
+- Chosen option: a minimal persistent backend over the already-pinned `rusqlite` 0.31.0,
+  implementing `IRawDatabase`/`IRawDatabaseTransaction`.
+
+```rust
+// fedimint-core-0.12.0/src/db/mod.rs
+pub trait IRawDatabase: Debug + MaybeSend + MaybeSync + 'static { // :264
+    type Transaction<'a>: IRawDatabaseTransaction + Debug;
+    async fn begin_transaction<'a>(&'a self) -> Self::Transaction<'a>;
+    fn checkpoint(&self, backup_path: &Path) -> DatabaseResult<()>;
+}
+pub trait IRawDatabaseTransaction: MaybeSend + IDatabaseTransactionOps { // :1253
+    async fn commit_tx(self) -> DatabaseResult<()>;
+}
+pub trait IDatabaseTransactionOpsCore: MaybeSend { // :883
+    async fn raw_insert_bytes(...); async fn raw_get_bytes(...);
+    async fn raw_remove_entry(...); async fn raw_find_by_prefix(...);
+    async fn raw_find_by_prefix_sorted_descending(...);
+    async fn raw_find_by_range(...); async fn raw_remove_by_prefix(...);
+}
+pub fn new(raw: impl IRawDatabase + 'static, // :419
+           module_decoders: ModuleDecoderRegistry) -> Self;
+```
+
+`SqliteDb` (`sqlite.rs:25`) stores one SQLite file:
+
+- `kv(key BLOB PRIMARY KEY, value BLOB, version INTEGER)` and `meta(id=1, version INTEGER)`.
+- `begin_transaction` loads a snapshot of every `(value, version)`.
+- `commit_tx` opens `BEGIN IMMEDIATE`, checks the current version of every exact key read and every
+  written key against the snapshot, then applies buffered puts/deletes. A mismatch returns
+  `DatabaseError::WriteConflict`; read-only transactions skip the check. This gives
+  `retry_on_conflict` a real backend that can actually raise a conflict.
+- `raw_*` calls are served from the snapshot plus buffered writes; prefix/range streams are
+  collected into a `PrefixStream`.
+
+**Tradeoffs:** each transaction copies the whole KV table (`O(keys)`), and conflict detection is
+optimistic per key (disjoint prefixes such as `[0x00]` journal and `[0x01]` client do not conflict).
+It is not RocksDB-scale or a multi-version read engine, but it is persistent, optimistic, and
+adequate for the single-process core/CLI. The CLI uses it at `<data-dir>/fedimint.sqlite`;
+`ClientBuilder::open` reopens the stored client config on restart.
+
+Tests (`sqlite.rs`):
+- `journal_rows_survive_reopen` (`sqlite.rs:359`) — writes a journal row, drops the `Database`,
+  reopens the file, reads the row.
+- `write_conflict_is_reported` (`sqlite.rs:394`) — two transactions from the same version; the
+  second commit returns `DatabaseError::WriteConflict`.
+- `raw_rows_survive_reopen` (`sqlite.rs:418`) — raw key/value rows persist.
+
+---
+### 20.8 Docs links
 
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.builder>
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientBuilder.html#method.with_module>
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientBuilder.html#method.preview>
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientPreview.html#method.join>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientBuilder.html#method.open>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.get_config_from_db>
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientHandle.html#method.start_executor>
 - <https://docs.rs/fedimint-client/0.12.0/fedimint_client/enum.RootSecret.html>
 - <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/secret/trait.RootSecretStrategy.html>
@@ -929,4 +1017,9 @@ the peg-in funding source.
 - <https://docs.rs/bdk_chain/0.23.3/bdk_chain/rusqlite/struct.Connection.html>
 - <https://docs.rs/bitcoin/0.32.8/bitcoin/bip32/struct.Xpriv.html#method.new_master>
 - <https://docs.rs/bip39/2.2.0/bip39/struct.Mnemonic.html>
-- <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/mem_impl/struct.MemDatabase.html>
+- <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/trait.IRawDatabase.html>
+- <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/trait.IRawDatabaseTransaction.html>
+- <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/trait.IDatabaseTransactionOpsCore.html>
+- <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/enum.DatabaseError.html>
+- <https://docs.rs/rusqlite/0.31.0/rusqlite/struct.Connection.html>
+- <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-bip39/src/lib.rs>

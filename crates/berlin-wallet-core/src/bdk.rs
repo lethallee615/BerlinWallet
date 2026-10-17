@@ -107,6 +107,17 @@ impl BdkWallet {
         self.wallet.balance()
     }
 
+    /// True if `address` belongs to this BDK wallet. Only in that case could a
+    /// local script scan observe a withdrawal output; external destinations are
+    /// reconciled from the federation's `Success(txid)` instead.
+    pub fn is_our_address(
+        &self,
+        address: &bitcoin::Address<bitcoin::address::NetworkUnchecked>,
+    ) -> bool {
+        self.wallet
+            .is_mine(address.clone().assume_checked().script_pubkey())
+    }
+
     /// Reveal and persist the next external address.
     pub fn reveal_destination(&mut self) -> anyhow::Result<bitcoin::Address> {
         let address = self

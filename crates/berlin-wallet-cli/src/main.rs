@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -9,13 +9,14 @@ use berlin_wallet_core::client::{build_client, client_db, min_withdrawal_sat};
 use berlin_wallet_core::journal::Journal;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
+use berlin_wallet_core::sqlite::SqliteDb;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::{deposit, withdrawal};
 use bitcoin::{Amount, Network};
 use fedimint_client::Client;
+use fedimint_client::RootSecret;
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
-use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_walletv2_client::WalletClientModule;
@@ -33,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let mnemonic_path = data_dir.join("mnemonic");
     let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path)?;
     let seed = seed::mnemonic_seed(&mnemonic);
+    let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
     let esplora_url = args
         .get(3)
         .cloned()
@@ -46,6 +48,10 @@ async fn main() -> anyhow::Result<()> {
             println!("data dir: {}", data_dir.display());
             println!("mnemonic: {}", mnemonic_path.display());
             println!("bdk db: {}", data_dir.join(BDK_DB_FILE).display());
+            println!(
+                "fedimint db: {}",
+                data_dir.join("fedimint.sqlite").display()
+            );
             println!("bdk address: {}", bdk.reveal_destination()?);
             println!("bdk balance: {}", bdk.balance());
             print_help();
@@ -55,19 +61,24 @@ async fn main() -> anyhow::Result<()> {
             let invite = args
                 .get(2)
                 .ok_or_else(|| anyhow!("usage: berlin-wallet join <invite-code>"))?;
-            join(invite, &seed).await
+            join(invite, root_secret, &data_dir).await
         }
         Some("run") => {
             let invite = args
                 .get(2)
                 .ok_or_else(|| anyhow!("usage: berlin-wallet run <invite-code> [esplora-url]"))?;
-            run(invite, bdk, &seed).await
+            run(invite, bdk, root_secret, &data_dir).await
         }
         Some(other) => {
             print_help();
             anyhow::bail!("unknown command: {other}")
         }
     }
+}
+
+fn open_database(data_dir: &Path) -> anyhow::Result<Database> {
+    let raw = SqliteDb::open(data_dir.join("fedimint.sqlite"))?;
+    Ok(Database::new(raw, ModuleDecoderRegistry::default()))
 }
 
 fn data_dir() -> PathBuf {
@@ -100,19 +111,13 @@ fn print_help() {
     println!("  quit");
 }
 
-async fn join(invite: &str, seed: &[u8; 64]) -> anyhow::Result<()> {
-    let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
+async fn join(invite: &str, root_secret: RootSecret, data_dir: &Path) -> anyhow::Result<()> {
+    let db = open_database(data_dir)?;
     let connectors = ConnectorRegistry::build_from_client_defaults()
         .bind()
         .await?;
     let invite = InviteCode::from_str(invite).context("invalid invite code")?;
-    let client = build_client(
-        client_db(&db, 0),
-        connectors,
-        seed::root_secret_from_seed(seed),
-        invite,
-    )
-    .await?;
+    let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
 
     let module = client.get_first_module::<WalletClientModule>()?;
     println!("federation id: {}", client.federation_id());
@@ -121,20 +126,19 @@ async fn join(invite: &str, seed: &[u8; 64]) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run(invite: &str, bdk: BdkWallet, seed: &[u8; 64]) -> anyhow::Result<()> {
-    let db = Database::new(MemDatabase::new(), ModuleDecoderRegistry::default());
+async fn run(
+    invite: &str,
+    bdk: BdkWallet,
+    root_secret: RootSecret,
+    data_dir: &Path,
+) -> anyhow::Result<()> {
+    let db = open_database(data_dir)?;
     let journal = Journal::new(db.clone(), vec![0x00]);
     let connectors = ConnectorRegistry::build_from_client_defaults()
         .bind()
         .await?;
     let invite = InviteCode::from_str(invite).context("invalid invite code")?;
-    let client = build_client(
-        client_db(&db, 0),
-        connectors,
-        seed::root_secret_from_seed(seed),
-        invite,
-    )
-    .await?;
+    let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
     let federation_id = client.federation_id();
     let wallet = Arc::new(Mutex::new(bdk));
 
@@ -142,6 +146,7 @@ async fn run(invite: &str, bdk: BdkWallet, seed: &[u8; 64]) -> anyhow::Result<()
     tokio::spawn(sync::bdk_chain_task(wallet.clone(), shutdown_rx.clone()));
     tokio::spawn(sync::fedimint_sync_task(
         client.clone(),
+        journal.clone(),
         shutdown_rx.clone(),
     ));
     tokio::spawn(sync::adoption_task(

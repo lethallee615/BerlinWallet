@@ -140,17 +140,19 @@ Confirmed (VERIFY.md §1): `Client::builder() -> Result<ClientBuilder>`,
 `ClientHandle::start_executor(&self)` (`fedimint-client/src/client/handle.rs:52`) and
 `Client::spawn_federation_reconnect(&self)`.
 
-**Root secret (real path).** `Bip39RootSecretStrategy` is **not published** for fedimint 0.12.0
-(`fedimint-bip39` stops at 0.8.1), so it is not usable. The real types are:
-`fedimint_client_module::secret::{PlainRootSecretStrategy, RootSecretStrategy}` and
-`fedimint_client::RootSecret`. A 12-word BIP39 mnemonic is created with the `bip39` 2.2.0 crate;
-its 64-byte seed goes through `PlainRootSecretStrategy::to_root_secret`, then
-`RootSecret::StandardDoubleDerive`. The BDK wallet uses the **same BIP39 seed** with the standard
-BIP32/BIP84 hierarchy; fedimint salts its own root, so no raw key material is shared.
+**Root secret (canonical path).** `Bip39RootSecretStrategy` is not published on crates.io for
+0.12.0 (`fedimint-bip39` stops at 0.8.1), but it exists at Git tag `v0.12.0`. Its canonical
+derivation is `DerivableSecret::new_root(mnemonic.to_seed_normalized(""), b"Fedimint Client Salt")`.
+The scaffold mirrors that implementation in `seed.rs` and wraps it as
+`RootSecret::StandardDoubleDerive(Bip39RootSecretStrategy::<12>::to_root_secret(mnemonic))`; a test
+asserts it equals `PlainRootSecretStrategy::to_root_secret(&mnemonic.to_seed(""))`. The BDK wallet
+uses the **same BIP39 seed** with the standard BIP32/BIP84 hierarchy; fedimint salts its own root,
+so no raw key material is shared.
 
 Storage layout (douglaz `MultiClient`): one `Database`; fedimint client `i` lives at
-`db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under `[0x00]` (separate
-RocksDB memtables — co-location causes `TryAgain`/`WriteConflict`).
+`db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under `[0x00]`. The core
+accepts any `Database`; the CLI uses the persistent SQLite backend
+(`<data-dir>/fedimint.sqlite`, see COMPILE.md §20.7).
 
 ---
 
@@ -516,7 +518,11 @@ Steps:
      `set_withdrawal_failed(id, &e)` and surface.
 6. **On boot:** for every non-terminal row with an `operation_id`, re-await
    `await_final_send_operation_state(operation_id)`. **Never re-call `send()`** for the same `id`;
-   the persisted `operation_id` is the dedup anchor.
+   the persisted `operation_id` is the dedup anchor. Reconcile from the federation's
+   `FinalSendOperationState::Success(txid)`: a caller-supplied withdrawal address is normally
+   external, so it is not in the BDK wallet's script index. Use a BDK scan only when
+   `BdkWallet::is_our_address(...)` is true; the txid path is authoritative for external
+   destinations.
 
 ```rust
 // 1. destination + row (address comes from the UI/user)
@@ -926,7 +932,7 @@ adopted elsewhere.
 
 ## 5. Concurrent sync tasks with crash-safe persistence
 
-Two long-running tokio tasks (plus the fedimint client's internal executor/reconnect tasks):
+Two sync tasks plus the adoption task (and the fedimint client's internal executor/reconnect tasks):
 
 ### Task A — BDK chain sync (`sync::bdk_chain_task`)
 
@@ -943,6 +949,10 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
   broadcast.
 - Withdrawal completion is owned by `await_final_send_operation_state`; BDK sync only records the
   on-chain funding transaction and checkpoint.
+- **Partial sync only:** a restored wallet whose historical addresses are not already revealed needs
+  `full_scan` / `start_full_scan`; that is **not implemented** in this step.
+- Withdrawal reconciliation in the fedimint task uses the federation's `Success(txid)`; a BDK
+  script scan is only applicable when the destination is one of our own addresses.
 
 ### Task B — Fedimint federation sync (`sync::fedimint_sync_task`)
 
@@ -953,6 +963,9 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
   the executor.
 - **Deposits are observed to completion with `await_receive(position)`; withdrawals with
   `await_final_send_operation_state(operation_id)`** — events are supplementary.
+- On each tick also call `withdrawal::reconcile_submitted(client, journal)`: it uses the
+  federation's `FinalSendOperationState::Success(txid)` and persists it. No BDK script scan is
+  needed for external destinations; only `BdkWallet::is_our_address` gates a local scan.
 - Stops on the shared `watch::Receiver<bool>` shutdown signal.
 - Balance stream: `client.subscribe_balance_changes(unit)` — **blocked by §8.2** (primary module for BTC unverified).
 
@@ -1087,7 +1100,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 1. **Wallet-module flow** — **RESOLVED** (VERIFY.md §8): walletv2 uses `receive()` + `await_receive(position)` for deposits and `send()` + `await_final_send_operation_state(id)` for withdrawals. There is no `peg_in`/`allocate_deposit_address_pooled`/`withdraw` in the v2 module.
 2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — **BLOCKING for the balance implementation**: `get_balance_for_unit(AmountUnit::Bitcoin)` and `subscribe_balance_changes(unit)` need a primary module, and both modules claim `supports_being_primary`. Do not implement balance until this is resolved against the source/config.
-3. **`ClientBuilder::open` vs `join` signatures** — `join` is confirmed: `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`; `preview_with_existing_config` is confirmed. The `ClientBuilder::open` restore flow is **unverified** (VERIFY.md did not exercise it).
+3. **`ClientBuilder::open` vs `join` signatures** — **RESOLVED**: `join` is `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`; `ClientBuilder::open(self, connectors, db_no_decoders, pre_root_secret) -> Result<ClientHandle>` (`builder.rs:483`) opens an existing DB and verifies the stored secret hash. `Client::get_config_from_db(&db) -> Option<ClientConfig>` (`client.rs:459`) detects it; `build_client` uses `open` when present.
 4. **BDK persistence call shape** — **RESOLVED** (VERIFY.md §1): `PersistedWallet::create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` and `PersistedWallet::load(&mut P, LoadParams) -> Result<Option<Self>, LoadWithPersistError<P::Error>>`.
 5. **Chain source choice** — esplora/electrum/bitcoind-rpc; a product decision. `bdk_esplora::EsploraAsyncExt::sync`/`full_scan` is the verified esplora path.
 6. **UniFFI async** — uniffi 0.32 async export support and per-language binding generation **unverified**.

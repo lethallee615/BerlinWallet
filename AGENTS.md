@@ -88,9 +88,10 @@ cargo check   # -> exit 0
 ## Architecture
 
 - One `fedimint_client::Client` per federation, stored in an `Arc<RwLock>` map keyed by `FederationId` (mirrors douglaz `MultiClient`).
-- Storage: one shared `Database`; fedimint client `i` lives at `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under a separate prefix `[0x00]` (separate RocksDB memtables — co-location causes `TryAgain`/`WriteConflict`, per douglaz).
+- Storage: one shared `Database`; fedimint client `i` lives at `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under a separate prefix `[0x00]`. The CLI uses the persistent `SqliteDb` backend at `<data-dir>/fedimint.sqlite`; production can inject any `Database` (RocksDB/SQLite).
 - Crash-safe journal: raw byte API + serde_json versioned envelopes (`ROW_VERSION = 1`); rows keyed `[tag] ++ id_bytes`; intent + pending index committed in ONE `dbtx` (`begin_transaction … commit_tx`); idempotency keys + deterministic `OperationId`s; `FederationInfo` registry rows so restart can reopen existing partitions rather than re-joining.
-- Two long-running tokio sync tasks sharing the journal:
+- Root secret: canonical `Bip39RootSecretStrategy` (mirrored from fedimint-bip39 `v0.12.0`) → `RootSecret::StandardDoubleDerive`; BDK uses the same BIP39 seed via BIP84, with no raw key reuse.
+- Two long-running tokio sync tasks sharing the journal (plus the adoption task):
   - BDK chain sync: `Wallet::start_sync_with_revealed_spks()` → source an `Update` → `apply_update` → `take_staged` → persist via `WalletPersister`. For `bdk_esplora` the update comes from `bdk_esplora::EsploraAsyncExt::sync` (partial) or `::full_scan` (full) — there is **no `EsploraClient` type and no `scan` method**. Then reconcile withdrawal txids to operations.
   - Fedimint federation sync: `spawn_federation_reconnect()` + `start_executor()` + `handle_events` / `get_event_log_transient_receiver()`; record deposit credits and withdrawal broadcasts in the journal.
 - Peg-in: `WalletClientModule::allocate_deposit_address_pooled` → BDK pays deposit address → `subscribe_deposit` / `await_primary_bitcoin_module_output` → ecash minted via mint module.

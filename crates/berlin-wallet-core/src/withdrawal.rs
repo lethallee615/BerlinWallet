@@ -8,7 +8,7 @@ use fedimint_walletv2_client::{FinalSendOperationState, WalletClientModule};
 
 use crate::client::wallet_client_config;
 use crate::error::{ErrorClass, PegError, classify_error};
-use crate::journal::{Journal, WithdrawalRow};
+use crate::journal::{Journal, WithdrawalRow, WithdrawalState};
 use crate::ops::WithdrawalId;
 
 /// Persist a `Quoting` withdrawal row for a caller-supplied destination.
@@ -23,10 +23,7 @@ pub async fn request_withdrawal(
     value: bitcoin::Amount,
 ) -> anyhow::Result<WithdrawalRow> {
     if let Some(existing) = journal.open_withdrawal(&federation_id).await? {
-        anyhow::bail!(
-            "an in-flight withdrawal already exists: {}",
-            existing.id.0
-        );
+        anyhow::bail!("an in-flight withdrawal already exists: {}", existing.id.0);
     }
 
     let _: bitcoin::Address<bitcoin::address::NetworkUnchecked> = address.parse()?;
@@ -44,6 +41,76 @@ pub fn validate_withdrawal_value(
 ) -> anyhow::Result<()> {
     if value < dust_limit {
         return Err(PegError::WithdrawalBelowDust { value, dust_limit }.into());
+    }
+    Ok(())
+}
+
+const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reconcile a submitted withdrawal from the federation's final state.
+///
+/// The authoritative txid comes from
+/// `await_final_send_operation_state(operation_id)`, not from a BDK script
+/// scan: the caller-supplied withdrawal address is normally external, so it is
+/// not in our BDK wallet's index.
+pub async fn reconcile_withdrawal(
+    client: &Client,
+    journal: &Journal,
+    id: &WithdrawalId,
+) -> anyhow::Result<()> {
+    let row = journal
+        .withdrawal(id)
+        .await?
+        .ok_or_else(|| PegError::WithdrawalNotFound(id.0.clone()))?;
+    if row.state != WithdrawalState::Submitted {
+        return Ok(());
+    }
+    let Some(operation_id) = row.operation_id else {
+        return Ok(());
+    };
+
+    let module = client.get_first_module::<WalletClientModule>()?;
+    let outcome = tokio::time::timeout(
+        RECONCILE_TIMEOUT,
+        module.await_final_send_operation_state(operation_id),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("withdrawal final-state await timed out"))?;
+
+    match outcome {
+        Ok(FinalSendOperationState::Success(txid)) => {
+            journal.set_broadcast(id, txid).await?;
+        }
+        Ok(FinalSendOperationState::Aborted) => {
+            journal.set_refunded(id).await?;
+        }
+        Ok(FinalSendOperationState::Failure) => {
+            journal.set_failed(id).await?;
+        }
+        Err(err) => {
+            if classify_error(&err) == ErrorClass::Permanent {
+                journal.set_withdrawal_failed(id, &err.to_string()).await?;
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Boot/periodic pass over `Submitted` withdrawal rows. Uses the federation
+/// txid; no BDK scan is attempted for external destinations.
+pub async fn reconcile_submitted(client: &Client, journal: &Journal) -> anyhow::Result<()> {
+    let rows = journal
+        .withdrawals_in(&[WithdrawalState::Submitted])
+        .await?;
+    for row in rows {
+        if let Err(err) = reconcile_withdrawal(client, journal, &row.id).await {
+            tracing::warn!(
+                ?err,
+                withdrawal = %row.id.0,
+                "withdrawal reconciliation failed; will retry"
+            );
+        }
     }
     Ok(())
 }
@@ -88,8 +155,7 @@ pub async fn send_withdrawal(
         .into());
     }
 
-    let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-        row.address.parse()?;
+    let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> = row.address.parse()?;
     let custom_meta = serde_json::json!({ "id": id.0 });
 
     let operation_id = match module
@@ -104,18 +170,13 @@ pub async fn send_withdrawal(
         }
         Err(err) => {
             if classify_error(&err) == ErrorClass::Permanent {
-                journal
-                    .set_withdrawal_failed(id, &err.to_string())
-                    .await?;
+                journal.set_withdrawal_failed(id, &err.to_string()).await?;
             }
             return Err(err.into());
         }
     };
 
-    match module
-        .await_final_send_operation_state(operation_id)
-        .await
-    {
+    match module.await_final_send_operation_state(operation_id).await {
         Ok(FinalSendOperationState::Success(txid)) => {
             journal.set_broadcast(id, txid).await?;
         }
@@ -127,9 +188,7 @@ pub async fn send_withdrawal(
         }
         Err(err) => {
             if classify_error(&err) == ErrorClass::Permanent {
-                journal
-                    .set_withdrawal_failed(id, &err.to_string())
-                    .await?;
+                journal.set_withdrawal_failed(id, &err.to_string()).await?;
             }
             return Err(err);
         }
@@ -211,7 +270,10 @@ mod tests {
             WalletConfigConsensus::new(bitcoin_pks, fee_consensus, bitcoin::Network::Bitcoin);
 
         assert_eq!(config.dust_limit, bitcoin::Amount::from_sat(10_000));
-        assert_eq!(config.fee_consensus.base, fedimint_core::Amount::from_sats(100));
+        assert_eq!(
+            config.fee_consensus.base,
+            fedimint_core::Amount::from_sats(100)
+        );
         assert_eq!(config.fee_consensus.parts_per_million, 10_000);
         assert_eq!(config.send_tx_vbytes, 228);
         assert_eq!(config.receive_tx_vbytes, 316);

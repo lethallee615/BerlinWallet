@@ -23,9 +23,23 @@ pub async fn build_client(
     // `ClientModuleInitArgs::cfg()`, not a client-builder argument.
     builder.with_module(WalletClientInit::default());
 
-    let preview = builder.preview(connectors.clone(), &invite).await?;
-    // `ClientPreview::join` returns a `ClientHandle`, not a `Client`.
-    let client = Arc::new(preview.join(db, root_secret).await?);
+    // A restarted process must open the existing client rather than trying to
+    // join a fresh one. `ClientBuilder::open` also verifies the root-secret
+    // hash against the value stored on the first join.
+    let client = if let Some(existing) = Client::get_config_from_db(&db).await {
+        let existing_federation = existing.calculate_federation_id();
+        anyhow::ensure!(
+            existing_federation == invite.federation_id(),
+            "database contains federation {existing_federation}, but the invite is for {}",
+            invite.federation_id()
+        );
+        builder.open(connectors, db, root_secret).await?
+    } else {
+        let preview = builder.preview(connectors, &invite).await?;
+        // `ClientPreview::join` returns a `ClientHandle`, not a `Client`.
+        preview.join(db, root_secret).await?
+    };
+    let client = Arc::new(client);
     client.start_executor();
     Ok(client)
 }
@@ -67,4 +81,3 @@ pub fn client_db(db: &Database, db_prefix: u32) -> Database {
 pub fn start_executor(handle: &ClientHandleArc) {
     handle.start_executor();
 }
-

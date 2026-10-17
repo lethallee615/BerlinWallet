@@ -1,8 +1,13 @@
+use std::io::{Read, Write};
 use std::path::Path;
 
-use bip39::Mnemonic;
+use bip39::{Language, Mnemonic};
 use fedimint_client::RootSecret;
-use fedimint_client_module::secret::{PlainRootSecretStrategy, RootSecretStrategy};
+use fedimint_client::secret::RootSecretStrategy;
+use fedimint_core::encoding::{Decodable, DecodeError, Encodable};
+use fedimint_core::module::registry::ModuleRegistry;
+use fedimint_derive_secret::DerivableSecret;
+use rand::{CryptoRng, RngCore};
 
 /// Load the wallet mnemonic from `path`, creating and persisting a fresh
 /// 12-word BIP39 mnemonic if the file does not exist.
@@ -27,20 +32,86 @@ pub fn load_or_create_mnemonic(path: &Path) -> anyhow::Result<Mnemonic> {
     }
 }
 
-/// BIP39 seed (64 bytes, empty passphrase).
+/// BIP39 seed (64 bytes, empty passphrase) used for the BDK BIP32/BIP84
+/// hierarchy.
 pub fn mnemonic_seed(mnemonic: &Mnemonic) -> [u8; 64] {
     mnemonic.to_seed("")
 }
 
-/// Fedimint root secret.
+/// Canonical fedimint BIP39 root-secret strategy.
 ///
-/// `Bip39RootSecretStrategy` is not published for fedimint 0.12.0. The BIP39
-/// seed is fed to the real `PlainRootSecretStrategy`, then wrapped in the
-/// standard double-derive `RootSecret`.
-pub fn root_secret_from_seed(seed: &[u8; 64]) -> RootSecret {
-    RootSecret::StandardDoubleDerive(PlainRootSecretStrategy::to_root_secret(seed))
+/// This mirrors `fedimint-bip39` at fedimint tag `v0.12.0` (the crate is not
+/// published on crates.io for 0.12.0):
+///
+/// ```text
+/// DerivableSecret::new_root(
+///     mnemonic.to_seed_normalized("").as_ref(),
+///     b"Fedimint Client Salt",
+/// )
+/// ```
+///
+/// `PlainRootSecretStrategy` performs the same inner operation on the already
+/// extracted 64-byte seed; the test below asserts the two are identical.
+#[derive(Debug)]
+pub struct Bip39RootSecretStrategy<const WORD_COUNT: usize = 12>;
+
+impl<const WORD_COUNT: usize> RootSecretStrategy for Bip39RootSecretStrategy<WORD_COUNT> {
+    type Encoding = Mnemonic;
+
+    fn to_root_secret(secret: &Self::Encoding) -> DerivableSecret {
+        const FEDIMINT_CLIENT_NONCE: &[u8] = b"Fedimint Client Salt";
+        const EMPTY_PASSPHRASE: &str = "";
+
+        DerivableSecret::new_root(
+            secret.to_seed_normalized(EMPTY_PASSPHRASE).as_ref(),
+            FEDIMINT_CLIENT_NONCE,
+        )
+    }
+
+    fn consensus_encode(secret: &Self::Encoding, writer: &mut impl Write) -> std::io::Result<()> {
+        secret.to_entropy().consensus_encode(writer)
+    }
+
+    fn consensus_decode_partial(reader: &mut impl Read) -> Result<Self::Encoding, DecodeError> {
+        let bytes = Vec::<u8>::consensus_decode_partial(reader, &ModuleRegistry::default())?;
+        Mnemonic::from_entropy(&bytes).map_err(DecodeError::from_err)
+    }
+
+    fn random<R>(rng: &mut R) -> Self::Encoding
+    where
+        R: RngCore + CryptoRng,
+    {
+        Mnemonic::generate_in_with(rng, Language::English, WORD_COUNT)
+            .expect("Failed to generate mnemonic, bad word count")
+    }
 }
 
+/// Canonical root secret from a BIP39 mnemonic.
 pub fn root_secret_from_mnemonic(mnemonic: &Mnemonic) -> RootSecret {
-    root_secret_from_seed(&mnemonic_seed(mnemonic))
+    RootSecret::StandardDoubleDerive(Bip39RootSecretStrategy::<12>::to_root_secret(mnemonic))
+}
+
+#[cfg(test)]
+mod tests {
+    use fedimint_client::secret::PlainRootSecretStrategy;
+
+    use super::*;
+
+    #[test]
+    fn bip39_strategy_matches_plain_seed_strategy() {
+        // Standard BIP39 test vector (12 words, empty passphrase).
+        let mnemonic = Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .expect("valid mnemonic");
+
+        let canonical = Bip39RootSecretStrategy::<12>::to_root_secret(&mnemonic);
+        let plain = PlainRootSecretStrategy::to_root_secret(&mnemonic.to_seed(""));
+
+        assert_eq!(
+            canonical.to_random_bytes::<32>(),
+            plain.to_random_bytes::<32>(),
+            "canonical BIP39 and plain-seed strategies must derive the same root"
+        );
+    }
 }

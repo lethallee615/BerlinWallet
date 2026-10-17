@@ -253,6 +253,10 @@ pub trait JournalBackend: Send + Sync {
     async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult>;
     async fn insert_withdrawal(&self, row: &WithdrawalRow) -> anyhow::Result<()>;
     async fn withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<Option<WithdrawalRow>>;
+    async fn withdrawals_in(
+        &self,
+        states: &[WithdrawalState],
+    ) -> anyhow::Result<Vec<WithdrawalRow>>;
     async fn open_withdrawal(
         &self,
         federation_id: &FederationId,
@@ -620,6 +624,19 @@ impl JournalBackend for MemoryJournal {
     async fn withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<Option<WithdrawalRow>> {
         let inner = self.inner.lock().await;
         Ok(inner.withdrawals.get(id).cloned())
+    }
+
+    async fn withdrawals_in(
+        &self,
+        states: &[WithdrawalState],
+    ) -> anyhow::Result<Vec<WithdrawalRow>> {
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .withdrawals
+            .values()
+            .filter(|row| states.contains(&row.state))
+            .cloned()
+            .collect())
     }
 
     async fn open_withdrawal(

@@ -117,6 +117,17 @@ async fn scan_deposits(
     Ok(rows)
 }
 
+async fn scan_withdrawals(
+    dbtx: &mut DatabaseTransaction<'_, Committable>,
+) -> anyhow::Result<Vec<WithdrawalRow>> {
+    let mut rows = Vec::new();
+    let mut stream = dbtx.raw_find_by_prefix(&[TAG_WITHDRAWAL]).await?;
+    while let Some((_key, value)) = stream.next().await {
+        rows.push(decode::<WithdrawalRow>(&value)?);
+    }
+    Ok(rows)
+}
+
 async fn get_withdrawal(
     dbtx: &mut DatabaseTransaction<'_, Committable>,
     id: &WithdrawalId,
@@ -827,6 +838,19 @@ impl JournalBackend for DbJournal {
         let row = get_withdrawal(&mut dbtx, id).await?;
         dbtx.commit_tx_result().await?;
         Ok(row)
+    }
+
+    async fn withdrawals_in(
+        &self,
+        states: &[WithdrawalState],
+    ) -> anyhow::Result<Vec<WithdrawalRow>> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let rows = scan_withdrawals(&mut dbtx).await?;
+        dbtx.commit_tx_result().await?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| states.contains(&row.state))
+            .collect())
     }
 
     async fn open_withdrawal(

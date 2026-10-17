@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, broadcast::error::TryRecvError, watch};
 use crate::bdk::BdkWallet;
 use crate::deposit;
 use crate::journal::Journal;
+use crate::withdrawal;
 
 /// Cadence of the orphan-claim adoption pass.
 pub const ADOPTION_INTERVAL: Duration = Duration::from_secs(60);
@@ -81,7 +82,11 @@ pub async fn bdk_chain_task(wallet: Arc<Mutex<BdkWallet>>, mut shutdown: watch::
 /// Fedimint keepalive/event task. `Client::start_executor()` is already called
 /// by `client::build_client`; this task starts the reconnect loop and drains
 /// the transient event stream so slow consumers cannot block it.
-pub async fn fedimint_sync_task(client: ClientHandleArc, mut shutdown: watch::Receiver<bool>) {
+pub async fn fedimint_sync_task(
+    client: ClientHandleArc,
+    journal: Journal,
+    mut shutdown: watch::Receiver<bool>,
+) {
     client.spawn_federation_reconnect();
     let mut events = client.get_event_log_transient_receiver();
     let mut delay = Duration::ZERO;
@@ -105,6 +110,9 @@ pub async fn fedimint_sync_task(client: ClientHandleArc, mut shutdown: watch::Re
                         }
                         Err(TryRecvError::Closed) => return,
                     }
+                }
+                if let Err(err) = withdrawal::reconcile_submitted(&client, &journal).await {
+                    tracing::warn!(?err, "withdrawal reconciliation pass failed");
                 }
                 delay = jittered(FEDIMINT_SYNC_INTERVAL);
             }
