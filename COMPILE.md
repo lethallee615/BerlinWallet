@@ -371,7 +371,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (5 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (9 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -400,7 +400,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (5 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (9 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -415,7 +415,7 @@ pub fn new(db: Database, client_prefix: Vec<u8>) -> Self
 
 `Journal::in_memory()` (`journal.rs:773`) is the no-`Database` test path.
 `Database::with_prefix(&self, prefix: Vec<u8>) -> Self` (`db/mod.rs:442`) applies the client-name
-prefix once in `DbJournal::new` (`journal_db.rs:180`).
+prefix once in `DbJournal::new` (`journal_db.rs:172`).
 
 ### 18.2 dbtx signatures actually used
 
@@ -451,7 +451,7 @@ Deviations from the plan's sketch:
 - **`raw_find_by_prefix` returns a borrowing async stream** (`PrefixStream<'_> =
   Pin<Box<dyn Stream<Item = (Vec<u8>, Vec<u8>)> + '_>>`), not a `Vec`. Scans collect or consume
   the stream before issuing a write (and explicitly `drop(stream)` in `bound_outpoints`,
-  `journal_db.rs:399`).
+  `journal_db.rs:606`).
 - **`raw_insert_bytes` returns the previous value** (`Option<Vec<u8>>`); the journal ignores it.
 
 ### 18.3 Prefix layout
@@ -465,41 +465,58 @@ to that prefix.
 | `0x02` | `0x02 ++ withdrawal_id` (UUID ASCII) | `Envelope<WithdrawalRow>` |
 | `0x03` | `0x03 ++ federation_id(32) ++ txid(32) ++ vout_le(4)` | `Envelope<DepositId>` |
 | `0x04` | `0x04 ++ federation_id(32)` | `Envelope<ChronologicalOperationLogKey>` |
+| `0x05` | `0x05 ++ federation_id(32)` | `Envelope<DepositId>` (open-deposit index) |
+| `0x06` | `0x06 ++ federation_id(32)` | `Envelope<WithdrawalId>` (in-flight-withdrawal index) |
 
 - `federation_id` bytes: `FederationId.0.to_byte_array()` (32-byte `sha256::Hash`); `bitcoin::Txid`
   likewise. The claim key is fixed-length (69 bytes), so `bound_outpoints` can recover the
-  `OutPoint` from the key without decoding JSON (`journal_db.rs:76`).
-- Envelope: `{"version": 1, "value": ...}` (`ROW_VERSION = 1`, `journal_db.rs:26`) so rows can
+  `OutPoint` from the key without decoding JSON (`journal_db.rs:77`).
+- Envelope: `{"version": 1, "value": ...}` (`ROW_VERSION = 1`, `journal_db.rs:27`) so rows can
   evolve without reinterpreting old bytes. `FeeQuoteWire` and `address_script` are unchanged.
 - Deposit/withdrawal rows carry `id` inside the value as well as the key; the key is authoritative
   for lookup.
+- `0x05`/`0x06` are exact-key indexes for the single-open invariants. They are read, written and
+  removed in the same dbtx as the row. Prefix scans of `[0x01]`/`[0x02]` remain only for listing
+  (e.g. `deposits_in`); they are no longer on the invariant path.
 
 ### 18.4 Atomicity and invariants
 
-- Every transition opens exactly one `begin_transaction`, performs its reads/scan/check and writes,
-  then `commit_tx_result` (`journal_db.rs:188` onward). Read-only methods also close their
+- Every transition opens exactly one `begin_transaction`, performs its reads/checks and writes,
+  then `commit_tx_result` (`journal_db.rs:305` onward). Read-only methods also close their
   transaction before returning.
-- **One open deposit per federation:** `insert_deposit` scans `[0x01]` inside the same dbtx and
-  bails if any other row for that federation is `AwaitingAddress`/`AddressShown`
-  (`journal_db.rs:201`). `open_deposit` uses the same predicate.
-- **One in-flight withdrawal per federation:** `insert_withdrawal` scans `[0x02]` and rejects a
-  second `Quoting`/`Submitted` row (`journal_db.rs:539`).
+- **One open deposit per federation:** `insert_deposit` reads the exact key `0x05 ++
+  federation_id` with `raw_get_bytes` inside the dbtx (`journal_db.rs:321`). If present, it returns
+  the existing row (same `DepositId`, no error); otherwise it writes the row and the index key in
+  the same transaction. `open_deposit` reads the index and loads that row.
+- **One in-flight withdrawal per federation:** `insert_withdrawal` does the same with `0x06 ++
+  federation_id` (`journal_db.rs:798`); a second `Quoting`/`Submitted` insert is rejected with an
+  explicit in-flight error. `open_withdrawal` reads the index.
+- **Terminal transitions clear the index in the same dbtx:** deposit `finish_deposit`,
+  `close_deposit_done`, `close_deposit_done_if_open`, `cancel_deposit`, `fail_deposit`,
+  `fail_deposit_if`; withdrawal `set_broadcast`, `set_refunded`, `set_failed`,
+  `set_withdrawal_failed`, `cancel_withdrawal`.
 - **Unique `(federation_id, funding_outpoint)`:** `claim_bind` and `claim_adopt_if_absent` read the
   fixed claim key, then insert it in the same dbtx; the same key for the same row returns
-  `BindResult::Bound`, a different row returns `BindResult::TakenBy(existing)` (`journal_db.rs:360`).
+  `BindResult::Bound`, a different row returns `BindResult::TakenBy(existing)` (`journal_db.rs:556`).
 - Conditional state changes (`set_deposit_address_if`, `fail_deposit_if`, `cancel_deposit`,
   `cancel_withdrawal`) still return `ApplyResult::Applied` / `Skipped`.
-- The single-open checks are application-level and run inside the transaction that performs the
-  insert. Concurrent writers that both scan before either commits are ultimately arbitrated by the
-  backend's optimistic write-conflict detection at `commit_tx_result`; `claim_bind` is additionally
-  protected by the tracked read of the fixed claim key. If a backend does not conflict on prefix
-  scans, a dedicated per-federation open-index key is the next hardening step.
+- **Retry on optimistic conflict:** `retry_on_conflict` (`journal_db.rs:277`) re-runs the whole
+  transition — fresh `begin_transaction`, re-read, re-check, re-write — up to
+  `RETRY_ON_CONFLICT_ATTEMPTS = 5` (`journal_db.rs:181`) with jittered backoff. It retries
+  `DatabaseError::WriteConflict` and `DatabaseError::SnapshotTooOld`; a lost race therefore resolves
+  to the idempotent result (`Bound`/`TakenBy`, the existing open row, `Applied`/`Skipped`) instead
+  of an error. It is applied to `insert_deposit`, `insert_withdrawal`, `claim_bind`,
+  `claim_adopt_if_absent`, and all other read-check-write transitions.
+- **Conflict tracking:** whether `raw_find_by_prefix` creates a conflict-tracked read is
+  unverified; ask the fedimint dev. The single-open invariant no longer depends on the answer: it
+  uses exact-key `raw_get_bytes`/`raw_insert_bytes`, which are the tracked operations, and the
+  index key is correct either way.
 
 ### 18.5 Trait split
 
-`JournalBackend` (`journal.rs:176`) lists the unchanged transition signatures. Two implementations:
+`JournalBackend` (`journal.rs:176`) lists the transition signatures. Two implementations:
 
-- `DbJournal` (`journal_db.rs:175`) — the production backend.
+- `DbJournal` (`journal_db.rs:167`) — the production backend.
 - `MemoryJournal` (`journal.rs:266`) — the unit-test backend (`Journal::in_memory()`), using the
   original `Arc<Mutex<JournalInner>>` state.
 

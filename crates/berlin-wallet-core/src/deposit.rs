@@ -43,8 +43,7 @@ pub async fn request_deposit(
 
     let position = client.get_next_event_log_id().await;
     let row = DepositRow::requested(DepositId::new(), federation_id, position, amount);
-    journal.insert_deposit(&row).await?;
-    Ok(row)
+    journal.insert_deposit(&row).await
 }
 
 /// Background address task: bound `receive()` at 120 s, retry, then write

@@ -656,6 +656,14 @@ douglaz `FedimintJournal`). The partial-unique invariants (`deposit_requests_one
 `withdrawal_requests_one_open`) are enforced **in code, inside the same `dbtx`** as the insert and
 the close — not by a database engine. The SQL is shown only to make the constraints explicit.
 
+The KV layout uses exact-key open indexes (`COMPILE.md §18.3`):
+`0x05 ++ federation_id(32) -> Envelope<DepositId>` and
+`0x06 ++ federation_id(32) -> Envelope<WithdrawalId>`. `insert_deposit`/`insert_withdrawal` read
+the index with `raw_get_bytes` in the same `dbtx`, then write row + index atomically; every
+transition that leaves the open set deletes the index in that same `dbtx`. This makes the
+single-open invariant independent of whether prefix scans are conflict-tracked. When the index is
+already present, `insert_deposit` returns the existing open row (same id, no error).
+
 ```sql
 CREATE TABLE deposit_requests (
     id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
@@ -718,9 +726,14 @@ the previous open row. `deposit_requests_claim` enforces **exactly one row per c
 (`federation_id`, `funding_outpoint`), so orphan adoption is an insert-if-absent on that key.
 Likewise `withdrawal_requests_one_open` serializes our own sends per federation (at most one
 `Quoting`/`Submitted` row). `Broadcast { txid }` is stored as `state='Broadcast'` plus the `txid`
-column. Every state transition writes the row and its pending-index entry in one `dbtx`
-(`begin_transaction … commit_tx`), so a crash cannot leave a row indexed under a state it no longer
-holds.
+column. Every state transition writes the row and its open-index entry (plus the claim index where
+applicable) in one `dbtx` (`begin_transaction … commit_tx`), so a crash cannot leave a row indexed
+under a state it no longer holds.
+
+Optimistic commit conflicts (`DatabaseError::WriteConflict` / `DatabaseError::SnapshotTooOld`) are
+retried up to `RETRY_ON_CONFLICT_ATTEMPTS = 5` with jittered backoff. Each retry re-runs the whole
+read-check-write transition, so a lost race resolves to the idempotent result — `Bound`/`TakenBy`,
+the existing open row, or `Applied`/`Skipped` — instead of a spurious error.
 
 **`FeeQuoteWire` (typed quote encoding).** `FeeQuote` is `Debug + Clone + PartialEq + Eq` but
 **not** `Serialize`, so the `quote` column carries a typed wire struct, not the `Option<String>`

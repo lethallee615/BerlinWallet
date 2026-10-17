@@ -178,7 +178,7 @@ pub trait JournalBackend: Send + Sync {
         &self,
         federation_id: &FederationId,
     ) -> anyhow::Result<Option<DepositRow>>;
-    async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<()>;
+    async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<DepositRow>;
     async fn deposit(&self, id: &DepositId) -> anyhow::Result<Option<DepositRow>>;
     async fn deposits_in(&self, states: &[DepositState]) -> anyhow::Result<Vec<DepositRow>>;
     async fn deposit_funding_txid(&self, id: &DepositId) -> anyhow::Result<Option<bitcoin::Txid>>;
@@ -302,19 +302,17 @@ impl JournalBackend for MemoryJournal {
             .cloned())
     }
 
-    async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<()> {
+    async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<DepositRow> {
         let mut inner = self.inner.lock().await;
-        if inner.deposits.values().any(|existing| {
-            existing.federation_id == row.federation_id
-                && matches!(
-                    existing.state,
-                    DepositState::AwaitingAddress | DepositState::AddressShown
-                )
-        }) {
-            anyhow::bail!("an open deposit already exists for this federation");
+        if is_open_deposit(row.state) {
+            if let Some(existing) = inner.deposits.values().find(|existing| {
+                existing.federation_id == row.federation_id && is_open_deposit(existing.state)
+            }) {
+                return Ok(existing.clone());
+            }
         }
         inner.deposits.insert(row.id.clone(), row.clone());
-        Ok(())
+        Ok(row.clone())
     }
 
     async fn deposit(&self, id: &DepositId) -> anyhow::Result<Option<DepositRow>> {
@@ -808,7 +806,8 @@ mod tests {
             EventLogId::LOG_START,
             bitcoin::Amount::from_sat(10_000),
         );
-        journal.insert_deposit(&first).await.expect("insert first");
+        let inserted = journal.insert_deposit(&first).await.expect("insert first");
+        assert_eq!(inserted.id, first.id);
 
         let second = DepositRow::requested(
             DepositId::new(),
@@ -816,10 +815,11 @@ mod tests {
             EventLogId::LOG_START.next(),
             bitcoin::Amount::from_sat(20_000),
         );
-        assert!(
-            journal.insert_deposit(&second).await.is_err(),
-            "a second open deposit must be rejected"
-        );
+        let existing = journal
+            .insert_deposit(&second)
+            .await
+            .expect("a second open insert returns the existing row");
+        assert_eq!(existing.id, first.id);
 
         let open = journal
             .open_deposit(&federation_id)
@@ -862,5 +862,47 @@ mod tests {
             journal.cancel_deposit(&first.id).await.expect("cancel"),
             ApplyResult::Applied
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_insert_deposit_yields_one_open_row() {
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+        let first = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(10_000),
+        );
+        let second = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START.next(),
+            bitcoin::Amount::from_sat(20_000),
+        );
+
+        let (first_result, second_result) = tokio::join!(
+            journal.insert_deposit(&first),
+            journal.insert_deposit(&second)
+        );
+        let first_result = first_result.expect("first insert");
+        let second_result = second_result.expect("second insert");
+        assert_eq!(
+            first_result.id, second_result.id,
+            "a concurrent caller must observe the existing open row"
+        );
+
+        let open = journal
+            .open_deposit(&federation_id)
+            .await
+            .expect("read open")
+            .expect("open row");
+        assert_eq!(open.id, first_result.id);
+
+        let open_rows = journal
+            .deposits_in(&[DepositState::AwaitingAddress, DepositState::AddressShown])
+            .await
+            .expect("list open deposits");
+        assert_eq!(open_rows.len(), 1, "exactly one open row must exist");
     }
 }
