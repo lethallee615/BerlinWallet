@@ -5,8 +5,7 @@ use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
-use fedimint_mint_client::MintClientInit;
-use fedimint_mintv2_client::MintClientInit as MintV2ClientInit;
+use fedimint_mintv2_client::MintClientInit as Mintv2ClientInit;
 use fedimint_walletv2_client::WalletClientInit;
 use fedimint_walletv2_common::KIND as WALLET_V2_KIND;
 use fedimint_walletv2_common::config::WalletClientConfig;
@@ -19,9 +18,10 @@ pub async fn build_client(
     invite: InviteCode,
 ) -> anyhow::Result<ClientHandleArc> {
     let mut builder = Client::builder().await?;
-    builder.with_module(MintClientInit);
-    // The federation may expose mintv2 (the current primary module for BTC).
-    builder.with_module(MintV2ClientInit);
+    // The federation family is v2: mintv2 is the primary BTC module. The v1
+    // mint client is intentionally not registered (it is not in the v2
+    // federation config). Lightning/lnv2 is out of scope for this wallet.
+    builder.with_module(Mintv2ClientInit);
     // `WalletClientInit` is a unit struct (`#[derive(Default)]`). The real
     // `WalletClientConfig` is per-federation module config delivered through
     // `ClientModuleInitArgs::cfg()`, not a client-builder argument.

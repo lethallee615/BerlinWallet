@@ -755,8 +755,8 @@ pub fn start_executor(&self);
 
 ```rust
 let mut builder = Client::builder().await?;
-builder.with_module(MintClientInit);            // v1 compatibility
-builder.with_module(MintV2ClientInit);           // mintv2: primary BTC module
+// v2 family only: mintv2 is the primary BTC module.
+builder.with_module(Mintv2ClientInit);
 builder.with_module(WalletClientInit::default());
 let client = if Client::get_config_from_db(&db).await.is_some() {
     builder.open(connectors, db, root_secret).await?
@@ -1269,8 +1269,7 @@ error: No module to balance a partial transaction (affected unit: AmountUnit(0)
 
 Failing source: the fee-quote dry-run in `fedimint-client/src/client.rs:911` (the same bail exists
 in the finalize path at `:768`). The federation exposes `mintv2`, but the client only registered
-v1 `MintClientInit`, so there was no primary module for `AmountUnit::BITCOIN`. Fix: added
-`fedimint-mintv2-client` and registered `MintClientInit as MintV2ClientInit` alongside v1.
+v1 `MintClientInit`, so there was no primary module for `AmountUnit::BITCOIN`. Fix: replaced v1 `fedimint-mint-client` with `fedimint-mintv2-client` and registered `Mintv2ClientInit`.
 
 ### 24.5 Withdrawal attempt after mintv2 registration
 
@@ -1296,10 +1295,24 @@ withdrawal.
 ### 24.6 What was fixed by the live run
 
 - Removed the duplicate `start_executor()` call (`build_client`).
-- Added the `mintv2` client module (`fedimint-mintv2-client`); without it a federation with only
-  `mintv2` has no primary BTC module.
+- Replaced v1 `fedimint-mint-client` with `fedimint-mintv2-client`; `mintv2` is now the only
+  registered mint client and the primary BTC module.
 - Added `cancel-withdraw` to recover a `Quoting` row left by a failed quote.
 - Added module/primary diagnostics to `join`.
 
 No funds were fabricated or papered over: the deposit and withdrawal both fail for the honest
 reason that the harness has no Mutinynet BTC/ecash.
+
+
+### 24.7 v2 module family decision
+
+The live federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`. The client now registers:
+
+- `Mintv2ClientInit` (`fedimint-mintv2-client`) — **required** primary BTC module.
+- `WalletClientInit` — walletv2.
+- v1 `fedimint-mint-client` — **removed** from dependencies and registration; it is not part of the
+  v2 federation config.
+- `fedimint-lnv2-client` — exists and can be registered, but **not registered**: lightning is out of
+  scope for this wallet. The join still succeeds with the lnv2 module present in the config.
+
+`lnv2` client crate source: `modules/fedimint-lnv2-client` at Git `v0.12.0`.

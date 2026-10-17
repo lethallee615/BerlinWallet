@@ -8,7 +8,7 @@ Fedimint ↔ BDK peg wallet crate (UniFFI-exposable).
 |---|---|
 | https://docs.rs/fedimint-client/0.12.0 | Full `Client` / `ClientBuilder` / `ClientPreview` / `ClientHandle` API surface |
 | https://github.com/fedimint/fedimint-clientd | `main.rs` entrypoint, `AppState`, `multimint` usage (`register_new`, `all`), REST endpoint shape (`/v2/onchain/deposit-address`, `await-deposit`, `withdraw`) |
-| https://docs.rs/fedimint-mint-client/0.12.0 | `MintClientModule` methods (reissue/spend ecash) |
+| https://docs.rs/fedimint-mintv2-client/0.12.0 | mintv2 client module (primary BTC module) |
 | https://docs.rs/fedimint-walletv2-client/0.12.0 | walletv2 `WalletClientModule`: `receive`, `send`, `await_receive`, final-state awaits, fees, `tx_chain` |
 | https://docs.rs/bdk-wallet/3.2.0 | `Wallet` API (create/load, addresses, `build_tx`, `apply_update`/`take_staged`/`persist`, chain sync) |
 | https://github.com/douglaz/fedimint-wallets | `wallet-fedimint`: `MultiClient`, `FedimintJournal` (app prefix `[0x00]`, raw-byte + serde_json rows, atomic intent+index transitions), `executor`/`runtime` |
@@ -50,7 +50,6 @@ berlin_wallet/                  # workspace root
 | Crate | Version | Role |
 |---|---|---|
 | `fedimint-client` | `=0.12.0` | federation client, `Client`, `ClientBuilder` |
-| `fedimint-mint-client` | `=0.12.0` | ecash mint module client (`MintClientInit`, v1 compatibility) |
 | `fedimint-mintv2-client` | `=0.12.0` | ecash mintv2 module client (`MintClientInit`) — primary BTC module |
 | `fedimint-walletv2-client` | `=0.12.0` | on-chain wallet module client (`WalletClientInit`, `WalletClientModule`) |
 | `fedimint-walletv2-common` | `=0.12.0` | `WalletClientConfig`, `OutputInfo`, `TxInfo`, endpoint constants |
@@ -114,7 +113,6 @@ cargo check   # -> exit 0
 // berlin-wallet-core/src/client.rs
 use fedimint_client::{Client, ClientBuilder, ClientHandle, ClientHandleArc, RootSecret};
 use fedimint_client::module::module::init::ClientModuleInit; // real path (VERIFY.md §2)
-use fedimint_mint_client::MintClientInit;
 use fedimint_walletv2_client::WalletClientInit;               // walletv2 (VERIFY.md §8)
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
@@ -126,8 +124,8 @@ pub async fn build_client(
     invite: InviteCode,
 ) -> anyhow::Result<ClientHandleArc> {
     let mut builder = Client::builder().await?;
-    builder.with_module(MintClientInit);              // v1 compatibility
-    builder.with_module(MintV2ClientInit);             // mintv2 (primary BTC module)
+    // Federation family is v2; mintv2 is the primary BTC module.
+    builder.with_module(Mintv2ClientInit);
     builder.with_module(WalletClientInit::default());
     let preview = builder.preview(connectors.clone(), &invite).await?;
     let client = Arc::new(preview.join(db, root_secret).await?); // -> ClientHandle
@@ -1068,9 +1066,12 @@ methods + polling, then add async streams once bindings are verified.
 - `common::{OutputInfo, TxInfo}`; `events::{ReceivePaymentEvent, ReceivePaymentUpdateEvent, SendPaymentEvent, SendPaymentUpdateEvent}`
 - `output_info_slice` is on the private `WalletFederationApi` (not public on the module); use `tx_chain()` / `pending_tx_chain()`. `OUTPUT_INFO_SLICE_ENDPOINT` is public via `common`.
 
-**fedimint-mint-client (0.12.0)**
-- `MintClientModule::reissue_external_notes()`, `send_oob_notes()`, `spend_notes_with_selector()`, `create_output()`, `await_output_finalized()`, `get_note_counts_by_denomination()`, `estimate_spend_all_fees()`
-- `MintClientInit`
+**fedimint-mintv2-client (0.12.0)** — the v1 mint client is **not** registered
+- `MintClientInit` (crate `fedimint_mintv2_client`, aliased `Mintv2ClientInit`)
+- `MintClientModule`; primary BTC module in the live federation
+- v1 `fedimint-mint-client` was removed from the workspace dependencies.
+
+**fedimint-lnv2-client (0.12.0)** — exists, but **not registered**: lightning is out of scope for this wallet. The live federation exposes `lnv2` as module 0; leaving it unregistered does not affect walletv2 flows.
 
 **bdk_wallet (3.2.0)**
 - `Wallet::create(desc, change_desc)` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`)
@@ -1109,7 +1110,7 @@ methods + polling, then add async streams once bindings are verified.
 Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 1. **Wallet-module flow** — **RESOLVED** (VERIFY.md §8): walletv2 uses `receive()` + `await_receive(position)` for deposits and `send()` + `await_final_send_operation_state(id)` for withdrawals. There is no `peg_in`/`allocate_deposit_address_pooled`/`withdraw` in the v2 module.
-2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — **RESOLVED by the live join**: the federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`; `mintv2` is the primary BTC module (`primary_module_for_unit(BITCOIN) = Some(2)`). The client must register both v1 `MintClientInit` and `mintv2` `MintClientInit` (aliased `MintV2ClientInit`); without mintv2, sends fail with `No module to balance a partial transaction (affected unit: AmountUnit(0)`.
+2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — **RESOLVED by the live join**: the federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`; `mintv2` is the primary BTC module (`primary_module_for_unit(BITCOIN) = Some(2)`). The client registers only the v2 mint client (`Mintv2ClientInit`); without it, sends fail with `No module to balance a partial transaction (affected unit: AmountUnit(0)`. The v1 mint client is not registered.
 3. **`ClientBuilder::open` vs `join` signatures** — **RESOLVED**: `join` is `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`; `ClientBuilder::open(self, connectors, db_no_decoders, pre_root_secret) -> Result<ClientHandle>` (`builder.rs:483`) opens an existing DB and verifies the stored secret hash. `Client::get_config_from_db(&db) -> Option<ClientConfig>` (`client.rs:459`) detects it; `build_client` uses `open` when present.
 4. **BDK persistence call shape** — **RESOLVED** (VERIFY.md §1): `PersistedWallet::create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` and `PersistedWallet::load(&mut P, LoadParams) -> Result<Option<Self>, LoadWithPersistError<P::Error>>`.
 5. **Chain source choice** — esplora/electrum/bitcoind-rpc; a product decision. `bdk_esplora::EsploraAsyncExt::sync`/`full_scan` is the verified esplora path.
@@ -1129,7 +1130,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 ## 9. Suggested implementation order
 
-1. Workspace + `berlin-wallet-core` with pinned deps; `Client` construction with `MintClientInit` + `fedimint_walletv2_client::WalletClientInit`.
+1. Workspace + `berlin-wallet-core` with pinned deps; `Client` construction with `Mintv2ClientInit` + `fedimint_walletv2_client::WalletClientInit`.
 2. BDK wallet wrapper: create/load, `reveal_next_address`, `build_tx`+sign+broadcast, persist, `start_sync_with_revealed_spks` loop.
 3. Journal + the two tables (`deposit_requests`, `withdrawal_requests`), atomic state transitions, boot reconciliation.
 4. Deposit flow: single-flight open row (one per federation) → `get_next_event_log_id()` → async `receive()` (120 s bound) → persist `AddressShown` → BDK funding (`build_tx`/sign/broadcast) → `receive_fee()` → `await_receive(position)` with a real `Success`/`Aborted` match → `Done`; boot resume + `find_claim` reconcile. Concurrent deposits unsupported until #9306.

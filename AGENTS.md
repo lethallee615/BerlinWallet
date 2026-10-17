@@ -33,8 +33,7 @@ Versions below are verified against the crates.io sparse index + the committed `
 | Crate | Version | Role |
 |---|---|---|
 | `fedimint-client` | `=0.12.0` | federation client, `Client`, `ClientBuilder` |
-| `fedimint-mint-client` | `=0.12.0` | ecash mint module (`MintClientInit`, v1 compatibility) |
-| `fedimint-mintv2-client` | `=0.12.0` | ecash mintv2 module (`MintClientInit`) — primary BTC module |
+| `fedimint-mintv2-client` | `=0.12.0` | ecash mintv2 module (`MintClientInit`) — primary BTC module; v1 `fedimint-mint-client` is not registered |
 | `fedimint-wallet-client` | `=0.12.0` | on-chain wallet module (`WalletClientInit`) |
 | `fedimint-client-module` | `=0.12.0` | `ClientModule` trait, `ClientModuleInit` |
 | `fedimint-connectors` | `=0.12.0` | `ConnectorRegistry` |
@@ -111,7 +110,7 @@ Compile-verified against the real crates; see VERIFY.md §1 for full signatures 
 **fedimint-wallet-client 0.12.0**: `WalletClientModule::allocate_deposit_address_pooled()`, `allocate_deposit_address_expert_only()`, `safe_allocate_deposit_address()`, `peg_in(PegInRequest)`, `withdraw()`, `get_withdraw_fees()`, `send_fee_quote()`, `max_withdrawable_amount()`, `subscribe_deposit()`, `subscribe_withdraw_updates()`, `create_withdraw_output()`, `WalletClientInit` (`= WalletClientInit(pub Option<DynBitcoindRpc>)`).
 - `PegOutFees` = `fedimint_wallet_client::common::PegOutFees`
 
-**fedimint-mint-client 0.12.0**: `MintClientModule::reissue_external_notes()`, `send_oob_notes()`, `spend_notes_with_selector()`, `create_output()`, `await_output_finalized()`, `get_note_counts_by_denomination()`, `estimate_spend_all_fees()`, `MintClientInit`.
+**fedimint-mintv2-client 0.12.0**: `MintClientInit`/`MintClientModule`; v1 `fedimint-mint-client` is not registered. The live federation exposes `lnv2`/`meta`/`mintv2`/`walletv2`; `lnv2` is out of scope and not registered.
 
 **bdk_wallet 3.2.0**: `Wallet::create()` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`), `reveal_next_address()`, `next_unused_address()`, `list_unspent()`, `get_utxo()`, `get_tx()`, `build_tx()`, `create_psbt()` (requires `bdk-tx` + `--cfg bdk_wallet_unstable`), `sign_with_signers()`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`, `start_sync_with_revealed_spks()`, `apply_update_events()` (`WalletEvent::TxConfirmed`), `WalletPersister`/`PersistedWallet` (`PersistedWallet::create(&mut P, CreateParams)` / `PersistedWallet::load(&mut P, LoadParams)`; rusqlite or bdk_file_store).
 - `Update` = `bdk_wallet::Update` (crate root — **not** `bdk_wallet::chain::Update`)
