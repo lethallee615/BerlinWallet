@@ -1,7 +1,11 @@
 [package]
-name = "pegwallet-core"
+name = "berlin-wallet-core"
 version = "0.1.0"
 edition = "2024"
+description = "Berlin Wallet core: Fedimint walletv2 + BDK peg-in/peg-out orchestration."
+
+[lib]
+name = "berlin_wallet_core"
 
 [dependencies]
 anyhow = "=1.0.98"

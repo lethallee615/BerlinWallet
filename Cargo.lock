@@ -647,6 +647,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
+name = "berlin-wallet-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bdk_bitcoind_rpc",
+ "bdk_chain",
+ "bdk_electrum",
+ "bdk_esplora",
+ "bdk_file_store",
+ "bdk_wallet",
+ "bitcoin",
+ "fedimint-client",
+ "fedimint-client-module",
+ "fedimint-connectors",
+ "fedimint-core",
+ "fedimint-eventlog",
+ "fedimint-mint-client",
+ "fedimint-walletv2-client",
+ "fedimint-walletv2-common",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uniffi",
+ "uuid",
+]
+
+[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5055,37 +5086,6 @@ name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
-
-[[package]]
-name = "pegwallet-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bdk_bitcoind_rpc",
- "bdk_chain",
- "bdk_electrum",
- "bdk_esplora",
- "bdk_file_store",
- "bdk_wallet",
- "bitcoin",
- "fedimint-client",
- "fedimint-client-module",
- "fedimint-connectors",
- "fedimint-core",
- "fedimint-eventlog",
- "fedimint-mint-client",
- "fedimint-walletv2-client",
- "fedimint-walletv2-common",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uniffi",
- "uuid",
-]
 
 [[package]]
 name = "pem"

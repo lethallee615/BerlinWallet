@@ -1,12 +1,12 @@
-# AGENTS.md — durable project context: pegwallet
+# AGENTS.md — durable project context: Berlin Wallet
 
 ## Crate layout
 
 ```
-pegwallet/                      # workspace root
+berlin_wallet/                  # workspace root
   Cargo.toml                    # workspace definition (edition 2024, rust 1.91 MSRV)
   crates/
-    pegwallet-core/             # pure Rust orchestration (no uniffi, no FFI types)
+    berlin-wallet-core/         # pure Rust orchestration (no uniffi, no FFI types)
       src/lib.rs
       src/client.rs             # Fedimint Client construction + module registration
       src/bdk.rs                # BDK wallet wrapper + chain sync
@@ -16,12 +16,14 @@ pegwallet/                      # workspace root
       src/sync.rs               # concurrent BDK chain task + fedimint federation task
       src/ops.rs                # OperationId mapping / idempotency keys
       error.rs
-    pegwallet-ffi/              # thin UniFFI crate (depends on pegwallet-core)
+    berlin-wallet-ffi/          # reserved: later UniFFI crate (depends on berlin-wallet-core)
       src/lib.rs                # uniffi::export, PegWallet object
       uniffi/                   # generated bindings via uniffi-bindgen
   crates/
-    pegwallet-cli/              # optional dev CLI (not required by spec)
+    berlin-wallet-cli/          # optional dev CLI (not required by spec)
 ```
+
+`berlin-wallet-ffi` is reserved for the later UniFFI crate and is not created by this scaffold.
 
 ## Pinned dependencies
 

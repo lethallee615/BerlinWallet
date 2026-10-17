@@ -1,4 +1,4 @@
-//! pegwallet-core — type-checking scaffold of the walletv2 + BDK peg flows.
+//! Berlin Wallet core — type-checking scaffold of the walletv2 + BDK peg flows.
 //!
 //! Real types and state transitions live in [`journal`]; the flow functions
 //! in [`deposit`]/[`withdrawal`] use the exact API sequences from PLAN.md §4.

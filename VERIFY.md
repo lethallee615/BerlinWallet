@@ -1,6 +1,6 @@
 # VERIFY.md — verification of AGENTS.md / PLAN.md against real crates
 
-**Deliverable:** a compiling crate (`pegwallet`, single binary at repo root) whose
+**Deliverable:** a compiling crate (`berlin-wallet`, single binary at repo root) whose
 `src/main.rs` references every API name claimed in AGENTS.md / PLAN.md, plus this report.
 
 - `cargo check` → **exit 0** (763-package lockfile).

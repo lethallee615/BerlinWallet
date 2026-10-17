@@ -1,4 +1,6 @@
-# PLAN: Fedimint ↔ BDK Peg Wallet crate (UniFFI-exposable)
+# Berlin Wallet
+
+Fedimint ↔ BDK peg wallet crate (UniFFI-exposable).
 
 ## Sources consulted (and cited)
 
@@ -20,10 +22,10 @@ All three fedimint crates are at **0.12.0** (released 27 Aug 2026) and **bdk_wal
 ## 1. Crate layout (workspace)
 
 ```
-pegwallet/                      # workspace root
+berlin_wallet/                  # workspace root
   Cargo.toml                    # workspace definition (edition 2024, rust 1.91 MSRV)
   crates/
-    pegwallet-core/             # pure Rust orchestration (no uniffi, no FFI types)
+    berlin-wallet-core/         # pure Rust orchestration (no uniffi, no FFI types)
       src/lib.rs
       src/client.rs             # Fedimint Client construction + module registration
       src/bdk.rs                # BDK wallet wrapper + chain sync
@@ -33,11 +35,13 @@ pegwallet/                      # workspace root
       src/sync.rs               # concurrent BDK chain task + fedimint federation task
       src/ops.rs                # OperationId / idempotency-key mapping
       src/error.rs              # typed errors
-    pegwallet-ffi/              # thin UniFFI crate (depends on pegwallet-core)
+    berlin-wallet-ffi/          # reserved: later UniFFI crate (depends on berlin-wallet-core)
       src/lib.rs                # uniffi::export, PegWallet object
       uniffi/                   # generated bindings (TS/Swift/Kotlin/etc. via uniffi-bindgen)
-    pegwallet-cli/              # optional dev CLI (not required by spec)
+    berlin-wallet-cli/          # optional dev CLI (not required by spec)
 ```
+
+`berlin-wallet-ffi` is reserved for the later UniFFI crate and is not created by this scaffold.
 
 ---
 
@@ -104,7 +108,7 @@ cargo check   # -> exit 0
 `fedimint-clientd` constructs its clients via `multimint`; we do the equivalent directly with `fedimint_client`, registering the **walletv2** module:
 
 ```rust
-// pegwallet-core/src/client.rs
+// berlin-wallet-core/src/client.rs
 use fedimint_client::{Client, ClientBuilder, ClientHandle, ClientHandleArc, RootSecret};
 use fedimint_client::module::module::init::ClientModuleInit; // real path (VERIFY.md §2)
 use fedimint_mint_client::MintClientInit;
@@ -925,7 +929,7 @@ can stop the task cleanly without aborting a journal write mid-transaction.
 
 ---
 
-## 6. Thin UniFFI crate (`pegwallet-ffi`)
+## 6. Thin UniFFI crate (`berlin-wallet-ffi`)
 
 `uniffi = "0.32.0"`.
 
@@ -941,7 +945,7 @@ can stop the task cleanly without aborting a journal write mid-transaction.
   - `withdrawal_status(id: String) -> Result<WithdrawalView>` (state + operation_id + txid)
   - `cancel_withdrawal(id: String) -> Result<WithdrawalView>` — allowed only from `Quoting`; sets `Cancelled` and releases the invariant.
   - `sync() -> Result<()>`
-- Streams: expose a polling `list_deposits()` / `list_withdrawals()` plus a callback subscription; map `anyhow::Error` to a `thiserror`-based `pegwallet_ffi::Error` (uniffi cannot expose `anyhow::Error`).
+- Streams: expose a polling `list_deposits()` / `list_withdrawals()` plus a callback subscription; map `anyhow::Error` to a `thiserror`-based `berlin_wallet_ffi::Error` (uniffi cannot expose `anyhow::Error`).
 - **`ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only.** The FFI crate must enable `fedimint-client`'s `uniffi` feature (or reach the executor through `ClientHandle::start_executor(&self)` / `Deref<Target = Client>` instead). `ClientHandleArc` is `Arc<ClientHandle>`; `ClientHandle` derefs to `Client`.
 
 Note: `request_deposit_address()` does **not** wait up to 120 s. It returns the `AwaitingAddress`
@@ -1050,25 +1054,25 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 ## 9. Suggested implementation order
 
-1. Workspace + `pegwallet-core` with pinned deps; `Client` construction with `MintClientInit` + `fedimint_walletv2_client::WalletClientInit`.
+1. Workspace + `berlin-wallet-core` with pinned deps; `Client` construction with `MintClientInit` + `fedimint_walletv2_client::WalletClientInit`.
 2. BDK wallet wrapper: create/load, `reveal_next_address`, `build_tx`+sign+broadcast, persist, `start_sync_with_revealed_spks` loop.
 3. Journal + the two tables (`deposit_requests`, `withdrawal_requests`), atomic state transitions, boot reconciliation.
 4. Deposit flow: single-flight open row (one per federation) → `get_next_event_log_id()` → async `receive()` (120 s bound) → persist `AddressShown` → BDK funding (`build_tx`/sign/broadcast) → `receive_fee()` → `await_receive(position)` with a real `Success`/`Aborted` match → `Done`; boot resume + `find_claim` reconcile. Concurrent deposits unsupported until #9306.
 5. Withdrawal flow: `reveal_next_address` → `send_fee()` + `send_fee_quote()` → `send()` → persist `operation_id` → `await_final_send_operation_state`; boot re-await only.
 6. Two sync tasks (BDK chain + fedimint federation) sharing the journal; events are UI-only.
-7. `pegwallet-ffi` uniffi crate with the `PegWallet` object; generate bindings for one target language as a smoke test.
+7. `berlin-wallet-ffi` uniffi crate with the `PegWallet` object; generate bindings for one target language as a smoke test.
 
 ---
 
 ## 10. Compile-verified deviations (folded from COMPILE.md)
 
-The scaffold `crates/pegwallet-core` compiles with `cargo check` (**EXIT 0**). This section records
+The scaffold `crates/berlin-wallet-core` compiles with `cargo check` (**EXIT 0**). This section records
 every place the plan's sketches were reconciled with the real APIs. `file:line` refers to the
 scaffold; docs.rs links are for the pinned versions.
 
 1. **`classify_error` parameter type** — one concrete parameter cannot cover `SendError`,
    `ReceiveError`, and `anyhow::Error`; the design uses `Classify` + generic
-   `classify_error<E: Classify>` (`crates/pegwallet-core/src/error.rs:15/56`).
+   `classify_error<E: Classify>` (`crates/berlin-wallet-core/src/error.rs:15/56`).
    docs: <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/enum.SendError.html>,
    <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/enum.ReceiveError.html>.
 2. **`Address<NetworkUnchecked>` has no `Display`** — display via `assume_checked().to_string()`;
@@ -1128,5 +1132,5 @@ position-attributed, BDK-funded and discovered (`get_next_event_log_id()` before
 open deposit per federation, then `await_receive(position)` with real `Success`/`Aborted` handling;
 the claim is resolved by the reused `scan_receive_claims` pass); withdrawals are op-id-attributed and
 initiated (`send()` then `await_final_send_operation_state`). The v1 `fedimint-wallet-client` names
-are superseded and must not be used. The `crates/pegwallet-core` scaffold compiles (`cargo check`,
+are superseded and must not be used. The `crates/berlin-wallet-core` scaffold compiles (`cargo check`,
 EXIT 0); §10 folds every compile-verified deviation from `COMPILE.md`.

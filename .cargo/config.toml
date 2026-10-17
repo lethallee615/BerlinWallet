@@ -1,4 +1,4 @@
-# Build configuration for the pegwallet verification stub.
+# Build configuration for the berlin-wallet verification stub.
 #
 # Two environment realities are encoded here because fedimint 0.12.0 pulls a native
 # crypto dependency (`aws-lc-sys`, via fedimint-core + fedimint-connectors) that needs

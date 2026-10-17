@@ -1,12 +1,14 @@
-# COMPILE.md — pegwallet-core scaffold: compile-verified deviations
+# Berlin Wallet
+
+Compile-verified deviations for the `berlin-wallet-core` scaffold.
 
 ## Status
 
-- `cargo check` → **EXIT 0** (`pegwallet-core v0.1.0`, workspace at the repo root).
+- `cargo check` → **EXIT 0** (`berlin-wallet-core v0.1.0`, workspace at the repo root).
 - Toolchain: `rust-toolchain.toml` = **1.91.1**.
 - `.cargo/config.toml`: `rustflags = ["--cfg", "bdk_wallet_unstable"]`; `bdk_wallet`
   features `["bdk-tx", "file_store", "rusqlite"]`.
-- `pegwallet-ffi` was **not** created (per instruction). The `uniffi` dependency is
+- `berlin-wallet-ffi` was **not** created (per instruction). The `uniffi` dependency is
   present from PLAN §2 but unused.
 - No real network I/O. Operation-log lookups that the plan glosses over are explicit
   stubs (see §8).
@@ -14,8 +16,8 @@
 Workspace:
 
 ```
-Cargo.toml                     [workspace] members = ["crates/pegwallet-core"]
-crates/pegwallet-core/
+Cargo.toml                     [workspace] members = ["crates/berlin-wallet-core"]
+crates/berlin-wallet-core/
   src/{lib,client,bdk,deposit,withdrawal,journal,ops,error,sync}.rs
 ```
 
@@ -26,9 +28,9 @@ crates/pegwallet-core/
 **Compile reality:** those are distinct types; one concrete parameter cannot cover both.
 Implemented a trait plus a generic function:
 
-- `crates/pegwallet-core/src/error.rs:15` `pub trait Classify`
-- `crates/pegwallet-core/src/error.rs:56` `pub fn classify_error<E: Classify + ?Sized>`
-- `crates/pegwallet-core/src/error.rs:43` `impl Classify for anyhow::Error` (downcasts to
+- `crates/berlin-wallet-core/src/error.rs:15` `pub trait Classify`
+- `crates/berlin-wallet-core/src/error.rs:56` `pub fn classify_error<E: Classify + ?Sized>`
+- `crates/berlin-wallet-core/src/error.rs:43` `impl Classify for anyhow::Error` (downcasts to
   `SendError`/`ReceiveError`; unknown errors are conservatively `Transient`).
 
 Docs: <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/enum.SendError.html>,
@@ -42,10 +44,10 @@ Docs: <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/
 `Display`, so `address.to_string()` fails (`E0599`, first compile error). The checked
 `Address` implements `Display`.
 
-- `crates/pegwallet-core/src/journal.rs:279` `address.assume_checked().to_string()`
-- `crates/pegwallet-core/src/journal.rs:60` / `:155` `Option<String>` address fields
-- `crates/pegwallet-core/src/deposit.rs:71` `address.into_unchecked()` (checked → unchecked)
-- `crates/pegwallet-core/src/withdrawal.rs:63` `row.address.parse::<Address<NetworkUnchecked>>()`
+- `crates/berlin-wallet-core/src/journal.rs:279` `address.assume_checked().to_string()`
+- `crates/berlin-wallet-core/src/journal.rs:60` / `:155` `Option<String>` address fields
+- `crates/berlin-wallet-core/src/deposit.rs:71` `address.into_unchecked()` (checked → unchecked)
+- `crates/berlin-wallet-core/src/withdrawal.rs:63` `row.address.parse::<Address<NetworkUnchecked>>()`
 
 Docs: <https://docs.rs/bitcoin/0.32.8/bitcoin/struct.Address.html>
 (`assume_checked`, `script_pubkey`, `FromStr`).
@@ -56,7 +58,7 @@ Docs: <https://docs.rs/bitcoin/0.32.8/bitcoin/struct.Address.html>
 
 **Compile reality:** `TxBuilder::add_recipient` takes a `ScriptBuf`, not an `Address`.
 
-- `crates/pegwallet-core/src/bdk.rs:21`
+- `crates/berlin-wallet-core/src/bdk.rs:21`
   `builder.add_recipient(destination.script_pubkey(), amount);`
 
 Docs: <https://docs.rs/bdk_wallet/3.2.0/bdk_wallet/struct.TxBuilder.html#method.add_recipient>,
@@ -68,7 +70,7 @@ Docs: <https://docs.rs/bdk_wallet/3.2.0/bdk_wallet/struct.TxBuilder.html#method.
 
 **Compile reality:** `join` returns `ClientHandle`; `ClientHandleArc = Arc<ClientHandle>`.
 
-- `crates/pegwallet-core/src/client.rs:23-24`
+- `crates/berlin-wallet-core/src/client.rs:23-24`
   `let client = preview.join(...).await?; Ok(Arc::new(client))`
 
 Docs: <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientPreview.html#method.join>.
@@ -84,7 +86,7 @@ with `&*handle` (or `handle.as_ref()`).
 `start_executor(&self)`. `ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only,
 so it is **not** available in this scaffold.
 
-- `crates/pegwallet-core/src/client.rs:42-44`
+- `crates/berlin-wallet-core/src/client.rs:42-44`
   `pub fn start_executor(handle: &ClientHandleArc) { handle.start_executor(); }`
 
 Docs: <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.start_executor>,
@@ -97,8 +99,8 @@ Docs: <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html
 **Compile reality:** `pub fn with_prefix(&self, prefix: Vec<u8>) -> Self`; the `++`
 expression must be built as a `Vec<u8>`.
 
-- `crates/pegwallet-core/src/client.rs:29` `db.with_prefix(vec![0x00])`
-- `crates/pegwallet-core/src/client.rs:31-36` builds `[0x01] ++ u32_le(db_prefix)` as `Vec<u8>`
+- `crates/berlin-wallet-core/src/client.rs:29` `db.with_prefix(vec![0x00])`
+- `crates/berlin-wallet-core/src/client.rs:31-36` builds `[0x01] ++ u32_le(db_prefix)` as `Vec<u8>`
 
 Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html#method.with_prefix>.
 
@@ -107,10 +109,10 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 **Plan** (§4.2): `fresh_quote != quote`, and a `quote BLOB` column.
 
 - `PartialEq` **is** implemented (`#[derive(Debug, Clone, PartialEq, Eq)]`), so
-  `crates/pegwallet-core/src/withdrawal.rs:59` compiles unchanged.
+  `crates/berlin-wallet-core/src/withdrawal.rs:59` compiles unchanged.
 - `FeeQuote` is **not** `Serialize`/`Deserialize` in 0.12.0, so the row cannot persist it
   directly. The scaffold stores `Option<String>`:
-  `crates/pegwallet-core/src/journal.rs:116` (`pub quote: Option<String>`), with a note at
+  `crates/berlin-wallet-core/src/journal.rs:116` (`pub quote: Option<String>`), with a note at
   `:112-115`. A production journal needs a typed wire encoding.
 
 Docs: <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/transaction/struct.FeeQuote.html>.
@@ -124,8 +126,8 @@ EventLogId)>` — it returns **only** the final state and the cursor. The operat
 from `ReceivePaymentEvent.operation_id` in the event log; the figures come from
 `WalletOperationMeta::Receive(ReceiveMeta)`.
 
-- `crates/pegwallet-core/src/deposit.rs:226-236` `claim_figures` stub
-- `crates/pegwallet-core/src/deposit.rs:250-251` `scan_receive_claims` stub
+- `crates/berlin-wallet-core/src/deposit.rs:226-236` `claim_figures` stub
+- `crates/berlin-wallet-core/src/deposit.rs:250-251` `scan_receive_claims` stub
 
 These are the only two plan steps left as explicit `bail!` stubs; the surrounding call
 sequence (timeout loop, cursor advance, `claim_bind`, `finish_deposit`) is real.
@@ -153,7 +155,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 ## 10. `WalletClientConfig` not constructed
 
 **Plan** (§8.10): unverified. The scaffold only calls `WalletClientInit::default()`
-(`crates/pegwallet-core/src/client.rs:19`) and does not read or validate
+(`crates/berlin-wallet-core/src/client.rs:19`) and does not read or validate
 `WalletClientConfig`. `dust_limit`/`fee_consensus` therefore remain unverified for
 `SendError::DustValue` and `max_sendable_amount`.
 
@@ -166,7 +168,7 @@ Docs: <https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/
 **Compile reality:** `pub async fn receive(&self) -> Address` — there is no error value, so
 the address task's only terminal path is retry-budget exhaustion:
 
-- `crates/pegwallet-core/src/deposit.rs:56-77` (`MAX_ADDRESS_ATTEMPTS`, timeout loop,
+- `crates/berlin-wallet-core/src/deposit.rs:56-77` (`MAX_ADDRESS_ATTEMPTS`, timeout loop,
   conditional `fail_deposit_if`).
 
 Docs: <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/struct.WalletClientModule.html#method.receive>.
@@ -197,7 +199,7 @@ Docs: <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/
 
 ## 14. Follow-up compile pass: `FeeQuoteWire` + `address_script`
 
-Both items now compile: `cargo check` → **EXIT 0**, and `cargo test -p pegwallet-core --lib`
+Both items now compile: `cargo check` → **EXIT 0**, and `cargo test -p berlin-wallet-core --lib`
 passes the `FeeQuoteWire` round-trip (`wire::tests::fee_quote_round_trip ... ok`).
 
 ### 14.1 `FeeQuoteWire` — the sketched shape **held** (no deviation)
@@ -220,14 +222,14 @@ pub struct FeeQuoteWire {
 }
 ```
 
-- `crates/pegwallet-core/src/wire.rs:13` — the struct.
+- `crates/berlin-wallet-core/src/wire.rs:13` — the struct.
 - `wire.rs:19` — `From<&FeeQuote>` via `into_iter().collect()`.
 - `wire.rs:39` — `amounts()` rebuilds each `Amounts` with `Amounts::ZERO` + `checked_add_unit`.
 - `wire.rs:54` — round-trip test (`FeeQuote` → wire → back).
-- `crates/pegwallet-core/src/journal.rs:116` — `WithdrawalRow.quote: Option<FeeQuoteWire>`
+- `crates/berlin-wallet-core/src/journal.rs:116` — `WithdrawalRow.quote: Option<FeeQuoteWire>`
   (the `Option<String>` placeholder is gone).
-- `crates/pegwallet-core/src/withdrawal.rs:55` — the quote is persisted as the wire form.
-- `crates/pegwallet-core/src/journal.rs:536` — `set_withdrawal_quote`.
+- `crates/berlin-wallet-core/src/withdrawal.rs:55` — the quote is persisted as the wire form.
+- `crates/berlin-wallet-core/src/journal.rs:536` — `set_withdrawal_quote`.
 
 Docs: <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/transaction/struct.FeeQuote.html>,
 <https://docs.rs/fedimint-core/0.12.0/fedimint_core/module/struct.Amounts.html>,
@@ -235,11 +237,11 @@ Docs: <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/tran
 
 ### 14.2 `address_script` — added and used for matching
 
-- `crates/pegwallet-core/src/journal.rs:61` — `DepositRow.address_script: Option<Vec<u8>>`.
+- `crates/berlin-wallet-core/src/journal.rs:61` — `DepositRow.address_script: Option<Vec<u8>>`.
 - `journal.rs:282` — populated in `set_deposit_address_if`:
   `assume_checked().script_pubkey().as_bytes().to_vec()` (display string kept separately).
 - `journal.rs:156` / `journal.rs:419` — `AdoptedClaim.address_script` and the adopted row carry it.
-- `crates/pegwallet-core/src/deposit.rs:239` — `OrphanClaim.address_script`.
+- `crates/berlin-wallet-core/src/deposit.rs:239` — `OrphanClaim.address_script`.
 - `deposit.rs:168-176` — the watcher's Success arm now reuses `scan_receive_claims` and matches
   `claim.address_script.as_deref() == row.address_script.as_deref()`; `claim_figures` is removed.
 - The `cargo check`-verified `Address<NetworkUnchecked>` rule still holds: no `Display`, so display
@@ -258,7 +260,7 @@ operation-log lookup point: both the watcher Success arm and `adopt_orphan_claim
 
 ## 15. `scan_receive_claims` implemented (operation-log scan)
 
-**Supersedes §14.3** — the stub is gone. `cargo check` → EXIT 0; `cargo test -p pegwallet-core
+**Supersedes §14.3** — the stub is gone. `cargo check` → EXIT 0; `cargo test -p berlin-wallet-core
 --lib` → 2 passed (`wire::tests::fee_quote_round_trip`,
 `deposit::tests::filters_successful_unbound_unique_claims`).
 
@@ -281,7 +283,7 @@ operation-log lookup point: both the watcher Success arm and `adopt_orphan_claim
 
 ### 15.2 Implementation
 
-`crates/pegwallet-core/src/deposit.rs`:
+`crates/berlin-wallet-core/src/deposit.rs`:
 
 - `pub async fn scan_receive_claims(client, journal, federation_id)` at `:297`.
 - Pages 256 operations at a time via `paginate_operations_rev` (`:310`).
@@ -323,7 +325,7 @@ Docs: <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html
 
 ## 16. Scan watermark, module filter, bounded waits (compiled)
 
-`cargo check` and `cargo test -p pegwallet-core --lib` → **EXIT 0** (3 tests).
+`cargo check` and `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (3 tests).
 
 ### 16.1 Module filter
 
@@ -369,7 +371,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p pegwallet-core --lib` → **EXIT 0** (5 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (5 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -398,7 +400,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p pegwallet-core --lib` → **EXIT 0** (5 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (5 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -407,7 +409,7 @@ The requested `Arc<dyn Database>` does not exist: `fedimint_core::db::Database` 
 Arc-backed, so no outer `Arc` is needed. The constructor is therefore:
 
 ```rust
-// crates/pegwallet-core/src/journal.rs:767
+// crates/berlin-wallet-core/src/journal.rs:767
 pub fn new(db: Database, client_prefix: Vec<u8>) -> Self
 ```
 
