@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bdk_wallet::signer::SignersContainer;
 use bdk_wallet::Wallet;
+use fedimint_client::db::ChronologicalOperationLogKey;
 use fedimint_client::Client;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
@@ -17,6 +18,14 @@ use crate::journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositRow, DepositState, Journal,
 };
 use crate::ops::DepositId;
+
+const SCAN_PAGE: usize = 256;
+/// Re-scan this many operations older than the previous watermark to catch
+/// outcomes that became visible late (#9338).
+const SCAN_OVERLAP: usize = 32;
+const SCAN_STATE_WAIT_PER_OP: Duration = Duration::from_millis(500);
+const SCAN_TOTAL_STATE_WAIT: Duration = Duration::from_secs(2);
+const SCAN_RETRY_ATTEMPTS: u32 = 5;
 
 /// Create (or return) the single open deposit request for a federation.
 ///
@@ -168,17 +177,27 @@ pub async fn watch_deposit(
         .deposit(id)
         .await?
         .ok_or_else(|| PegError::DepositNotFound(id.0.clone()))?;
-    let claim = scan_receive_claims(client, journal, federation_id)
-        .await?
-        .into_iter()
-        .find(|claim| {
-            claim.final_state == FinalReceiveOperationState::Success
-                && claim.outpoint.is_some()
-                && (claim.address_script.is_none()
-                    || row.address_script.is_none()
-                    || claim.address_script.as_deref() == row.address_script.as_deref())
-        })
-        .ok_or_else(|| anyhow::anyhow!("no unbound claim found after Success"))?;
+
+    // The claim can lag `await_receive` returning Success. Retry the scan
+    // with backoff; if it is still absent, leave the row AddressShown and let
+    // the adoption pass bind it (R then takes the TakenBy path).
+    let mut scan_backoff = Duration::from_secs(1);
+    let mut selected = None;
+    for _ in 0..SCAN_RETRY_ATTEMPTS {
+        let claims = scan_receive_claims(client, journal, federation_id).await?;
+        if let Some(claim) = select_claim_for_success(claims, row.address_script.as_deref()) {
+            selected = Some(claim);
+            break;
+        }
+        tokio::time::sleep(scan_backoff).await;
+        scan_backoff = (scan_backoff * 2).min(Duration::from_secs(30));
+    }
+
+    let Some(claim) = selected else {
+        // Not visible to the scan yet: do not fail the row. It stays
+        // AddressShown; the adoption pass binds the claim later.
+        return Ok(());
+    };
     let outpoint = claim.outpoint.expect("checked above");
 
     match journal.claim_bind(&federation_id, outpoint, id).await? {
@@ -283,15 +302,43 @@ fn filter_orphan_claims(
         .collect()
 }
 
+fn is_older_than(
+    key: &ChronologicalOperationLogKey,
+    watermark: &ChronologicalOperationLogKey,
+) -> bool {
+    key.creation_time < watermark.creation_time
+        || (key.creation_time == watermark.creation_time
+            && key.operation_id < watermark.operation_id)
+}
+
+fn select_claim_for_success(
+    claims: Vec<OrphanClaim>,
+    address_script: Option<&[u8]>,
+) -> Option<OrphanClaim> {
+    claims.into_iter().find(|claim| {
+        claim.final_state == FinalReceiveOperationState::Success
+            && claim.outpoint.is_some()
+            && match (claim.address_script.as_deref(), address_script) {
+                (Some(claim_script), Some(row_script)) => claim_script == row_script,
+                // Unknown on either side: accept the unbound claim.
+                _ => true,
+            }
+    })
+}
+
 /// Scan the operation log for walletv2 `Receive` claims whose final state is
 /// `Success` and which no deposit row has bound yet.
 ///
 /// - Operations are paged with `OperationLog::paginate_operations_rev`.
+/// - The scan resumes from the persisted watermark with a bounded overlap.
+/// - Non-wallet operations are skipped by `operation_module_kind()` before
+///   `try_meta`; the expected walletv2 kind string is `"walletv2"`.
 /// - Meta is `WalletOperationMeta::Receive(ReceiveMeta { outpoint, value, fee,
 ///   address, .. })`.
 /// - The final state is `OperationLogEntry::try_outcome::<FinalReceiveOperationState>()`;
-///   if the outcome is not cached yet, a bounded 500 ms
-///   `WalletClientModule::await_final_receive_operation_state` check is used.
+///   if the outcome is not cached yet, a bounded
+///   `WalletClientModule::await_final_receive_operation_state` check is used,
+///   with a total per-scan wait budget.
 /// - `operation_id` is `ChronologicalOperationLogKey::operation_id` (the same
 ///   id carried by `ReceivePaymentEvent`).
 pub async fn scan_receive_claims(
@@ -299,20 +346,46 @@ pub async fn scan_receive_claims(
     journal: &Journal,
     federation_id: FederationId,
 ) -> anyhow::Result<Vec<OrphanClaim>> {
-    const PAGE: usize = 256;
     let log = client.operation_log();
     let module = client.get_first_module::<WalletClientModule>()?;
+    let watermark = journal.scan_watermark(&federation_id).await?;
 
+    let mut overlap_budget = watermark.map(|_| SCAN_OVERLAP);
+    let mut newest_key = watermark;
     let mut last_seen = None;
+    let mut state_wait = Duration::ZERO;
     let mut raw = Vec::new();
 
-    loop {
-        let page = log.paginate_operations_rev(PAGE, last_seen).await;
+    'scan: loop {
+        let page = log.paginate_operations_rev(SCAN_PAGE, last_seen).await;
         if page.is_empty() {
             break;
         }
 
         for (key, entry) in &page {
+            // Advance the watermark only with a key newer than the previous
+            // watermark; an idle scan must not move it backwards.
+            if newest_key == watermark
+                && watermark.is_none_or(|watermark| !is_older_than(key, &watermark))
+            {
+                newest_key = Some(*key);
+            }
+
+            if let Some(watermark) = watermark {
+                if is_older_than(key, &watermark) {
+                    match overlap_budget {
+                        Some(0) => break 'scan,
+                        Some(n) => overlap_budget = Some(n - 1),
+                        None => {}
+                    }
+                }
+            }
+
+            // Skip non-wallet operations BEFORE deserializing their meta.
+            if entry.operation_module_kind() != fedimint_walletv2_common::KIND.as_str() {
+                continue;
+            }
+
             let Ok(meta) = entry.try_meta::<WalletOperationMeta>() else {
                 continue;
             };
@@ -332,15 +405,26 @@ pub async fn scan_receive_claims(
 
             let final_state = match entry.try_outcome::<FinalReceiveOperationState>() {
                 Ok(Some(state)) => Some(state),
-                _ => match tokio::time::timeout(
-                    Duration::from_millis(500),
-                    module.await_final_receive_operation_state(key.operation_id),
-                )
-                .await
-                {
-                    Ok(Ok(state)) => Some(state),
-                    _ => None,
-                },
+                _ => {
+                    if state_wait >= SCAN_TOTAL_STATE_WAIT {
+                        None
+                    } else {
+                        let budget =
+                            (SCAN_TOTAL_STATE_WAIT - state_wait).min(SCAN_STATE_WAIT_PER_OP);
+                        let started = Instant::now();
+                        let state = match tokio::time::timeout(
+                            budget,
+                            module.await_final_receive_operation_state(key.operation_id),
+                        )
+                        .await
+                        {
+                            Ok(Ok(state)) => Some(state),
+                            _ => None,
+                        };
+                        state_wait += started.elapsed();
+                        state
+                    }
+                }
             };
 
             let (address, address_script) = match address {
@@ -366,9 +450,13 @@ pub async fn scan_receive_claims(
         }
 
         last_seen = page.last().map(|(key, _)| *key);
-        if page.len() < PAGE {
+        if page.len() < SCAN_PAGE {
             break;
         }
+    }
+
+    if let Some(newest) = newest_key {
+        journal.set_scan_watermark(&federation_id, newest).await?;
     }
 
     let bound = journal.bound_outpoints(&federation_id).await?;
@@ -434,5 +522,36 @@ mod tests {
         assert_eq!(orphans[0].value, bitcoin::Amount::from_sat(10_000));
         assert_eq!(orphans[0].fee, bitcoin::Amount::from_sat(100));
         assert_eq!(orphans[0].address_script, Some(vec![1, 2, 3]));
+    }
+
+    fn orphan_with_script(script: Vec<u8>) -> OrphanClaim {
+        OrphanClaim {
+            final_state: FinalReceiveOperationState::Success,
+            operation_id: OperationId::new_random(),
+            outpoint: Some(outpoint(0)),
+            address: None,
+            address_script: Some(script),
+            value: bitcoin::Amount::from_sat(1),
+            fee: bitcoin::Amount::ZERO,
+        }
+    }
+
+    #[test]
+    fn success_without_a_visible_matching_claim_defers_to_adoption() {
+        // Nothing visible yet: the watcher must leave R AddressShown and let
+        // the adoption pass bind the claim.
+        assert!(select_claim_for_success(Vec::new(), Some(&[1, 2, 3])).is_none());
+
+        // A claim with a different script does not match.
+        assert!(
+            select_claim_for_success(vec![orphan_with_script(vec![9, 9])], Some(&[1, 2, 3]))
+                .is_none()
+        );
+
+        // The matching claim is selected.
+        assert!(
+            select_claim_for_success(vec![orphan_with_script(vec![1, 2, 3])], Some(&[1, 2, 3]))
+                .is_some()
+        );
     }
 }

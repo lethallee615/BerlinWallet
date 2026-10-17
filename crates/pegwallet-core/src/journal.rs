@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fedimint_client::db::ChronologicalOperationLogKey;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
 use fedimint_eventlog::EventLogId;
@@ -164,6 +165,8 @@ struct JournalInner {
     deposits: BTreeMap<DepositId, DepositRow>,
     withdrawals: BTreeMap<WithdrawalId, WithdrawalRow>,
     claims: BTreeMap<(FederationId, bitcoin::OutPoint), DepositId>,
+    /// Last operation-log key scanned per federation (scan watermark).
+    watermarks: BTreeMap<FederationId, ChronologicalOperationLogKey>,
 }
 
 /// In-memory scaffold of the journal. The state transitions and the
@@ -377,6 +380,24 @@ impl Journal {
             .filter(|(fed, _)| fed == federation_id)
             .map(|(_, outpoint)| *outpoint)
             .collect())
+    }
+
+    pub async fn scan_watermark(
+        &self,
+        federation_id: &FederationId,
+    ) -> anyhow::Result<Option<ChronologicalOperationLogKey>> {
+        let inner = self.inner.lock().await;
+        Ok(inner.watermarks.get(federation_id).copied())
+    }
+
+    pub async fn set_scan_watermark(
+        &self,
+        federation_id: &FederationId,
+        key: ChronologicalOperationLogKey,
+    ) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.watermarks.insert(*federation_id, key);
+        Ok(())
     }
 
     pub async fn finish_deposit(

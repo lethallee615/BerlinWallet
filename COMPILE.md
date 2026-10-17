@@ -316,3 +316,49 @@ Docs: <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html
 <https://docs.rs/fedimint-client-module/0.12.0/fedimint_client_module/oplog/struct.OperationLogEntry.html#method.try_outcome>,
 <https://docs.rs/fedimint-client/0.12.0/fedimint_client/db/struct.ChronologicalOperationLogKey.html>,
 <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/struct.WalletClientModule.html#method.await_final_receive_operation_state>.
+
+---
+
+## 16. Scan watermark, module filter, bounded waits (compiled)
+
+`cargo check` and `cargo test -p pegwallet-core --lib` → **EXIT 0** (3 tests).
+
+### 16.1 Module filter
+
+`fedimint-walletv2-common` defines
+`pub const KIND: ModuleKind = ModuleKind::from_static_str("walletv2")`
+(`fedimint-walletv2-common-0.12.0/src/lib.rs:30`); `ModuleKind::as_str` is at
+`fedimint-core-0.12.0/src/core.rs:185`. The scan now compares
+`entry.operation_module_kind() != fedimint_walletv2_common::KIND.as_str()` **before** `try_meta`
+(`deposit.rs:385`), so non-wallet operations are skipped without deserialization. Expected walletv2
+kind string: **`"walletv2"`**.
+
+### 16.2 Watermark
+
+- `Journal::scan_watermark` / `set_scan_watermark` (`journal.rs:385/393`) store the newest
+  `ChronologicalOperationLogKey` per federation.
+- `ChronologicalOperationLogKey` is `Copy` (`fedimint-client-0.12.0/src/db.rs:193`).
+- `scan_receive_claims` resumes from the watermark with `SCAN_OVERLAP = 32` older operations
+  (`deposit.rs:25`, `:353`). Because `paginate_operations_rev` is reverse-chronological, a pass
+  starts at "now" and stops at the previous watermark + overlap; an idle pass does not move the
+  watermark backwards.
+- The boot path (`adopt_orphan_claims`) and the watcher Success arm both use the watermark.
+
+### 16.3 Success arm with no visible claim
+
+If `await_receive` returns `Success` before the claim is visible, the watcher retries the scan
+(`SCAN_RETRY_ATTEMPTS = 5`, backoff) and, if still absent, returns `Ok(())` leaving the row
+`AddressShown`; the adoption pass binds it later and R takes the `TakenBy` path. The row is no
+longer errored. Test:
+`deposit::tests::success_without_a_visible_matching_claim_defers_to_adoption`
+(`deposit.rs:540`).
+
+### 16.4 Bounded state wait
+
+The uncached-outcome fallback only runs for walletv2 `Receive` ops (after the module filter), at
+most `SCAN_STATE_WAIT_PER_OP = 500 ms` each and `SCAN_TOTAL_STATE_WAIT = 2 s` per scan
+(`deposit.rs:27`); after the budget an op is treated as not-final and left for a later scan.
+
+Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind.html#method.as_str>,
+<https://docs.rs/fedimint-walletv2-common/0.12.0/fedimint_walletv2_common/constant.KIND.html>,
+<https://docs.rs/fedimint-client/0.12.0/fedimint_client/db/struct.ChronologicalOperationLogKey.html>.

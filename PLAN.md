@@ -257,9 +257,12 @@ Steps:
    After the loop (Success only): persist `next_position`, then resolve the claim through the
    **reused `scan_receive_claims` pass** (this fixes `await_receive` returning no operation id or
    meta):
-   - `let claims = scan_receive_claims(client).await?;` take the unbound claim (single-flight
-     means at most one open row; if several are unbound, prefer the one whose
-     `ReceiveMeta.address` matches R's `address_script`; leave the rest to the adoption pass).
+   - `scan_receive_claims(client, journal, federation_id)` returns unbound `Success` claims;
+     select by `address_script`.
+   - **The claim can lag `await_receive` returning Success.** If no matching claim is visible, do
+     **not** fail the row: retry the scan with backoff (`SCAN_RETRY_ATTEMPTS`). If it is still
+     absent, leave R `AddressShown` (the cursor is persisted) and return; the **adoption pass**
+     will bind the claim and R takes the existing `TakenBy` path.
    - `operation_id` comes from `ReceivePaymentEvent.operation_id` carried by the scan.
    - `claim_bind(federation_id, claim.outpoint, R.id)`:
      - `Bound` → finish R from `ReceiveMeta { outpoint, value, fee }`: `gross_deposited = value`,
@@ -278,8 +281,10 @@ Steps:
    a. **Resume open rows:** for every row in `AwaitingAddress`/`AddressShown`, resume the address/
       claim steps from **`COALESCE(next_position, position)`** — `await_receive` advances past a
       rejected claim, so resuming from raw `position` can re-read an old claim.
-   b. **Adopt orphan claims:** reuse the **same** `scan_receive_claims(client)` as the watcher
-      Success arm (one scan, two callers; `claim_figures` is gone). For every
+   b. **Adopt orphan claims:** reuse the **same** `scan_receive_claims(client, journal,
+      federation_id)` as the watcher Success arm (one scan, two callers; `claim_figures` is gone).
+      It resumes from the persisted watermark (§4.5), so boot does not re-page the whole log after
+      the first pass. For every
       `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` whose final state is
       `FinalReceiveOperationState::Success`. For each, call
       `claim_bind(federation_id, outpoint, adopted_row_id)`, inserting the `origin = Adopted`,
@@ -400,10 +405,25 @@ loop {
 // Success only: set_deposit_aborted already persisted the cursor on Aborted.
 journal.set_deposit_next_position(id, next_position).await?;
 // Success arm: reuse the operation-log scan (await_receive returns no meta)
-let claim = scan_receive_claims(client).await?
-    .into_iter()
-    .find(|c| c.final_state == FinalReceiveOperationState::Success && c.outpoint.is_some())
-    .ok_or_else(|| anyhow::anyhow!("no unbound claim after Success"))?;
+let row = journal
+    .deposit(id)
+    .await?
+    .ok_or_else(|| PegError::DepositNotFound(id.0.clone()))?;
+let mut scan_backoff = Duration::from_secs(1);
+let mut selected = None;
+for _ in 0..SCAN_RETRY_ATTEMPTS {
+    let claims = scan_receive_claims(client, journal, federation_id).await?;
+    if let Some(claim) = select_claim_for_success(claims, row.address_script.as_deref()) {
+        selected = Some(claim);
+        break;
+    }
+    sleep(scan_backoff).await;
+    scan_backoff = (scan_backoff * 2).min(Duration::from_secs(30));
+}
+let Some(claim) = selected else {
+    // Not visible yet: leave R AddressShown; adoption binds it later.
+    return Ok(());
+};
 let outpoint = claim.outpoint.expect("checked above");
 match journal.claim_bind(federation_id, outpoint, id).await? {
     BindResult::Bound => {
@@ -753,6 +773,16 @@ adopted elsewhere.
   `TakenBy` it rolls back its insert and closes the open owner. A double-payment to the same
   address produces two claims and therefore **two rows** (the original request row + one adopted
   row), both credited; the second is never observed by `await_receive(position)`.
+- **Scan watermark, module filter, bounded wait:** `scan_receive_claims` persists the newest
+  `ChronologicalOperationLogKey` per federation (`Journal::scan_watermark` /
+  `set_scan_watermark`) and resumes from it with a bounded `SCAN_OVERLAP` (32) of older
+  operations; because `paginate_operations_rev` is reverse-chronological, a pass starts at "now"
+  and stops at the previous watermark + overlap. It checks
+  `OperationLogEntry::operation_module_kind()` and skips anything whose kind is not `"walletv2"`
+  **before** `try_meta`, so a non-wallet op cannot error the scan. The uncached-outcome fallback
+  is bounded: only walletv2 `Receive` ops are awaited, at most 500 ms each and
+  `SCAN_TOTAL_STATE_WAIT` (2 s) per scan; after the budget an op is treated as not-final and left
+  for a later scan.
 - **Withdrawal `id`** = client-generated UUIDv7/ULID, persisted before `send()`. `send()` is called
   **at most once per `id`**; the `Quoting → Submitted` transition is the fence. `operation_id` is
   persisted immediately and is `UNIQUE`; on boot we re-await by it and never re-submit. The same
