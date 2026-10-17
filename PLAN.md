@@ -7,12 +7,13 @@
 | https://docs.rs/fedimint-client/0.12.0 | Full `Client` / `ClientBuilder` / `ClientPreview` / `ClientHandle` API surface |
 | https://github.com/fedimint/fedimint-clientd | `main.rs` entrypoint, `AppState`, `multimint` usage (`register_new`, `all`), REST endpoint shape (`/v2/onchain/deposit-address`, `await-deposit`, `withdraw`) |
 | https://docs.rs/fedimint-mint-client/0.12.0 | `MintClientModule` methods (reissue/spend ecash) |
-| https://docs.rs/fedimint-wallet-client/0.12.0 | `WalletClientModule` methods (deposit address, `peg_in`, `peg_out`, `withdraw`, fee quotes) |
+| https://docs.rs/fedimint-walletv2-client/0.12.0 | walletv2 `WalletClientModule`: `receive`, `send`, `await_receive`, final-state awaits, fees, `tx_chain` |
 | https://docs.rs/bdk-wallet/3.2.0 | `Wallet` API (create/load, addresses, `build_tx`, `apply_update`/`take_staged`/`persist`, chain sync) |
-| https://github.com/douglaz/fedimint-wallets | `wallet-fedimint`: `MultiClient` (per-federation clients at `[0x01]++u32_le(db_prefix)`), `FedimintJournal` (app prefix `[0x00]`, raw-byte + serde_json rows, atomic intent+index transitions), `executor`/`runtime` (single-actor orchestrator, watch scheduler, recovery reservations, join lock) |
-| `VERIFY.md` (this repo) | Compile-verified corrections to the names and pins below (§1–§5) |
+| https://github.com/douglaz/fedimint-wallets | `wallet-fedimint`: `MultiClient`, `FedimintJournal` (app prefix `[0x00]`, raw-byte + serde_json rows, atomic intent+index transitions), `executor`/`runtime` |
+| https://github.com/fedimint/fedimint-sdk | `onchain.rs` / `onchain/v2.rs` usage patterns (`find_claim`, 120 s address wait) |
+| `VERIFY.md` §8 (this repo) | **Ground truth** for the wallet module: published versions, exact signatures, observation paths, hazards |
 
-All three target crates are at **0.12.0** (released 27 Aug 2026) and **bdk_wallet 3.2.0** (released 20 Sep 2026), so they are contemporaries. Names/pins below were corrected against a compiling stub; see `VERIFY.md` for the evidence.
+All three fedimint crates are at **0.12.0** (released 27 Aug 2026) and **bdk_wallet 3.2.0** (released 20 Sep 2026). The wallet module is **`fedimint-walletv2-client`**, not the v1 `fedimint-wallet-client` (see VERIFY.md §8; the v1 names are SUPERSEDED).
 
 ---
 
@@ -26,11 +27,11 @@ pegwallet/                      # workspace root
       src/lib.rs
       src/client.rs             # Fedimint Client construction + module registration
       src/bdk.rs                # BDK wallet wrapper + chain sync
-      src/pegin.rs              # peg-in flow
-      src/pegout.rs             # peg-out flow
+      src/deposit.rs            # position-attributed deposit flow
+      src/withdrawal.rs         # op-id-attributed withdrawal flow
       src/journal.rs            # crash-safe write-ahead journal (douglaz pattern)
       src/sync.rs               # concurrent BDK chain task + fedimint federation task
-      src/ops.rs                # OperationId mapping / idempotency keys
+      src/ops.rs                # OperationId / idempotency-key mapping
       error.rs
     pegwallet-ffi/              # thin UniFFI crate (depends on pegwallet-core)
       src/lib.rs                # uniffi::export, PegWallet object
@@ -47,7 +48,8 @@ pegwallet/                      # workspace root
 |---|---|---|
 | `fedimint-client` | `=0.12.0` | federation client, `Client`, `ClientBuilder` |
 | `fedimint-mint-client` | `=0.12.0` | ecash mint module client (`MintClientInit`) |
-| `fedimint-wallet-client` | `=0.12.0` | on-chain wallet module client (`WalletClientInit`) |
+| `fedimint-walletv2-client` | `=0.12.0` | on-chain wallet module client (`WalletClientInit`, `WalletClientModule`) |
+| `fedimint-walletv2-common` | `=0.12.0` | `WalletClientConfig`, `OutputInfo`, `TxInfo`, endpoint constants |
 | `fedimint-client-module` | `=0.12.0` | `ClientModule` trait, `ClientModuleInit` |
 | `fedimint-connectors` | `=0.12.0` | `ConnectorRegistry` |
 | `fedimint-core` | `=0.12.0` | `Database`, `OperationId`, `Amount`, `OutPoint`, `FederationId` |
@@ -70,15 +72,14 @@ Do **not** enable `bdk_wallet`'s `keys-bip39` feature: it requires `bip39 ^2.2.2
 published (crates.io index max is `2.2.0`). `bdk_wallet`'s `bdk-tx` feature requires
 `--cfg bdk_wallet_unstable` (see Build requirements).
 
+The v1 `fedimint-wallet-client` crate is **superseded** by the two walletv2 crates above (VERIFY.md §8).
+
 **MSRV:** `1.91` (effective). `bdk_wallet` advertises `1.85`, but `fedimint-connectors 0.12.0` pulls
 `iroh 1.0.3` / `iroh-base 1.3.0` / `netwatch 0.19.3` / `portmapper 0.19.3` / `n0-*`, all of which
 declare `rust-version = 1.91`. The default 1.89 toolchain cannot build the graph.
 **Edition:** `2024`.
 
 **bitcoin unification:** confirmed **YES** — a single `bitcoin 0.32.8` in `Cargo.toml`/`Cargo.lock`.
-(VERIFY.md §4.)
-
-**Risk to flag:** `fedimint-client` enables `uniffi` only behind an optional feature — verify the `uniffi` feature is actually needed/available in `0.12.0` (it's listed as optional in its dependencies). The ffi crate will enable it.
 
 ### Build requirements (verified — see VERIFY.md §0/§5)
 
@@ -99,16 +100,16 @@ cargo check   # -> exit 0
 
 ---
 
-## 3. Client construction & module registration (modeled on `fedimint-clientd`)
+## 3. Client construction & module registration
 
-`fedimint-clientd` constructs its clients via `multimint` (`state.multimint.register_new(invite_code)`, `state.multimint.all()`). We will do the equivalent directly with `fedimint_client`:
+`fedimint-clientd` constructs its clients via `multimint`; we do the equivalent directly with `fedimint_client`, registering the **walletv2** module:
 
 ```rust
 // pegwallet-core/src/client.rs
 use fedimint_client::{Client, ClientBuilder, ClientHandle, ClientHandleArc, RootSecret};
 use fedimint_client::module::module::init::ClientModuleInit; // real path (VERIFY.md §2)
 use fedimint_mint_client::MintClientInit;
-use fedimint_wallet_client::WalletClientInit;
+use fedimint_walletv2_client::WalletClientInit;               // walletv2 (VERIFY.md §8)
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
 
@@ -118,161 +119,403 @@ pub async fn build_client(
     root_secret: RootSecret,   // derived from BIP39 mnemonic
     invite: InviteCode,
 ) -> anyhow::Result<ClientHandleArc> {
-    let mut builder = Client::builder().await?;          // Client::builder()
+    let mut builder = Client::builder().await?;
     builder.with_module(MintClientInit);
-    builder.with_module(WalletClientInit::default());    // module registration
-    let preview = builder.preview(connectors.clone(), &invite).await?;  // ClientBuilder::preview
+    builder.with_module(WalletClientInit::default());
+    let preview = builder.preview(connectors.clone(), &invite).await?;
     let client = preview.join(db, root_secret).await?;   // ClientPreview::join -> ClientHandle
-    Ok(Arc::new(client))   // ClientHandleArc = Arc<ClientHandle>
+    Ok(Arc::new(client))
 }
 ```
 
-Actual names confirmed (VERIFY.md §1):
-- `Client::builder() -> Result<ClientBuilder>`
-- `ClientBuilder::with_module<M: ClientModuleInit>(&mut self, module_init: M)`
-- `ClientBuilder::preview(self, connectors: ConnectorRegistry, invite_code: &InviteCode) -> Result<ClientPreview>`
-- `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>` (also `preview_with_existing_config` for existing configs)
-- `Client::start_executor(self: &Arc<Self>)` — starts the central `crate::sm::executor::Executor` that runs all module state machines (**receiver is `&Arc<Self>`, not `&self`**)
-- `Client::spawn_federation_reconnect(&self)` — background tasks maintaining guardian connections
-- `Client::db() -> &Database`, `Client::executor() -> &(dyn IExecutor + ...)`
-- `Client::get_first_module::<M: ClientModule>(&self) -> Result<ClientModuleInstance<'_, M>>`
-- `Client::get_first_module_arc::<M: ClientModule>(&self) -> Result<Arc<M>>`
+Confirmed (VERIFY.md §1): `Client::builder() -> Result<ClientBuilder>`,
+`ClientBuilder::with_module<M: ClientModuleInit>(&mut self, module_init: M)`,
+`ClientBuilder::preview(self, ConnectorRegistry, &InviteCode) -> Result<ClientPreview>`,
+`ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`,
+`Client::start_executor(self: &Arc<Self>)`, `Client::spawn_federation_reconnect(&self)`.
 
-The root secret comes from a BIP39 mnemonic via `fedimint_derive-secret` / `RootSecret::StandardDoubleDerive(Bip39RootSecretStrategy)` — **guessing at the exact strategy type name** (douglaz uses `Bip39RootSecretStrategy::<12>` and `RootSecret::StandardDoubleDerive(...)`; seen in `multi_client.rs`). `RootSecret` itself is exported from `fedimint_client` (crate root).
-
-Storage layout (from douglaz `MultiClient`): one `Database` shared across federations; fedimint client `i` lives at `db.with_prefix([0x01] ++ u32_le(db_prefix))`. The app journal lives under a separate prefix `[0x00]` so journal churn never shares a RocksDB memtable with fedimint's long-held transactions (douglaz's hard-won lesson: co-location causes `TryAgain`/`WriteConflict`).
-
-**Guessing at:** whether a single `Client` per federation vs. `multimint` facade is preferable here — we keep it simple: one `Client` per federation, stored in an `Arc<Mutex>`/`RwLock` map keyed by `FederationId`, mirroring douglaz's `MultiClient::clients`.
+Storage layout (douglaz `MultiClient`): one `Database`; fedimint client `i` lives at
+`db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under `[0x00]` (separate
+RocksDB memtables — co-location causes `TryAgain`/`WriteConflict`).
 
 ---
 
-## 4. Peg-in (BDK → federation deposit address → mint ecash)
+## 4. Peg flows (walletv2 — deposit + withdrawal)
 
-**Flow:**
-1. BDK side: generate/receive address via `bdk_wallet::Wallet::reveal_next_address(KeychainKind::External)` (persist the ChangeSet after revealing — docs warn about address reuse). Sign + broadcast a transaction paying the **federation deposit address** using `Wallet::build_tx()` → `.add_recipient(deposit_script, amount)` → `.finish()` → `create_psbt` / `sign_with_signers` → `finalize_psbt` → `extract_tx()` → broadcast via chain source.
-2. Fedimint side: `wallet_client.allocate_deposit_address_pooled(max_gap_size) -> (DepositAddressInfo, AllocateDepositOutcome)` — gives a federation-controlled BTC deposit address (tweak-based). **This is the address BDK pays.** (`WalletClientModule::allocate_deposit_address_pooled`; the 40 KB tx-limit caveat applies to `allocate_deposit_address_expert_only`; pooled is the recommended path.)
-3. After broadcast, the fedimint wallet client's `pegin_monitor` state machine detects the on-chain deposit (requires a configured `BitcoindRpc` via `ClientBuilder::with_bitcoind_rpc`, chain ID cached after first fetch via `Client::chain_id()`). After `get_finality_delay()` confirmations, it mints ecash via the mint module (primary module).
-4. Track completion: `wallet_client.subscribe_deposit(operation_id) -> Result<UpdateStreamOrOutcome<DepositStateV2>>`, or `client.transaction_updates(op_id)`, or `client.await_primary_bitcoin_module_output(op_id, out_point)`.
-5. Balance: `client.get_balance_for_unit(AmountUnit::Bitcoin)` — `AmountUnit` is `fedimint_core::module::AmountUnit`.
+All API names/signatures below are exactly those in **VERIFY.md §8.2/§8.3** (ground truth). The
+wallet module is `fedimint_walletv2_client::WalletClientModule`.
 
-**The `peg_in` entry point:** `WalletClientModule::peg_in(PegInRequest) -> PegInResponse` exists — I'm **guessing at** whether it's needed in addition to `allocate_deposit_address_pooled` (it may register/claim a peg-in). I'll treat `allocate_deposit_address_pooled` + `subscribe_deposit` as the core path and flag `peg_in` for verification against the source.
+### 4.0 Exact signatures (verbatim from VERIFY.md §8.2)
 
-**BDK API names confirmed:**
-- `Wallet::reveal_next_address(KeychainKind) -> AddressInfo`
-- `Wallet::build_tx() -> TxBuilder`
-- `Wallet::create_psbt(PsbtParams<CreateTx>) -> Result<(Psbt, Finalizer)>` — **requires the `bdk-tx` feature and `--cfg bdk_wallet_unstable`** (see Build requirements)
-- `Wallet::sign_with_signers(&mut Psbt, &[&SignersContainer], SignOptions) -> Result<bool>`
-- `Wallet::finalize_psbt(&mut Psbt, SignOptions) -> Result<bool>`
-- `Wallet::apply_update(Update) -> Result<(), CannotConnectError>` (stages a ChangeSet); `Update` = `bdk_wallet::Update`
-- `Wallet::take_staged() -> Option<ChangeSet>` (to persist)
-- `Wallet::list_unspent()`, `Wallet::get_utxo(OutPoint)`, `Wallet::get_tx(Txid) -> Option<WalletTx>`
-- `Wallet::balance() -> Balance`, `Wallet::calculate_fee(&Transaction) -> Result<Amount>`
-- `Wallet::insert_txout(OutPoint, TxOut)` (for foreign UTXO fee calc)
-- `Wallet::start_sync_with_revealed_spks() -> SyncRequestBuilder` (spk-based partial sync)
-- Persistence: via `bdk_wallet::rusqlite` or `bdk_file_store` — `WalletPersister` trait; `PersistedWallet::create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` and `PersistedWallet::load(&mut P, LoadParams) -> Result<Option<Self>, LoadWithPersistError<P::Error>>` (verified, VERIFY.md §1).
+```rust
+pub async fn receive(&self) -> Address;                 // no Result, no OperationId
+
+pub async fn send(
+    &self,
+    address: Address<NetworkUnchecked>,
+    value: bitcoin::Amount,
+    fee: Option<bitcoin::Amount>,
+    custom_meta: serde_json::Value,
+) -> Result<OperationId, SendError>;
+
+pub async fn await_final_send_operation_state(&self, operation_id: OperationId)
+    -> anyhow::Result<FinalSendOperationState>;
+pub async fn await_final_receive_operation_state(&self, operation_id: OperationId)
+    -> anyhow::Result<FinalReceiveOperationState>;
+pub async fn await_receive(&self, position: EventLogId)
+    -> anyhow::Result<(FinalReceiveOperationState, EventLogId)>;
+
+pub async fn receive_fee(&self) -> Result<bitcoin::Amount, ReceiveError>;
+pub async fn send_fee(&self) -> Result<bitcoin::Amount, SendError>;
+pub async fn send_fee_quote(&self, amount: bitcoin::Amount) -> anyhow::Result<FeeQuote>;
+pub async fn max_sendable_amount(&self, balance: Amount, fee: bitcoin::Amount)
+    -> anyhow::Result<bitcoin::Amount>;
+
+pub async fn tx_chain(&self) -> FederationResult<Vec<TxInfo>>;
+pub async fn pending_tx_chain(&self) -> FederationResult<Vec<TxInfo>>;
+```
+
+And the position anchor (`fedimint-client 0.12.0`, VERIFY.md §1):
+
+```rust
+pub async fn get_next_event_log_id(&self) -> EventLogId;
+```
+
+### 4.1 Deposit — position-attributed, discovered not initiated
+
+A deposit is **not an operation we start**. `receive()` only returns an address; the federation
+creates the operation when its scanner finds the payment. We therefore attribute the deposit to
+the **event-log position read before `receive()`**, never to an address or an invented operation id.
+
+Steps:
+
+1. `let position = client.get_next_event_log_id().await;`
+   (`Client::get_next_event_log_id(&self) -> EventLogId`)
+   Persist **before** calling `receive()`:
+   `{ id, federation_id, position, state = AwaitingAddress }`.
+2. `let addr = module.receive().await;` (`WalletClientModule::receive(&self) -> Address`)
+   Bound the call at **120 s** and retry on timeout (hazard #9205). Retries reuse the same row/id.
+3. Persist `{ address = addr, state = AddressShown }` **before** showing the address. If we crash
+   after `receive()` but before this write, the row is still `AwaitingAddress` and is retried; that
+   is safe because the address was never shown.
+4. Subscribe to `ReceivePaymentEvent` for **UI only** (pre-confirmation progress). It is not the
+   source of truth (#9338).
+5. `let (final_state, next_pos) = module.await_receive(position).await?;`
+   (`WalletClientModule::await_receive(&self, position: EventLogId)
+   -> anyhow::Result<(FinalReceiveOperationState, EventLogId)>`)
+   Persist `next_position = next_pos`. On `FinalReceiveOperationState::Success` set
+   `state = Done`. (`await_receive` retries `Aborted` claims internally and waits for the minted
+   notes, so it returns on `Success` or an error.)
+6. **On boot:** for every row in `AwaitingAddress`/`AddressShown`, resume
+   `await_receive(position)` from the persisted `position`. **Additionally**, reconcile claims via
+   the **module operations** — scan the operation log for
+   `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match the deposit's funding
+   outpoint (the fedimint-sdk `find_claim` pattern) — because #9338 can commit a claim without its
+   event-log announcement.
+
+```rust
+// 1. anchor BEFORE receive()
+let position = client.get_next_event_log_id().await;
+journal.insert_deposit_if_absent(DepositRow {
+    id: deposit_id(federation_id, position),
+    federation_id,
+    position,
+    state: DepositState::AwaitingAddress,
+    ..Default::default()
+}).await?;
+
+// 2. address, bounded at 120 s, retry on timeout
+let address = loop {
+    match timeout(Duration::from_secs(120), module.receive()).await {
+        Ok(addr) => break addr,       // receive() returns Address directly (no Result)
+        Err(_elapsed) => continue,    // row stays AwaitingAddress; see #9205
+    }
+};
+
+// 3. persist BEFORE display
+journal.set_deposit_address(id, &address, DepositState::AddressShown).await?;
+ui.show_address(&address);
+
+// 4. UI-only progress (filter ReceivePaymentEvent); never the source of truth
+let _ui_progress = client.handle_events(/* tracker */, /* handler */);
+
+// 5. observe to completion
+let (final_state, next_position) = module.await_receive(position).await?;
+debug_assert_eq!(final_state, FinalReceiveOperationState::Success);
+journal.set_deposit_next_position(id, next_position).await?;
+journal.set_deposit_state(id, DepositState::Done).await?;
+```
+
+### 4.2 Withdrawal — op-id-attributed, initiated
+
+A withdrawal is an operation **we initiate**; the federation assigns its `OperationId` in `send()`.
+
+Steps:
+
+1. `let address = bdk_wallet.reveal_next_address(KeychainKind::External).address;`
+   Persist `{ id, federation_id, address, value, state = Quoting }`.
+2. Quote: `let chain_fee = module.send_fee().await?;` and
+   `let quote = module.send_fee_quote(value).await?;` (`value: bitcoin::Amount`).
+   Show `value`, `chain_fee`, the `FeeQuote`, and the **net/total debit**. For a sweep use
+   `max_sendable_amount(balance, fee)`.
+3. `let operation_id = module.send(address, value, fee, custom_meta).await?;`
+   (`WalletClientModule::send(&self, address: Address<NetworkUnchecked>, value: bitcoin::Amount,
+   fee: Option<bitcoin::Amount>, custom_meta: serde_json::Value)
+   -> Result<OperationId, SendError>`)
+   Persist `operation_id` **immediately** and set `state = Submitted`. Put our idempotency key into
+   `custom_meta` (`{"id": "<id>"}`) so `SendMeta.custom_meta` carries it through the operation log.
+4. Await:
+   `match module.await_final_send_operation_state(operation_id).await? { … }`
+   - `FinalSendOperationState::Success(txid)` → persist `txid`, `state = Broadcast`
+   - `FinalSendOperationState::Aborted` → `state = Refunded` (funding rejected; value is spendable
+     again — **re-credit**)
+   - `FinalSendOperationState::Failure` → `state = Failed` (programming error / malicious
+     federation; surface an error, do not silently retry)
+5. **On boot:** for every non-terminal row with an `operation_id`, re-await
+   `await_final_send_operation_state(operation_id)`. **Never re-call `send()`** for the same `id`;
+   the persisted `operation_id` is the dedup anchor.
+
+```rust
+// 1. destination + row
+let bdk_address = bdk.reveal_next_address(KeychainKind::External).address;
+journal.insert_withdrawal(WithdrawalRow {
+    id, federation_id, address: bdk_address.to_string(), value,
+    state: WithdrawalState::Quoting, ..Default::default()
+}).await?;
+
+// 2. quote
+let chain_fee = module.send_fee().await?;                 // bitcoin::Amount
+let quote = module.send_fee_quote(value).await?;          // FeeQuote
+ui.show_net(value, chain_fee, &quote);
+
+// 3. submit once; persist the operation id immediately
+// BDK gives a checked address; send() takes Address<NetworkUnchecked>.
+let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+    bdk_address.into_unchecked();
+let custom_meta = serde_json::json!({ "id": id });
+let operation_id = module
+    .send(destination, value, Some(chain_fee), custom_meta)
+    .await?;
+journal.set_withdrawal_operation_id(id, operation_id, WithdrawalState::Submitted).await?;
+
+// 4. final state
+match module.await_final_send_operation_state(operation_id).await? {
+    FinalSendOperationState::Success(txid) => journal.set_broadcast(id, txid).await?,
+    FinalSendOperationState::Aborted        => journal.set_refunded(id).await?,
+    FinalSendOperationState::Failure        => journal.set_failed(id).await?,
+}
+```
+
+Related walletv2 methods (VERIFY.md §8.2): `receive_fee() -> Result<bitcoin::Amount, ReceiveError>`,
+`send_fee() -> Result<bitcoin::Amount, SendError>`,
+`send_fee_quote(amount: bitcoin::Amount) -> anyhow::Result<FeeQuote>`,
+`max_sendable_amount(balance, fee) -> anyhow::Result<bitcoin::Amount>`,
+`tx_chain() -> FederationResult<Vec<TxInfo>>`,
+`pending_tx_chain() -> FederationResult<Vec<TxInfo>>`.
+
+### 4.3 State enums
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DepositState {
+    /// Row inserted; `position` persisted; `receive()` has not returned an address yet.
+    AwaitingAddress,
+    /// Address persisted *before* display; `await_receive(position)` is in flight.
+    AddressShown,
+    /// `FinalReceiveOperationState::Success`.
+    Done,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WithdrawalState {
+    /// Destination revealed + persisted; quote not yet executed.
+    Quoting,
+    /// `send()` returned an `OperationId`; it is persisted.
+    Submitted,
+    /// `FinalSendOperationState::Success(txid)` — federation broadcast the withdrawal.
+    Broadcast { txid: bitcoin::Txid },
+    /// `FinalSendOperationState::Aborted` — funding rejected, value spendable again.
+    Refunded,
+    /// `FinalSendOperationState::Failure` — programming error / malicious federation.
+    Failed,
+}
+```
+
+Errors during `await_receive`/`await_final_send_operation_state` do **not** advance the state: the
+row stays `AwaitingAddress`/`AddressShown` or `Submitted` and is retried on boot. `DepositState`
+has no failure variant by design — `await_receive` retries aborted claims; an unrecoverable error
+is surfaced to the caller and retried, not terminalised.
+
+### 4.4 Persistence schema
+
+Logical tables in the app DB (prefix `[0x00]`), implemented as prefixed raw rows with a
+`serde_json` envelope (`ROW_VERSION = 1`, per douglaz `FedimintJournal`).
+
+```sql
+CREATE TABLE deposit_requests (
+    id              BLOB PRIMARY KEY,          -- deterministic: hash(federation_id || position)
+    federation_id   BLOB NOT NULL,
+    position        INTEGER NOT NULL,          -- EventLogId read BEFORE receive()
+    address         TEXT,                      -- set when state = AddressShown
+    state           TEXT NOT NULL,             -- AwaitingAddress | AddressShown | Done
+    next_position   INTEGER,                   -- returned by await_receive()
+    operation_id    BLOB,                      -- claim op learned via ReceiveMeta / event
+    txid            BLOB,                      -- funding txid
+    gross_deposited INTEGER,                   -- sats (bitcoin::Amount)
+    net_credit      INTEGER,                   -- msat (fedimint_core::Amount)
+    last_error      TEXT,
+    created_at      INTEGER NOT NULL,          -- unix ms
+    updated_at      INTEGER NOT NULL,          -- unix ms
+    UNIQUE (federation_id, position)
+);
+CREATE INDEX deposit_requests_state ON deposit_requests (state);
+
+CREATE TABLE withdrawal_requests (
+    id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
+    federation_id   BLOB NOT NULL,
+    address         TEXT NOT NULL,             -- BDK reveal_next_address destination
+    value           INTEGER NOT NULL,          -- sats (bitcoin::Amount)
+    fee             INTEGER,                   -- send_fee() result, sats
+    quote           BLOB,                      -- serialized FeeQuote
+    operation_id    BLOB UNIQUE,               -- set immediately after send()
+    state           TEXT NOT NULL,             -- Quoting | Submitted | Broadcast | Refunded | Failed
+    txid            BLOB,                      -- set when state = Broadcast
+    custom_meta     TEXT NOT NULL,             -- {"id": "<id>"} passed to send()
+    last_error      TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+CREATE INDEX withdrawal_requests_state ON withdrawal_requests (state);
+CREATE INDEX withdrawal_requests_fed_state ON withdrawal_requests (federation_id, state);
+```
+
+`Broadcast { txid }` is stored as `state='Broadcast'` plus the `txid` column. Every state
+transition writes the row and its pending-index entry in one `dbtx` (`begin_transaction …
+commit_tx`), so a crash cannot leave a row indexed under a state it no longer holds.
+
+### 4.5 Idempotency keys
+
+- **Deposit `id`** = deterministic from `(federation_id, position)` (composite `UNIQUE`, or
+  `hash(federation_id || position)`). The `position` is the anchor: it is read *before* `receive()`
+  and is stable across restarts. `insert_deposit_if_absent` makes step 1 idempotent; address
+  retries (step 2 timeouts) reuse the same row. A new receive request = a new `position` = a new row.
+- **Withdrawal `id`** = client-generated UUIDv7/ULID, persisted before `send()`. `send()` is called
+  **at most once per `id`**; the `Quoting → Submitted` transition is the fence. `operation_id` is
+  persisted immediately and is `UNIQUE`; on boot we re-await by it and never re-submit. The same
+  `id` is embedded in `custom_meta` so `SendMeta.custom_meta` carries the correlation through the
+  federation operation log.
+- **Crash window** (between `send()` returning and `operation_id` being persisted): on boot, do
+  **not** call `send()` again. Reconcile first — scan the operation log for a `SendMeta` whose
+  `custom_meta.id` matches the row's `id` (the same `find_claim`-style scan used for deposits); if
+  found, adopt that `operation_id` and continue at step 4. If no such operation exists, `send()`
+  did not commit and the row can be re-quoted and re-sent under the same `id`.
+
+### 4.6 Known hazards
+
+| Issue | Hazard | Mitigation in this design |
+|---|---|---|
+| `fedimint/fedimint#9101` | `receive()` returns only an address (no `Result`, no `OperationId`); repeated calls return the same address until the scanner sees it paid; there is no durable pre-payment operation. Correlating a payment to a UI request by address is unsafe with concurrent receives. | Attribute the deposit to the **`EventLogId` read before `receive()`** (`Client::get_next_event_log_id()`), persist the row **before** `receive()`, and observe with `await_receive(position)` (position-scoped). Never use the address as the correlation key; a new receive request always gets a new position/row. (Fixed on `main` by `#9306`; not in the 0.12.0 pin.) |
+| `fedimint/fedimint#9205` | Walletv2 client panics on first start when the address search outlives the DB write history (first-address derivation is a hash-prefix search that can take a long time). | Bound `receive()` at **120 s** and retry on timeout; leave the row in `AwaitingAddress` on timeout (never terminalise it); let the client/scanner run before the first `receive()`; never hold a DB transaction across the address search. |
+| `fedimint/fedimint#9338` | The claim is committed in one DB transaction and its event-log announcement in another; a client stopping between them keeps the claim without the `ReceivePaymentEvent`. An event-only subscriber can miss the deposit. | `await_receive(position)` is the source of truth, not the event. On boot, **also reconcile via module operations**: scan the operation log for `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match the deposit's funding outpoint (fedimint-sdk `find_claim` pattern). `ReceivePaymentEvent` is UI-only. |
+| `fedimint/fedimint#9098` | Quote and submit are not atomic; a concurrent spend between the quote and the funding can change what is selected, so the quoted fee/total may not match what is debited. | Re-quote immediately before `send()` (`send_fee()` + `send_fee_quote()`); compare with the persisted quote and abort with a `QuoteChanged`-style error on any drift; never silently absorb the difference. Serialize withdrawals per federation (single-flight) so our own sends cannot race each other. |
 
 ---
 
-## 5. Peg-out (federation withdrawal → BDK receives + reconciles)
-
-**Flow:**
-1. Quote: `wallet_client.get_withdraw_fees(&address, amount) -> Result<PegOutFees>` (or `send_fee_quote(amount) -> FeeQuote` for federation-only fees; miner fee is inside the output amount). For a sweep: `max_withdrawable_amount(&address, balance) -> (Amount, PegOutFees)`.
-2. Submit: `wallet_client.withdraw(&address, amount, fee: PegOutFees, extra_meta) -> Result<OperationId>`. This creates a wallet output funded by ecash inputs via the primary module (mint), the federation signs the BTC withdrawal transaction and broadcasts it.
-3. Track: `wallet_client.subscribe_withdraw_updates(op_id) -> Result<UpdateStreamOrOutcome<WithdrawState>>`; `client.transaction_updates(op_id)`.
-4. BDK reconciliation (the BDK chain-sync task): watch for the withdrawal transaction paying to a BDK-controlled address. When `get_tx(txid)` confirms (anchored in best chain), match `txid` → `OperationId` (stored in the journal at peg-out submission), mark the operation reconciled/done in the crash-safe journal.
-5. If the withdrawal gets stuck, RBF: `create_rbf_withdraw_output` / `rbf_withdraw` (deprecated since 0.4 — flagged).
-
-**Confirmed names** (module paths corrected per VERIFY.md §2):
-- `WalletClientModule::withdraw(address, amount, fee: fedimint_wallet_client::common::PegOutFees, extra_meta) -> OperationId`
-- `WalletClientModule::get_withdraw_fees(address, amount) -> fedimint_wallet_client::common::PegOutFees`
-- `WalletClientModule::send_fee_quote(amount) -> fedimint_client::module::transaction::FeeQuote`
-- `WalletClientModule::max_withdrawable_amount(address, balance) -> (Amount, fedimint_wallet_client::common::PegOutFees)`
-- `WalletClientModule::subscribe_withdraw_updates(op_id) -> UpdateStreamOrOutcome<WithdrawState>`
-- `WalletClientModule::create_withdraw_output(op_id, address, amount, fees) -> ClientOutputBundle<WalletOutput, WalletClientStates>` (lower-level; `withdraw` is the high-level wrapper)
-
----
-
-## 6. Concurrent sync tasks with crash-safe persistence
+## 5. Concurrent sync tasks with crash-safe persistence
 
 Two long-running tokio tasks (plus the fedimint client's internal executor/reconnect tasks):
 
 ### Task A — BDK chain sync (`sync::bdk_chain_task`)
-- Loop: call chain source → obtain an `Update`. For `bdk_esplora` use `bdk_esplora::EsploraAsyncExt::sync` (partial, from `Wallet::start_sync_with_revealed_spks()`) or `EsploraAsyncExt::full_scan` (full, from `Wallet::start_full_scan()`) — there is **no `EsploraClient` type and no `scan` method**. Then `wallet.apply_update(update)` → `wallet.take_staged()` → persist ChangeSet via `WalletPersister` (rusqlite or bdk_file_store).
-- Detect incoming BTC (peg-out arrival / peg-in confirmation seen from BDK side): `wallet.get_tx(txid)`, `wallet.list_unspent()`, `WalletEvent::TxConfirmed` via `apply_update_events`.
-- On peg-out detection: look up `operation_id` by `txid` in the journal; write `Done` + `OperationRecord` to the append-only ledger (`TAG_LEDGER_ROW` pattern from douglaz).
+
+- Loop: call chain source → obtain an `Update`. For `bdk_esplora` use
+  `bdk_esplora::EsploraAsyncExt::sync` (partial, from `Wallet::start_sync_with_revealed_spks()`) or
+  `EsploraAsyncExt::full_scan` (full, from `Wallet::start_full_scan()`) — there is **no
+  `EsploraClient` type and no `scan` method**. Then `wallet.apply_update(update)` →
+  `wallet.take_staged()` → persist ChangeSet via `WalletPersister` (rusqlite or bdk_file_store).
+- Detect the withdrawal arriving at a BDK address: `wallet.get_tx(txid)`, `wallet.list_unspent()`,
+  `WalletEvent::TxConfirmed` via `apply_update_events`. The federation-side `txid` comes from
+  `FinalSendOperationState::Success(txid)`, not from BDK.
+- Withdrawal completion is owned by `await_final_send_operation_state`; BDK sync only records that
+  the on-chain funds arrived at the destination.
 
 ### Task B — Fedimint federation sync (`sync::fedimint_sync_task`)
+
 - `client.spawn_federation_reconnect()` (keeps guardian connections warm).
-- Drive state machines: `client.start_executor()` (executor runs all module state machines in the background).
-- React to events: `client.handle_events(tracker, handler_fn)` or `client.get_event_log_transient_receiver()` — e.g. when `DepositStateV2` reaches `Credited`, record the peg-in credit in the journal; when `WithdrawState` reaches success, record the withdrawal broadcast txid.
+- Drive state machines: `client.start_executor()` (executor runs all module state machines in the
+  background).
+- React to events: `client.handle_events(tracker, handler_fn)` or
+  `client.get_event_log_transient_receiver()` — filter the walletv2 `ReceivePaymentEvent` /
+  `ReceivePaymentUpdateEvent` and `SendPaymentEvent` / `SendPaymentUpdateEvent` for UI/progress.
+  **Deposits are observed to completion with `await_receive(position)`; withdrawals with
+  `await_final_send_operation_state(operation_id)`** — events are supplementary.
 - Balance stream: `client.subscribe_balance_changes(unit)`.
 
 ### Crash-safe persistence (douglaz patterns, `journal.rs`)
-- App journal under `Database` prefix `[0x00]`; fedimint clients under `[0x01] ++ u32_le(db_prefix)` — **separate partitions** (douglaz's RocksDB memtable-history lesson).
-- Raw byte API + serde_json versioned envelopes (`ROW_VERSION = 1`): rows keyed by `[tag] ++ id_bytes` (`0x01 Intent`, `0x02 MoveRecord`, `0x03 FederationInfo`, `0x04 PendingIndex`, `0x05 LedgerRow`, …).
-- **Intent + pending index committed in ONE `dbtx`:** `begin_transaction … commit_tx` — status change removes old index entry and inserts new one atomically, so a crash never leaves an intent indexed under a status it no longer holds.
-- `Journal::pending` / `Journal::failed` read index + intents from ONE `begin_transaction_nc` snapshot — no double-count/drop mid-scan.
-- Every money intent gets an **idempotency key** and a **deterministic `OperationId`**; on restart, re-drive the pending set (never double-claim a deposit, never double-submit a peg-out).
-- `FederationInfo` registry row (`invite`, `db_prefix`, `joined_at`) persisted so restart can reopen existing partitions instead of re-joining.
-- Recovery: `ClientPreview::recover(db, root_secret, ...)` then `wait_for_all_recoveries()`; the recovery-phase handle omits recovered modules, so you **shutdown the recovery client and reopen** before reading balance (douglaz `recover_inner` / `open_recovered_partition`).
-- A `join_lock` (`Mutex<()>`) + `active_recoveries` reservation serialize prefix allocation so two concurrent joins/recoveries never initialize the same partition.
-- `open_all` is best-effort: one un-openable federation is warn-logged and skipped, never aborting the batch (poison tolerance).
 
-**Guessing at:** exact `Journal` trait shape from `wallet_core` (we'd either depend on douglaz's `wallet_core` or re-implement a smaller journal — flagged as a design decision).
+- App journal under `Database` prefix `[0x00]`; fedimint clients under `[0x01] ++ u32_le(db_prefix)` — **separate partitions**.
+- Raw byte API + serde_json versioned envelopes (`ROW_VERSION = 1`): rows keyed by `[tag] ++ id_bytes` (`0x01 Intent`, `0x02 MoveRecord`, `0x03 FederationInfo`, `0x04 PendingIndex`, `0x05 LedgerRow`, …).
+- **Row + pending index committed in ONE `dbtx`:** `begin_transaction … commit_tx` — a state change removes the old index entry and inserts the new one atomically.
+- `Journal::pending` / `Journal::failed` read index + rows from ONE `begin_transaction_nc` snapshot.
+- Every money intent gets an **idempotency key** and a **deterministic correlation id** (deposit: `position`; withdrawal: client ULID).
+- `FederationInfo` registry row (`invite`, `db_prefix`, `joined_at`) persisted so restart can reopen existing partitions.
+- Recovery: `ClientPreview::recover(...)` then `wait_for_all_recoveries()`; shutdown the recovery client and reopen before reading balance.
+- A `join_lock` (`Mutex<()>`) + `active_recoveries` reservation serialize prefix allocation.
+- `open_all` is best-effort: one un-openable federation is warn-logged and skipped.
 
 ---
 
-## 7. Thin UniFFI crate (`pegwallet-ffi`)
+## 6. Thin UniFFI crate (`pegwallet-ffi`)
 
-`uniffi = "0.32.0"` (matches the optional uniffi dependency already present in fedimint-client 0.12.0).
+`uniffi = "0.32.0"`.
 
 - `#[uniffi::export]` a `PegWallet` ABI object (must be `Send + Sync + 'static`; internally `Arc<PegWalletCore>`).
-- Methods (uniffi async — requires the uniffi async runtime component):
-  - `join_federation(invite_code: String) -> Result<String>` (federation id hex)
+- Methods:
+  - `join_federation(invite_code: String) -> Result<String>`
   - `balance_sat() -> u64`
-  - `peg_in_address() -> String`
-  - `peg_in(sat_amount: u64) -> Result<String>` (operation id)
-  - `peg_out(address: String, sat_amount: u64) -> Result<String>` (operation id)
-  - `operation_status(op_id: String) -> String`
-  - `sync() -> Result<()>` (trigger one BDK + fedimint sync tick)
-- Streams: uniffi supports streams/callbacks via `&UniFFI` consumer callbacks; simpler to expose a polling `list_operations() -> Vec<OperationDto>` plus a callback subscription for balance/operation updates.
+  - `request_deposit_address() -> Result<DepositView>` (creates a `deposit_requests` row, returns `AwaitingAddress`/`AddressShown`)
+  - `deposit_status(id: String) -> Result<DepositView>` (state + address + credited amount)
+  - `withdraw(address: String, sat_amount: u64) -> Result<String>` (creates a `withdrawal_requests` row, returns its id)
+  - `withdrawal_status(id: String) -> Result<WithdrawalView>` (state + operation_id + txid)
+  - `sync() -> Result<()>`
+- Streams: expose a polling `list_deposits()` / `list_withdrawals()` plus a callback subscription; map `anyhow::Error` to a `thiserror`-based `pegwallet_ffi::Error` (uniffi cannot expose `anyhow::Error`).
 
-**Guessing at:** uniffi async method support in 0.32 requires `uniffi` crate's `async` feature and the generated bindings glue per target language; for the initial version I'd expose **blocking** methods (callers `block_on`) plus a synchronous `poll`/`list` API, then add async streams once bindings are verified. Also, uniffi cannot expose `anyhow::Error` directly — map to a `pegwallet_ffi::Error` enum with `thiserror` + uniffi-compatible variants.
+Note: `request_deposit_address()` maps to step 1–3 (position + `receive()` + persist). The UI must
+show the address only after the `AddressShown` write commits.
+
+**Guessing at:** uniffi 0.32 async export support and per-language binding glue; start with blocking
+methods + polling, then add async streams once bindings are verified.
 
 ---
 
-## 8. Module map (confirmed function/module names)
+## 7. Module map (confirmed function/module names)
 
 **fedimint-client (0.12.0)**
 - `Client::builder()`, `ClientBuilder::with_module()`, `ClientBuilder::preview()`, `ClientPreview::join()` (**→ `ClientHandle`**)
 - `Client::get_balance_for_unit()`, `get_first_module::<M>()`, `get_first_module_arc::<M>()`
+- `Client::get_next_event_log_id() -> EventLogId`
 - `Client::finalize_and_submit_transaction(op_id, op_type, meta_gen, tx_builder) -> OutPointRange`
 - `Client::transaction_updates(op_id) -> TransactionUpdates`
-- `Client::await_primary_bitcoin_module_output(op_id, out_point)`
+- `Client::await_primary_bitcoin_module_output(s)(...)`
 - `Client::subscribe_balance_changes(unit) -> BoxStream<Amount>`
 - `Client::spawn_federation_reconnect()`, `start_executor()` (**receiver `self: &Arc<Self>`**), `db()`, `executor()`, `operation_log()`, `handle_events()`, `get_event_log_transient_receiver()`
 - `Client::chain_id()`, `federation_id()`, `config()`
-- `ClientContext`, `OperationId` = `fedimint_core::core::OperationId`, `OutPointRange` = **`fedimint_core::OutPointRange`**, `TransactionBuilder` = **`fedimint_client::module::transaction::TransactionBuilder`**
+- `ClientContext`, `OperationId` = `fedimint_core::core::OperationId`, `OutPointRange` = `fedimint_core::OutPointRange`, `TransactionBuilder` = `fedimint_client::module::transaction::TransactionBuilder`
 
-**fedimint-wallet-client (0.12.0)**
-- `WalletClientModule::allocate_deposit_address_pooled(max_gap_size) -> (DepositAddressInfo, AllocateDepositOutcome)`
-- `WalletClientModule::allocate_deposit_address_expert_only()`, `safe_allocate_deposit_address()`
-- `WalletClientModule::peg_in(PegInRequest) -> PegInResponse` (verify usage)
-- `WalletClientModule::withdraw(address, amount, fee: fedimint_wallet_client::common::PegOutFees, extra_meta) -> OperationId`
-- `WalletClientModule::get_withdraw_fees(address, amount) -> fedimint_wallet_client::common::PegOutFees`
-- `WalletClientModule::send_fee_quote(amount) -> fedimint_client::module::transaction::FeeQuote`
-- `WalletClientModule::max_withdrawable_amount(address, balance) -> (Amount, fedimint_wallet_client::common::PegOutFees)`
-- `WalletClientModule::subscribe_deposit(op_id) -> UpdateStreamOrOutcome<DepositStateV2>`
-- `WalletClientModule::subscribe_withdraw_updates(op_id) -> UpdateStreamOrOutcome<WithdrawState>`
-- `WalletClientModule::recheck_pegin_address(tweak_idx)`, `create_withdraw_output(...)`
-- `WalletClientInit` = `WalletClientInit(pub Option<DynBitcoindRpc>)`
+**fedimint-walletv2-client (0.12.0)** — SUPERSEDES the v1 `fedimint-wallet-client`
+- `WalletClientModule::receive() -> Address` (no `Result`, no `OperationId`)
+- `WalletClientModule::send(address, value, fee, custom_meta) -> Result<OperationId, SendError>`
+- `WalletClientModule::await_receive(position) -> anyhow::Result<(FinalReceiveOperationState, EventLogId)>`
+- `WalletClientModule::await_final_send_operation_state(id) -> anyhow::Result<FinalSendOperationState>`
+- `WalletClientModule::await_final_receive_operation_state(id) -> anyhow::Result<FinalReceiveOperationState>`
+- `receive_fee()`, `send_fee()`, `send_fee_quote(amount)`, `max_sendable_amount(balance, fee)`
+- `tx_chain()`, `pending_tx_chain()`
+- `WalletClientInit`, `WalletClientConfig`, `WalletOperationMeta`/`SendMeta`/`ReceiveMeta`
+- `FinalSendOperationState` (`Success(Txid) | Aborted | Failure`), `FinalReceiveOperationState` (`Success | Aborted`), `WalletClientStateMachines`
+- `common::{OutputInfo, TxInfo}`; `events::{ReceivePaymentEvent, ReceivePaymentUpdateEvent, SendPaymentEvent, SendPaymentUpdateEvent}`
+- `output_info_slice` is on the private `WalletFederationApi` (not public on the module); use `tx_chain()` / `pending_tx_chain()`. `OUTPUT_INFO_SLICE_ENDPOINT` is public via `common`.
 
 **fedimint-mint-client (0.12.0)**
-- `MintClientModule::reissue_external_notes(oob_notes, extra_meta) -> OperationId` (peg-in ecash issuance)
-- `MintClientModule::send_oob_notes(amount) -> OOBNotes`, `spend_notes_with_selector(...)`
-- `MintClientModule::create_output(dbtx, op_id, notes_per_denomination, exact_amount)`
-- `MintClientModule::await_output_finalized(op_id, out_point)`
-- `MintClientModule::get_note_counts_by_denomination()`, `estimate_spend_all_fees()`
+- `MintClientModule::reissue_external_notes()`, `send_oob_notes()`, `spend_notes_with_selector()`, `create_output()`, `await_output_finalized()`, `get_note_counts_by_denomination()`, `estimate_spend_all_fees()`
 - `MintClientInit`
 
 **bdk_wallet (3.2.0)**
@@ -281,7 +524,7 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
 - `build_tx()`, `create_psbt()` (**requires `bdk-tx` + `--cfg bdk_wallet_unstable`**), `sign_with_signers()`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`
 - `start_sync_with_revealed_spks()`, `start_full_scan()`
 - `WalletEvent::TxConfirmed` etc. via `apply_update_events()`
-- `Update` = **`bdk_wallet::Update`** (crate root — not `bdk_wallet::chain::Update`)
+- `Update` = `bdk_wallet::Update` (crate root — not `bdk_wallet::chain::Update`)
 - Persistence via `bdk_wallet::rusqlite` (`PersistedWallet::create`/`load`) or `bdk_file_store`
 
 **bdk_esplora (0.22.1) — chain source**
@@ -293,48 +536,43 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
 - `Database::with_prefix(&self, prefix: Vec<u8>) -> Self`
 - `AmountUnit` = `fedimint_core::module::AmountUnit`
 
-**fedimint-client-module (0.12.0)**
-- `ClientModuleInit` = `fedimint_client::module::module::init::ClientModuleInit`
-- `FeeQuote` = `fedimint_client::module::transaction::FeeQuote`
-
-**douglaz/fedimint-wallets (crash-safe patterns)**
-- `wallet-fedimint::MultiClient` — per-federation clients, `[0x01] ++ u32_le(db_prefix)` partitioning, `join_lock`, `active_recoveries` reservation, `open_all` best-effort, `wait_for_all_active_state_machines`, `Client::shutdown()` before replacing handle
-- `wallet-fedimint::FedimintJournal` — app prefix `[0x00]`, raw byte API + serde_json, `Intent`/`MoveRecord`/`FederationInfo`/`OperationRecord` rows, atomic status+index transitions in one dbtx, `Journal::pending`/`failed` snapshot reads, idempotency keys, deterministic op-ids
-- `wallet-fedimint::runtime::Runtime` — single actor owning everything, watch scheduler, per-operation IO driver tasks, restore-mnemonic recovery, settlement-stall watchdog
-- Pinned fedimint rev `72b1e5be...` (branch `wallet-pin/iroh-recovery-tpe8838`)
+**douglaz/fedimint-wallets (crash-safe patterns)** — source-derived, not compile-verified
+- `MultiClient`, `FedimintJournal`, `runtime::Runtime` as above.
 
 **Not verified (reference only) — fedimint-clientd**
-- `AppState::new(db_path)`, `multimint.register_new(invite_code)`, `multimint.all()`
-- `/v2/onchain/deposit-address`, `/v2/onchain/await-deposit`, `/v2/onchain/withdraw` (shape of the REST API we're replacing with UniFFI)
-- Read from `fedimint/fedimint-clientd` `main.rs`; `multimint` is a path crate, not a crates.io dependency, so VERIFY.md did **not** compile-verify these.
+- `AppState::new(db_path)`, `multimint.register_new(invite_code)`, `multimint.all()`; REST routes.
 
 ---
 
-## 9. What I'm guessing at (needs verification against source code)
+## 8. What I'm guessing at (needs verification against source code)
 
 Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
-1. **`peg_in` vs `allocate_deposit_address_pooled`** — whether peg-in requires an explicit `peg_in(PegInRequest)` call after funding the address, or whether the `pegin_monitor` state machine auto-mints ecash once the deposit confirms. Docs describe `subscribe_deposit` for "an ongoing deposit operation created with `allocate_deposit_address_expert_only`", suggesting allocation alone drives it; `peg_in`'s exact role is unclear.
-2. **Whether `WalletClientModule` (on-chain) or `MintClientModule` is the primary module for BTC** — `get_balance_for_unit(AmountUnit::Bitcoin)` needs a primary module; the wallet module claims `supports_being_primary` (per `ClientModule` trait). Mint also claims it. Need to confirm which unit maps to which module for `get_balance_for_unit`.
-3. **`ClientBuilder::open` vs `join` signatures** — `join` is confirmed: `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`; `ClientBuilder::preview_with_existing_config` is also confirmed. The exact restore flow via `ClientBuilder::open` remains **unverified** (VERIFY.md did not exercise it).
+1. **Wallet-module flow** — **RESOLVED** (VERIFY.md §8): walletv2 uses `receive()` + `await_receive(position)` for deposits and `send()` + `await_final_send_operation_state(id)` for withdrawals. There is no `peg_in`/`allocate_deposit_address_pooled`/`withdraw` in the v2 module.
+2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — `get_balance_for_unit(AmountUnit::Bitcoin)` needs a primary module; both claim `supports_being_primary`. **Unverified.**
+3. **`ClientBuilder::open` vs `join` signatures** — `join` is confirmed: `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`; `preview_with_existing_config` is confirmed. The `ClientBuilder::open` restore flow is **unverified** (VERIFY.md did not exercise it).
 4. **BDK persistence call shape** — **RESOLVED** (VERIFY.md §1): `PersistedWallet::create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` and `PersistedWallet::load(&mut P, LoadParams) -> Result<Option<Self>, LoadWithPersistError<P::Error>>`.
-5. **Chain source choice** — esplora/electrum/bitcoind-rpc; which one the crate defaults to is a product decision. `ClientBuilder::with_bitcoind_rpc` lets fedimint modules watch the chain; BDK needs its own chain source (`bdk_esplora::EsploraAsyncExt::sync`/`full_scan`, or the electrum/rpc equivalents).
-6. **UniFFI async** — uniffi 0.32 async export support and per-language binding generation not verified.
-7. **Depending on douglaz's `wallet_core`/`wallet-fedimint`** — it's AGPL-3.0 and not published on crates.io (git dep at a pinned commit). For our crate we'd either re-implement a small journal inline (MIT/Apache friendly) or take the git dep with the license consequence. Flagged as a licensing decision.
-8. **`tx_builder` construction for fedimint transactions** — `finalize_and_submit_transaction` takes a `TransactionBuilder`; how to build one for a peg-out (which is driven by `wallet_client.withdraw`, not manual tx building) needs confirming — `withdraw` appears to be the high-level wrapper that builds/submits internally.
+5. **Chain source choice** — esplora/electrum/bitcoind-rpc; a product decision. `bdk_esplora::EsploraAsyncExt::sync`/`full_scan` is the verified esplora path.
+6. **UniFFI async** — uniffi 0.32 async export support and per-language binding generation **unverified**.
+7. **Depending on douglaz's `wallet_core`/`wallet-fedimint`** — AGPL-3.0, not on crates.io (git dep at a pinned commit). Either re-implement a small journal inline or take the git dep with the license consequence.
+8. **`tx_builder` construction for fedimint transactions** — **RESOLVED** for walletv2: `send()` is the high-level wrapper that builds/submits internally and returns an `OperationId`; no manual `TransactionBuilder` is needed for peg-out.
 
 ---
 
-## 10. Suggested implementation order (for when you switch agents)
+## 9. Suggested implementation order
 
-1. Workspace + `pegwallet-core` with pinned deps; `Client` construction + module registration (mint + wallet).
-2. BDK wallet wrapper: create/load, reveal address, `build_tx`+sign+broadcast, persist, `start_sync_with_revealed_spks` loop.
-3. Crash-safe journal (douglaz pattern): intent rows, idempotency keys, atomic dbtx status transitions, pending re-drive on startup.
-4. Peg-in: `allocate_deposit_address_pooled` → BDK pays → `subscribe_deposit` / `await_primary_bitcoin_module_output` → ecash balance.
-5. Peg-out: `get_withdraw_fees` → `withdraw` → `subscribe_withdraw_updates` → BDK chain sync detects withdrawal tx → reconcile in journal.
-6. Two sync tasks (BDK chain + fedimint federation) sharing the journal; `spawn_federation_reconnect` + `start_executor`.
-7. `pegwallet-ffi` uniffi crate with `PegWallet` object; generate bindings for one target language as a smoke test.
+1. Workspace + `pegwallet-core` with pinned deps; `Client` construction with `MintClientInit` + `fedimint_walletv2_client::WalletClientInit`.
+2. BDK wallet wrapper: create/load, `reveal_next_address`, `build_tx`+sign+broadcast, persist, `start_sync_with_revealed_spks` loop.
+3. Journal + the two tables (`deposit_requests`, `withdrawal_requests`), atomic state transitions, boot reconciliation.
+4. Deposit flow: `get_next_event_log_id()` → `receive()` (120 s bound) → persist address → `await_receive(position)` → `Done`; boot resume + `find_claim` reconcile.
+5. Withdrawal flow: `reveal_next_address` → `send_fee()` + `send_fee_quote()` → `send()` → persist `operation_id` → `await_final_send_operation_state`; boot re-await only.
+6. Two sync tasks (BDK chain + fedimint federation) sharing the journal; events are UI-only.
+7. `pegwallet-ffi` uniffi crate with the `PegWallet` object; generate bindings for one target language as a smoke test.
 
 ---
 
-**Bottom line:** all the API names cited above are taken directly from the docs.rs pages for fedimint-client/mint-client/wallet-client 0.12.0 and bdk_wallet 3.2.0, from the actual `main.rs`/`multi_client.rs`/`journal.rs` source of the two reference repos, and (for the corrected names/pins) from the compile-verified stub in this repo (`src/main.rs` + `VERIFY.md`). No peg logic has been implemented; `VERIFY.md` documents exactly what was and was not verified.
+**Bottom line:** the wallet module is `fedimint-walletv2-client` (VERIFY.md §8). Deposits are
+position-attributed and discovered (`get_next_event_log_id()` before `receive()`, then
+`await_receive(position)`); withdrawals are op-id-attributed and initiated (`send()` then
+`await_final_send_operation_state`). The v1 `fedimint-wallet-client` names are superseded and must
+not be used. No peg logic has been implemented; `VERIFY.md` documents what was and was not verified.
