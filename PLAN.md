@@ -222,15 +222,19 @@ Steps:
    **stops at `AddressShown`**; it does not fund. If the retry budget is exhausted, set
    `state = Failed` with `last_error` and release the single-flight invariant. The FFI caller is
    not blocked (see §6).
-4. **Quote the deposit fee and show the net before funding**: `let quoted_fee =
-   module.receive_fee().await?;` persist it and show `net = amount − quoted_fee`. `ReceiveError`
-   variants (`FederationError`, `NoConsensusFeerateAvailable`) are transient — retry; they do not
-   move the row to `Failed`.
-5. **Fund from BDK** (default, **idempotent**, only when the caller invokes `fund_deposit(id)`):
+   **Steps 4–5 run inside `fund_deposit(id)`**, not in the background address task; the background
+   task still stops at `AddressShown`.
+4. **Inside `fund_deposit(id)`: quote the deposit fee and show the net before funding**:
+   `let quoted_fee = module.receive_fee().await?;` persist it and show
+   `net = amount − quoted_fee`. `ReceiveError` variants (`FederationError`,
+   `NoConsensusFeerateAvailable`) are transient — retry; they do not move the row to `Failed`.
+5. **Still inside `fund_deposit(id)`: fund from BDK** (default, **idempotent**):
    `fund_deposit(id)` first checks `funding_txid`; if it is already set, return it and do **not**
    build a second transaction. Otherwise `bdk_wallet.build_tx()` paying `addr` for `amount`; sign
    with `sign_with_signers`, `finalize_psbt`, broadcast via the configured chain source, and persist
-   `funding_txid`. External funding skips this step.
+   `funding_txid`. External funding skips this step. If the BDK balance is below `amount`, the
+   `build_tx` error is surfaced to the caller and the row stays `AddressShown` (no `funding_txid`
+   is written); the caller may retry after funding the BDK wallet or `cancel_deposit`.
 6. Subscribe to `ReceivePaymentEvent` for **UI only** (#9338).
 7. **Bounded watch loop.** `await_receive(position)` is **unbounded** — it waits until a payment
    arrives, so a user who never pays would hang the task. Wrap it:
@@ -326,7 +330,18 @@ const DEPOSIT_WATCH_TIMEOUT: Duration = Duration::from_secs(600);
 let mut backoff = Duration::from_secs(1);
 let (final_state, next_position) = loop {
     match timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await {
-        Ok(result) => break result?,       // Ok((final_state, next_position))
+        Ok(Ok((state, next))) => break (state, next),
+        Ok(Err(err)) => match classify_error(&err) {   // same rules as §4.3
+            ErrorClass::Transient => {
+                sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                continue;                  // same position; stay AddressShown
+            }
+            ErrorClass::Permanent => {
+                journal.fail_deposit(id, &err).await?; // Failed; releases invariant
+                return Ok(());
+            }
+        },
         Err(_elapsed) => {
             sleep(backoff).await;          // small exponential backoff
             backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -505,6 +520,10 @@ Transient errors do **not** advance the state: the row stays `AwaitingAddress`/`
   `FederationError(_)` are transient and stay `Quoting` for a boot retry.
 - `Cancelled`/`Failed` fall outside the partial-unique indexes, so they release the single-flight
   invariant and unblock the next request.
+
+`classify_error(&err) -> ErrorClass::{Transient, Permanent}` implements these rules; the deposit
+watcher and the withdrawal `send()` path both use it (they never propagate a raw error past the
+classification).
 
 ### 4.4 Persistence schema
 
@@ -726,9 +745,9 @@ Two long-running tokio tasks (plus the fedimint client's internal executor/recon
 - `#[uniffi::export]` a `PegWallet` ABI object (must be `Send + Sync + 'static`; internally `Arc<PegWalletCore>`).
 - Methods:
   - `join_federation(invite_code: String) -> Result<String>`
-  - `balance_sat() -> u64`
+  - `balance_sat() -> u64` — **blocked by §8.2** (primary module for BTC unverified).
   - `request_deposit_address() -> Result<DepositView>` — **non-blocking**: inserts/returns the single open `deposit_requests` row in `AwaitingAddress` and returns immediately. A background task runs `receive()` (120 s bound + retry) and performs the `AddressShown` write.
-  - `fund_deposit(id: String) -> Result<String>` — **idempotent**: if `funding_txid` is already set, returns it without building a second BDK transaction; otherwise builds/signs/broadcasts the peg-in transaction and returns its txid.
+  - `fund_deposit(id: String) -> Result<String>` — **idempotent**: if `funding_txid` is already set, returns it without building a second BDK transaction; otherwise builds/signs/broadcasts the peg-in transaction and returns its txid. A BDK balance below `amount` surfaces the `build_tx` error and leaves the row `AddressShown`.
   - `deposit_status(id: String) -> Result<DepositView>` — current state, address (null until `AddressShown`), quoted fee, gross, net credit, funding txid.
   - `cancel_deposit(id: String) -> Result<DepositView>` — allowed only from `AwaitingAddress`/`AddressShown` while `funding_txid` is null; sets `Cancelled` and releases the single-flight invariant.
   - `withdraw(address: String, sat_amount: u64) -> Result<String>` (creates a `withdrawal_requests` row, returns its id)
@@ -827,6 +846,8 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 8. **`tx_builder` construction for fedimint transactions** — **RESOLVED** for walletv2: `send()` is the high-level wrapper that builds/submits internally and returns an `OperationId`; no manual `TransactionBuilder` is needed for peg-out.
 9. **Recovery path (§5)** — `ClientPreview::recover` + `Client::wait_for_all_recoveries()` is on the boot critical path but **unverified**: VERIFY.md did not exercise a restore/recovery. The step that shuts down the recovery client and reopens the partition before reading balance is unconfirmed; treat it as blocking a production boot/restore implementation.
 10. **`WalletClientConfig` construction/defaults** — **UNVERIFIED**: `WalletClientInit::default()` is assumed. `WalletClientConfig` carries `dust_limit` and `fee_consensus`; `dust_limit` drives `SendError::DustValue` and `max_sendable_amount(...)`, so a wrong default makes small withdrawals fail. Verify the decoded config path (`client.config().get_module_cfg(id).cast::<WalletClientConfig>()`) and how the module is constructed before implementing peg-out dust checks.
+11. **`ReceiveMeta` full field set** — **UNVERIFIED** beyond `outpoint` and `fee` (VERIFY §8.3/§8.5 exercise those two): the adopted-row path also reads `address`, `value`, and `change_outpoint_range`. Confirm the exact `ReceiveMeta` fields on the pinned 0.12.0 before relying on them; orphan adoption depends on `outpoint` (dedup key), `value` (gross), `fee` (claim fee), and `address` (display).
+12. **Deposit detection without a local bitcoind RPC** — **UNVERIFIED**: `WalletClientInit::default()` is assumed to carry no `DynBitcoindRpc`. The `receive`/`await_receive` path is expected to read **federation-reported chain state** (the federation's wallet module watches the chain), not a local RPC; confirm this before assuming deposits are detected without `ClientBuilder::with_bitcoind_rpc`.
 
 ---
 
