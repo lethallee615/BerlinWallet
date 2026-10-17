@@ -35,10 +35,16 @@ use fedimint_core::OutPointRange;
 use fedimint_mint_client::{
     MintClientInit, MintClientModule, OOBNotes, SelectNotesWithAtleastAmount,
 };
-use fedimint_wallet_client::common::PegOutFees; // NOTE: lives in `common` (wallet-common)
-use fedimint_wallet_client::{
-    AllocateDepositOutcome, DepositAddressInfo, DepositStateV2, PegInRequest, PegInResponse,
-    WalletClientInit, WalletClientModule, WithdrawState,
+// The wallet module is walletv2. The v1 `fedimint-wallet-client` names are
+// SUPERSEDED (kept in VERIFY.md for history) and are no longer used here.
+use fedimint_walletv2_client::common::config::WalletClientConfig;
+use fedimint_walletv2_client::common::{OutputInfo, TxInfo};
+use fedimint_walletv2_client::events::{
+    ReceivePaymentEvent, ReceivePaymentUpdateEvent, SendPaymentEvent, SendPaymentUpdateEvent,
+};
+use fedimint_walletv2_client::{
+    FinalReceiveOperationState, FinalSendOperationState, ReceiveError, ReceiveMeta, SendError,
+    SendMeta, WalletClientInit, WalletClientModule, WalletClientStateMachines, WalletOperationMeta,
 };
 
 // ---- BDK -------------------------------------------------------------------
@@ -109,26 +115,58 @@ async fn _client_event_handler(client: &Client) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// fedimint-wallet-client: peg-in / peg-out
+// fedimint-walletv2-client: receive (peg-in) / send (peg-out)
 // ---------------------------------------------------------------------------
 
-async fn _wallet_client_module(w: &WalletClientModule) -> Result<()> {
-    // peg-in
-    let (_info, _outcome): (DepositAddressInfo, AllocateDepositOutcome) =
-        w.allocate_deposit_address_pooled(0usize).await?;
-    let _ = w.allocate_deposit_address_expert_only(serde_json::Value::Null).await?;
-    let _ = w.safe_allocate_deposit_address(serde_json::Value::Null).await?;
-    let _: PegInResponse = w.peg_in(todo!()).await?;
-    let _ = w.subscribe_deposit(todo!()).await?;
-    w.recheck_pegin_address(todo!()).await?;
+async fn _walletv2_client_module(client: &Client, w: &WalletClientModule) -> Result<()> {
+    // ---- receive (peg-in) -------------------------------------------------
+    // `receive()` returns ONLY an `Address`: no Result, no OperationId.
+    // The deposit becomes an operation only once the federation finds it.
+    // Race-free observation: read the event-log position BEFORE asking for
+    // the address, then wait from that position.
+    let position = client.get_next_event_log_id().await;
+    let _address: bitcoin::Address = w.receive().await;
+    let (_final, _next_position): (FinalReceiveOperationState, _) =
+        w.await_receive(position).await?;
 
-    // peg-out
-    let _: PegOutFees = w.get_withdraw_fees(todo!(), todo!()).await?;
+    // Lower-level per-operation observation (id obtained from event log / meta).
+    let _: FinalReceiveOperationState = w.await_final_receive_operation_state(todo!()).await?;
+
+    // ---- send (peg-out) ---------------------------------------------------
+    let fee: Option<bitcoin::Amount> = None;
+    let op: OperationId = w
+        .send(todo!(), todo!(), fee, serde_json::Value::Null)
+        .await?;
+    let _: FinalSendOperationState = w.await_final_send_operation_state(op).await?;
+
+    // fees / limits
+    let _: bitcoin::Amount = w.receive_fee().await?;
+    let _: bitcoin::Amount = w.send_fee().await?;
     let _: FeeQuote = w.send_fee_quote(todo!()).await?;
-    let _ = w.max_withdrawable_amount(todo!(), todo!()).await?;
-    let _: OperationId = w.withdraw(todo!(), todo!(), todo!(), serde_json::Value::Null).await?;
-    let _ = w.subscribe_withdraw_updates(todo!()).await?;
-    let _ = w.create_withdraw_output(todo!(), todo!(), todo!(), todo!())?;
+    let _: bitcoin::Amount = w.max_sendable_amount(todo!(), todo!()).await?;
+
+    // chain views + output info
+    let _: Vec<TxInfo> = w.tx_chain().await?;
+    let _: Vec<TxInfo> = w.pending_tx_chain().await?;
+    let _: Vec<OutputInfo> = todo!(); // public via `common`
+    // `output_info_slice(start, end)` is an internal `WalletFederationApi`
+    // method (private `mod api`), not public on `WalletClientModule`; the
+    // public representation is the endpoint constant:
+    let _endpoint = fedimint_walletv2_common::endpoint_constants::OUTPUT_INFO_SLICE_ENDPOINT;
+
+    // config / operation meta / state machines / events
+    let _: WalletClientConfig = todo!();
+    let _: WalletOperationMeta = todo!();
+    let _: SendMeta = todo!();
+    let _: ReceiveMeta = todo!();
+    let _: WalletClientStateMachines = todo!();
+    let _: SendPaymentEvent = todo!();
+    let _: SendPaymentUpdateEvent = todo!();
+    let _: ReceivePaymentEvent = todo!();
+    let _: ReceivePaymentUpdateEvent = todo!();
+    let _: Option<SendError> = None;
+    let _: Option<ReceiveError> = None;
+
     Ok(())
 }
 

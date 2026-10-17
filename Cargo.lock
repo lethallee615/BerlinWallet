@@ -2189,52 +2189,47 @@ dependencies = [
 ]
 
 [[package]]
-name = "fedimint-wallet-client"
+name = "fedimint-walletv2-client"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f2d30dd096857ca21e3e34244673b165a1faad6e1981fcbeb7997db8624227a"
+checksum = "4c2d22527c48b0a2241942818e069f9e54acfa32aec8320f5b7c537615234c74"
 dependencies = [
  "anyhow",
- "aquamarine",
- "assert_matches",
  "async-stream",
  "async-trait",
  "bitcoin",
  "erased-serde",
  "fedimint-api-client",
- "fedimint-bitcoind",
+ "fedimint-client",
  "fedimint-client-module",
  "fedimint-core",
  "fedimint-derive-secret",
  "fedimint-eventlog",
  "fedimint-logging",
- "fedimint-wallet-common",
+ "fedimint-walletv2-common",
  "futures",
- "rand 0.8.8",
+ "secp256k1",
  "serde",
  "serde_json",
  "strum 0.27.2",
  "strum_macros 0.27.2",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "fedimint-wallet-common"
+name = "fedimint-walletv2-common"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3943b360389bdd1c0509575fa3ac30bec27ec649fdd468136c02a51f0887e935"
+checksum = "a977ccac97a040252b775f64213d24510751f682c6fffecb21c3a1769fd80ed9"
 dependencies = [
  "anyhow",
  "bitcoin",
  "fedimint-core",
- "hex",
- "impl-tools",
  "miniscript",
+ "secp256k1",
  "serde",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -3221,30 +3216,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f4241005618a62f8d57b2febd02510fb96e0137304728543dfc5fd6f052c22d"
 dependencies = [
  "bitmaps",
-]
-
-[[package]]
-name = "impl-tools"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ae95c9095c2f1126d7db785955c73cdc5fc33e7c3fa911bd4a42931672029a7"
-dependencies = [
- "autocfg",
- "impl-tools-lib",
- "proc-macro-error2",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "impl-tools-lib"
-version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab699036df31c1f7d3561bfa6e9cb9bc3bb0fd2e2cd9bf121c31cb961d049ddf"
-dependencies = [
- "proc-macro-error2",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -5103,7 +5074,8 @@ dependencies = [
  "fedimint-connectors",
  "fedimint-core",
  "fedimint-mint-client",
- "fedimint-wallet-client",
+ "fedimint-walletv2-client",
+ "fedimint-walletv2-common",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5579,27 +5551,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "version_check",
-]
-
-[[package]]
-name = "proc-macro-error-attr2"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
-name = "proc-macro-error2"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
-dependencies = [
- "proc-macro-error-attr2",
- "proc-macro2",
- "quote",
 ]
 
 [[package]]

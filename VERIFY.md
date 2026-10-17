@@ -63,6 +63,10 @@ location (`fedimint *-0.12.0`, `bdk_*` as pinned). "✓ compiled" means `cargo c
 | `Client::built_in_application_event_log_tracker` ✓ | `pub fn built_in_application_event_log_tracker(&self) -> DynEventLogTrimableTracker` | `client.rs` |
 
 ### fedimint-wallet-client 0.12.0
+
+> **SUPERSEDED** — the wallet module is `fedimint-walletv2-client` (see §8). The v1 names below
+> are retained for history and are **not** the API to implement against.
+
 | Name | Real signature (abridged) | Source |
 |---|---|---|
 | `WalletClientModule::allocate_deposit_address_pooled` ✓ | `pub async fn allocate_deposit_address_pooled(&self, max_gap_size: usize) -> Result<(DepositAddressInfo, AllocateDepositOutcome)>` | `lib.rs:1405` |
@@ -305,3 +309,166 @@ cargo check          # -> Finished, exit 0
 
 Files added by this verification: `Cargo.toml`, `Cargo.lock`, `src/main.rs`,
 `rust-toolchain.toml`, `.cargo/config.toml`, `.gitignore`.
+
+---
+
+## 8. Wallet module: `fedimint-walletv2-client` (SUPERSEDES the wallet-client entries in §1/§2)
+
+The wallet module decision is **walletv2**, not `fedimint-wallet-client`. This section is the
+ground truth for the wallet module. The v1 wallet-client rows in §1 (and the `PegOutFees` /
+`peg_in` / `withdraw` references in §2) are **SUPERSEDED** but retained for history.
+
+### 8.1 Availability (published — no git dependency needed)
+
+| Crate | Published versions (crates.io sparse index) | Pin used |
+|---|---|---|
+| `fedimint-walletv2-client` | `0.11.0` … `0.12.0`, `0.12.0-rc.0`, `0.13.0-beta.0/1` | `=0.12.0` |
+| `fedimint-walletv2-common` | same line | `=0.12.0` |
+
+`cargo add fedimint-walletv2-client@=0.12.0 fedimint-walletv2-common@=0.12.0` resolved both at
+**0.12.0** and the workspace still compiles. No git rev is required. (`fedimint-wallet-client` was
+removed from the stub's dependencies; the v1 crate remains published but is not used.)
+
+### 8.2 Exact `receive()` / `send()` signatures
+
+```rust
+// fedimint-walletv2-client 0.12.0, src/lib.rs:578
+pub async fn receive(&self) -> Address;                 // NO Result, NO OperationId
+
+// src/lib.rs:369
+pub async fn send(
+    &self,
+    address: Address<NetworkUnchecked>,
+    value: bitcoin::Amount,
+    fee: Option<bitcoin::Amount>,
+    custom_meta: serde_json::Value,
+) -> Result<OperationId, SendError>;
+
+// src/lib.rs:470 / :514
+pub async fn await_final_send_operation_state(&self, operation_id: OperationId)
+    -> anyhow::Result<FinalSendOperationState>;
+pub async fn await_final_receive_operation_state(&self, operation_id: OperationId)
+    -> anyhow::Result<FinalReceiveOperationState>;
+
+// src/lib.rs:598
+pub async fn await_receive(&self, position: EventLogId)
+    -> anyhow::Result<(FinalReceiveOperationState, EventLogId)>;
+```
+
+**Does `receive()` return only an address with no operation? YES.** It returns
+`bitcoin::Address` directly (not a `Result`), with **no `OperationId`**. A receive operation is
+created only later, when the federation's wallet scanner finds a payment with the required
+confirmations and begins claiming it. This is the limitation tracked in
+`fedimint/fedimint#9101` — fixed on `main` by `#9306` ("reserve receive addresses under an
+operation"), but **not** in the published `0.12.0` pin.
+
+Related methods (all async):
+
+```rust
+pub async fn receive_fee(&self) -> Result<bitcoin::Amount, ReceiveError>;                  // :360
+pub async fn send_fee(&self) -> Result<bitcoin::Amount, SendError>;                       // :262
+pub async fn send_fee_quote(&self, amount: bitcoin::Amount) -> anyhow::Result<FeeQuote>;  // :284
+pub async fn max_sendable_amount(&self, balance: Amount, fee: bitcoin::Amount)
+    -> anyhow::Result<bitcoin::Amount>;                                                   // :333
+pub async fn tx_chain(&self) -> FederationResult<Vec<TxInfo>>;                            // :257
+pub async fn pending_tx_chain(&self) -> FederationResult<Vec<TxInfo>>;                    // :252
+```
+
+### 8.3 How a receive and a send are observed to completion
+
+**Receive (race-free, as documented by the module):**
+
+1. Read `Client::get_next_event_log_id()` **before** calling `receive()` (`client.rs:2723`).
+2. `let address = module.receive().await;` — show it to the payer.
+3. `let (final_state, next_position) = module.await_receive(position).await?;`
+   - It scans from `position`, waits for the next deposit's claim, retries when a claim is
+     `Aborted`, and returns `(FinalReceiveOperationState, EventLogId)`.
+   - On `FinalReceiveOperationState::Success` it also waits on
+     `await_primary_module_outputs(...)` for the claim's minted notes, so the balance is credited
+     when it returns.
+4. Persist `next_position` for the next receive.
+
+Lower level: given an operation id (from `ReceivePaymentEvent` / operation meta), call
+`await_final_receive_operation_state(id)`; `FinalReceiveOperationState` is `Success | Aborted`.
+
+**Send:**
+
+1. `let id = module.send(address, value, fee, custom_meta).await?;`
+2. `let outcome = module.await_final_send_operation_state(id).await?;`
+   - `FinalSendOperationState::Success(bitcoin::Txid)` — federation broadcast the withdrawal (the
+     SDK's finish line; confirmations are not tracked).
+   - `Aborted` — the funding transaction was rejected.
+   - `Failure` — programming error / malicious federation (documented as such upstream).
+
+**Persistent events** (module kind `fedimint_walletv2_common::KIND`), readable via
+`Client::handle_events` / the event log (`src/events.rs`):
+
+- `SendPaymentEvent { operation_id, address, value, fee }`
+- `SendPaymentUpdateEvent { operation_id, status: SendPaymentStatus::{Success(Txid), Aborted} }`
+- `ReceivePaymentEvent { operation_id, value, fee, address, outpoint: Option<OutPoint> }`
+- `ReceivePaymentUpdateEvent { operation_id, status: ReceivePaymentStatus::{Success, Aborted} }`
+
+### 8.4 v2 surface verified to compile
+
+All referenced in `src/main.rs` and accepted by `cargo check` (`EXIT=0`):
+
+| Name | Path / shape |
+|---|---|
+| `WalletClientModule` | `fedimint_walletv2_client::WalletClientModule` |
+| `WalletClientInit` | `pub struct WalletClientInit;` (unit, `Default`); `WalletClientInit::default()` |
+| `WalletClientConfig` | `fedimint_walletv2_client::common::config::WalletClientConfig` — `bitcoin_pks`, `descriptor`, `send_tx_vbytes`, `receive_tx_vbytes`, `feerate_base`, `dust_limit`, `fee_consensus`, `network` |
+| `WalletOperationMeta` | `Send(SendMeta) \| Receive(ReceiveMeta)` |
+| `SendMeta` | `{ change_outpoint_range: OutPointRange, address: Address<NetworkUnchecked>, value: bitcoin::Amount, fee: bitcoin::Amount, custom_meta: serde_json::Value }` |
+| `ReceiveMeta` | `{ change_outpoint_range: OutPointRange, value: bitcoin::Amount, fee: bitcoin::Amount, address: Option<Address<NetworkUnchecked>>, outpoint: Option<bitcoin::OutPoint> }` |
+| `FinalSendOperationState` | `Success(bitcoin::Txid) \| Aborted \| Failure` |
+| `FinalReceiveOperationState` | `Success \| Aborted` |
+| `WalletClientStateMachines` | `Send(SendStateMachine) \| Receive(ReceiveStateMachine)` |
+| `OutputInfo` | `fedimint_walletv2_client::common::OutputInfo` — `{ index: u64, script: ScriptBuf, value: bitcoin::Amount, spent: bool, outpoint: Option<bitcoin::OutPoint> }` |
+| `TxInfo` | `fedimint_walletv2_client::common::TxInfo` — `{ input, output, fee, vbytes, created }` |
+| Events | `fedimint_walletv2_client::events::{SendPaymentEvent, SendPaymentUpdateEvent, ReceivePaymentEvent, ReceivePaymentUpdateEvent}` |
+| `output_info_slice` | **not publicly reachable**: declared on `WalletFederationApi` inside the private `mod api` (`src/api.rs:28`). Public `OutputInfo` + `OUTPUT_INFO_SLICE_ENDPOINT` are available; public client methods are `tx_chain()` / `pending_tx_chain()`. |
+| Output-info endpoint | `fedimint_walletv2_common::endpoint_constants::OUTPUT_INFO_SLICE_ENDPOINT` |
+
+### 8.5 SDK usage patterns (`fedimint/fedimint-sdk`, `main`)
+
+Read from `rust/fedimint-sdk/src/onchain.rs`, `src/onchain/v2.rs`, and `examples/onchain.rs`:
+
+- Module selection asks the **live client**, not a stored record:
+  `client.get_first_module::<fedimint_walletv2_client::WalletClientModule>()` (falling back to
+  `fedimint_wallet_client::WalletClientModule` for v1) — `onchain.rs::module()`.
+- `Onchain::deposits()` is opened **before** `Onchain::receive()` so a payment found immediately
+  is not missed; `deposits.next().await?` yields the operation once the wallet finds the deposit.
+- `Onchain::quote()` → `v2::plan(...)`, using `module.send_fee()` + `module.send_fee_quote(output)`
+  and `Terms::V2 { chain_fee: bitcoin::Amount, quote: FeeQuote }`.
+- `Onchain::send(quote)` → `v2::send(...)` → `module.send(...)`.
+- Receive completion: `module.await_final_receive_operation_state(upstream)`; send completion:
+  `module.await_final_send_operation_state(id)` (see `v2.rs::subscribe_send`).
+- The SDK reads `WalletClientConfig` from the decoded client config
+  (`client.config().get_module_cfg(id).cast::<WalletClientConfig>()`) because walletv2 exposes no
+  public accessor for `dust_limit` / `fee_consensus` on the module.
+- The SDK bounds `module.receive()` with `ADDRESS_WAIT_TIMEOUT = 120s` (address derivation is a
+  hash-prefix search that can be slow on constrained hardware).
+
+### 8.6 Known open issues about walletv2 (as of 2026-10-16)
+
+- **`fedimint/fedimint#9101` [closed]** — "Walletv2 receive should reserve a fresh address and
+  return a stable operation": exactly the `receive()` caveat above (repeated calls return the same
+  address until paid; no durable pre-payment operation). Fixed on `main` by `#9306`, **not in
+  0.12.0**. This is the main caveat for our peg-in flow.
+- **`fedimint/fedimint#9205` [open]** — "walletv2 client panics on first start when the address
+  search outlives the db write history".
+- **`fedimint/fedimint#9063` [open]** — "CI: walletv2 unit test timed out waiting for deposit
+  auto-claim".
+- **`fedimint/fedimint#9106` [open]** / **`#9266` [open PR]** — walletv2-server pending-tx cap is an
+  `assert!` that panics instead of returning an error.
+- **`fedimint/fedimint#9338` [closed]** — "commit an operation and its event together": a client
+  stopping between the claim commit and its event-log write keeps the claim without the
+  announcement (referenced by the SDK's `find_claim`).
+- **`fedimint-sdk#418` [closed]** — flaky v2 round-trip: `receive()` times out waiting for a fresh
+  walletv2 address; the SDK now uses a dedicated 120 s scanner timeout (`#428`).
+- **`fedimint-sdk#445` / `#453` [closed]** — give every walletv2 deposit its own address / make a
+  deposit an operation when the wallet finds it.
+- Residual (documented in the SDK): quote-and-submit is not atomic upstream
+  (`fedimint/fedimint#9098`), so a concurrent spend between quote and funding can still change what
+  is selected.
+
