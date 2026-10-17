@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositOrigin, DepositRow, DepositState, JournalBackend,
-    WithdrawalRow, WithdrawalState, is_open_deposit, is_open_withdrawal, net_credit, now_ms,
+    WithdrawalRow, WithdrawalState, is_open_deposit, is_open_withdrawal, net_credit_with_fees,
+    now_ms,
 };
 use crate::ops::{DepositId, WithdrawalId};
 use crate::wire::FeeQuoteWire;
@@ -653,6 +654,7 @@ impl JournalBackend for DbJournal {
         outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
+        operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()> {
         let this = self;
         let id = id.clone();
@@ -664,7 +666,7 @@ impl JournalBackend for DbJournal {
                     row.funding_outpoint = Some(outpoint);
                     row.gross_deposited = Some(gross);
                     row.claim_fee = Some(fee);
-                    row.net_credit = Some(net_credit(gross, fee));
+                    row.net_credit = Some(net_credit_with_fees(gross, fee, operation_fee));
                     row.state = DepositState::Done;
                     row.updated_at = now_ms();
                     write_deposit(&mut dbtx, &row).await?;
@@ -734,7 +736,11 @@ impl JournalBackend for DbJournal {
                     quoted_fee: None,
                     claim_fee: Some(claim.fee),
                     gross_deposited: Some(claim.value),
-                    net_credit: Some(net_credit(claim.value, claim.fee)),
+                    net_credit: Some(net_credit_with_fees(
+                        claim.value,
+                        claim.fee,
+                        claim.operation_fee,
+                    )),
                     last_error: None,
                     created_at: now,
                     updated_at: now,
@@ -753,6 +759,7 @@ impl JournalBackend for DbJournal {
         id: &DepositId,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
+        operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()> {
         let this = self;
         let id = id.clone();
@@ -765,7 +772,7 @@ impl JournalBackend for DbJournal {
                         if row.net_credit.is_none() {
                             row.gross_deposited = Some(gross);
                             row.claim_fee = Some(fee);
-                            row.net_credit = Some(net_credit(gross, fee));
+                            row.net_credit = Some(net_credit_with_fees(gross, fee, operation_fee));
                         }
                         row.state = DepositState::Done;
                         row.updated_at = now_ms();
@@ -1098,6 +1105,7 @@ mod tests {
                 outpoint,
                 bitcoin::Amount::from_sat(10_000),
                 bitcoin::Amount::from_sat(100),
+                fedimint_core::Amount::ZERO,
             )
             .await
             .expect("finish");

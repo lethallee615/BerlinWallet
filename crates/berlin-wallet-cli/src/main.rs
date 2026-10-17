@@ -11,12 +11,14 @@ use berlin_wallet_core::network::client_network;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
+use berlin_wallet_core::withdrawal::await_change_outputs;
 use berlin_wallet_core::{deposit, withdrawal};
 use bitcoin::hashes::Hash as _;
 use bitcoin::{Amount, Network};
 use fedimint_client::Client;
 use fedimint_client::RootSecret;
 use fedimint_connectors::ConnectorRegistry;
+use fedimint_core::core::OperationId;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::module::AmountUnit;
@@ -108,8 +110,12 @@ fn print_help() {
     println!("  watch <deposit-id>                  await the deposit's claim");
     println!("  request-withdraw <address> <sat>    create a withdrawal row");
     println!("  send-withdraw <withdrawal-id>       quote + send an existing row");
+    println!("  cancel-deposit <deposit-id>         cancel an open deposit row");
     println!("  cancel-withdraw <withdrawal-id>     cancel a Quoting row");
     println!("  list-withdrawals                    list withdrawal rows");
+    println!("  operations                          print recent operation-log entries");
+    println!("  operation-fees <operation-id>       show operation fees");
+    println!("  await-change <operation-id>         await primary change outputs");
     println!("  withdraw <address> <sat>            request + send in one step");
     println!("  status <id>                         print a deposit or withdrawal row");
     println!("  sync                                run one BDK Esplora sync");
@@ -265,6 +271,14 @@ async fn run(
                     .ok_or_else(|| anyhow!("usage: send-withdraw <withdrawal-id>"))?;
                 command_send_withdraw(&client, &journal, &WithdrawalId(id.to_owned())).await
             }
+            "cancel-deposit" => {
+                let id = parts
+                    .next()
+                    .ok_or_else(|| anyhow!("usage: cancel-deposit <deposit-id>"))?;
+                let result = journal.cancel_deposit(&DepositId(id.to_owned())).await?;
+                println!("cancel result: {result:?}");
+                Ok(())
+            }
             "cancel-withdraw" => {
                 let id = parts
                     .next()
@@ -273,6 +287,37 @@ async fn run(
                     .cancel_withdrawal(&WithdrawalId(id.to_owned()))
                     .await?;
                 println!("cancel result: {result:?}");
+                Ok(())
+            }
+            "operations" => {
+                for (key, entry) in client
+                    .operation_log()
+                    .paginate_operations_rev(20, None)
+                    .await
+                {
+                    println!(
+                        "operation_id_full={} {key:?} {entry:#?}",
+                        key.operation_id.fmt_full()
+                    );
+                }
+                Ok(())
+            }
+            "operation-fees" => {
+                let id = parts
+                    .next()
+                    .ok_or_else(|| anyhow!("usage: operation-fees <operation-id>"))?;
+                let id = OperationId::from_str(id).context("invalid operation id")?;
+                let fees = client.get_operation_fees(id).await?;
+                println!("{fees:?}");
+                Ok(())
+            }
+            "await-change" => {
+                let id = parts
+                    .next()
+                    .ok_or_else(|| anyhow!("usage: await-change <operation-id>"))?;
+                let id = OperationId::from_str(id).context("invalid operation id")?;
+                await_change_outputs(&client, id).await?;
+                println!("change outputs finalized");
                 Ok(())
             }
             "list-withdrawals" => {

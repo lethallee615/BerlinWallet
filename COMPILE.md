@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (19 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (21 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (19 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (21 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (19 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (21 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (19 core tests + CLI 0 tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (21 core tests + CLI 0 tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -926,7 +926,8 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
 - `run <invite> [esplora-url]` — interactive session with `balance`, `ecash-balance`, `address`,
   `min`, `request-deposit <sat>`, `fund-deposit <id>`, `deposit <sat>` (both steps), `watch <id>`,
   `request-withdraw <address> <sat>`, `send-withdraw <id>`, `cancel-withdraw <id>`, `withdraw
-  <address> <sat>` (both steps), `list-withdrawals`, `status <id>`, `sync`, `quit`.
+  <address> <sat>` (both steps), `cancel-deposit <id>`, `list-withdrawals`, `status <id>`,
+  `operations`, `operation-fees <id>`, `await-change <id>`, `sync`, `quit`.
 - Data dir: `$BERLIN_WALLET_DATA_DIR` or `.berlin-wallet`; `run` uses the chain-id-derived network,
   `init` defaults to regtest.
 - Persistence: `open_database` (`main.rs`) calls `client::open_rocksdb(<data-dir>/fedimint.rocksdb)`.
@@ -1425,3 +1426,140 @@ row; the quote is.
 Deposit and withdrawal both completed on Mutinynet. No failures occurred after funding; the only
 remaining faucet issue is automated OAuth, which was bypassed by the user funding the address
 directly.
+
+---
+
+## 26. Net credit now includes operation-level fees
+
+### 26.1 Source of the discrepancy
+
+`ReceiveMeta.fee` only covers the on-chain claim fee. The primary mintv2 module charges an
+additional operation fee, reported by:
+
+```rust
+// fedimint-client/src/client.rs:1209
+pub async fn get_operation_fees(&self, operation_id: OperationId)
+    -> anyhow::Result<Option<Amounts>>;
+```
+
+For the first Mutinynet deposit:
+
+```text
+gross: 50000 sat
+ReceiveMeta.fee: 324 sat
+Client::get_operation_fees: Some(Amounts({AmountUnit(0): 105696msat}))
+old row net_credit: 49676000 msat
+actual balance delta: 49570304 msat
+```
+
+So the row over-reported by exactly 105,696 msat. The missing fee is the mintv2
+issuance/output fee, not a `get_balance_for_unit` omission.
+
+### 26.2 Fix
+
+`Journal::finish_deposit` / `close_deposit_done_if_open` / `claim_adopt_if_absent` now receive an
+`operation_fee: fedimint_core::Amount` and use:
+
+```rust
+net_credit(gross, fee).saturating_sub(operation_fee)
+```
+
+The deposit flow obtains it with `Client::get_operation_fees(claim.operation_id)` and passes the
+BTC amount to the journal (`deposit.rs::operation_fee`). `AdoptedClaim` carries the same field.
+
+Tests:
+`journal::tests::net_credit_includes_operation_fee` and
+`journal::tests::deposit_row_net_credit_matches_observed_balance_delta` pin the observed vector:
+
+```text
+50000 sat − 324 sat − 105696 msat = 49570304 msat
+```
+
+Live verification after the fix:
+
+```text
+20,000 sat deposit: net_credit=19574784 msat; balance 39234560 -> 58809344 (delta 19574784)
+10,000 sat deposit: net_credit=9574912 msat;  balance 58809344 -> 68384256 (delta 9574912)
+```
+
+The row now equals the real credited delta.
+
+---
+
+## 27. Crash/restart matrix (Mutinynet)
+
+Data dir `/tmp/opencode/berlin-join`; all rows/journal/client state in RocksDB. "Kill" means
+`SIGKILL`/`abort`, then a fresh process reopens the same DB.
+
+### 27.1 After AddressShown, before funding
+
+- Killed after `request-deposit 10000` reached `AddressShown`.
+- Restart: row `01a14c26-986b-74d6-b8c8-a68f65a2ab60` was `AddressShown`, `funding_txid=None`;
+  ecash balance unchanged at `58,809,344 msat`.
+- No double credit, no stuck row beyond the intended single open slot.
+
+### 27.2 After funding broadcast, before the claim
+
+- Killed immediately after `fund-deposit` printed:
+  `22bd63b4198b4771f7a6c572af72dfea87044be8bba0beae122582071b1c1fe2`.
+- Restart: row stayed `AddressShown` with that `funding_txid`; calling `fund-deposit` again
+  returned the **same txid** and did not broadcast a second transaction.
+
+### 27.3 During Confirming
+
+- Restarted the funded row, started `watch`, killed the process after 5 s.
+- Restart `watch` reached `Done` exactly once:
+  `net_credit=9574912 msat`; balance `58,809,344 -> 68,384,256` (delta `9,574,912`).
+- No duplicate credit.
+
+### 27.4 After Done
+
+- Restart: row `01a14c26-...` remained `Done`, `net_credit=9574912 msat`; balance stayed
+  `68,384,256 msat`.
+- A new `request-deposit 10000` was accepted as `01a14c2b-3f26-72e5-8b91-128f9a0e9e93`
+  (`AddressShown`), proving the single-flight slot was released; it was then cancelled
+  (`cancel result: Applied`).
+
+### 27.5 Mid-withdrawal: after `send()` before operation-id persistence
+
+- `BERLIN_WALLET_CRASH_POINT=after_send` aborted the process after `send()` returned:
+  `fault injection: aborting at after_send` (exit 134).
+- Restart found `01a14c2b-6e56-75b3-b71b-b8ab9e0182ac` still `Quoting`; balance was temporarily
+  `55,801,344 msat` (change output not yet finalized).
+- `send-withdraw <id>` recovered the operation id from the walletv2 operation log by
+  `custom_meta.id` (`find_sent_operation`), awaited the final state, and set:
+  `Broadcast { txid: 56decb69a8a935173fb7efd2a2518f4ae2c3a46cf92f06916e3aba2b21d3ca42 }`.
+- Final balance `58,048,512 msat`. Operation log contains exactly **one** Send entry for that
+  withdrawal id; no second send.
+
+### 27.6 After Broadcast, before the row update
+
+- Pre-fix, `after_broadcast` aborted after `Success(txid)` but before `set_broadcast`; the row was
+  `Submitted`, and the change outputs were not yet credited:
+  balance `41,941,504 msat`, 5,771,264 msat below the settled value. `await-change` for the send
+  operation finalized the change and recovered it to `47,711,232 msat`.
+- Fix: `await_change_outputs` now waits for every primary-module change outpoint from
+  `SendMeta.change_outpoint_range` before the crash hook and `set_broadcast`.
+- Post-fix repetition (`01a14c2f-2b9d-70d5-b1a0-41484bdb5500`):
+  - crash at `after_broadcast`, restart row `Submitted`, balance `36,402,688 msat`;
+  - `send-withdraw` set
+    `Broadcast { txid: 7e39097af1bfe34ffa674f717fa8ffb5f8166d93c8c15bdac28a99cc139f0b4e }`;
+  - balance stayed `36,402,688 msat` (change already awaited before the crash);
+  - exactly one Send entry for that id; no second send.
+
+### 27.7 Faucet-auth note
+
+The faucet API requires a Bearer JWT:
+
+```text
+POST https://faucet.mutinynet.com/api/onchain
+{"sats":100000,"address":"tb1..."}
+HTTP/2 401
+{"error":"Missing token"}
+```
+
+GitHub device flow remained `authorization_pending` and expired; the round trip was completed by
+the user funding the BDK address directly. The CLI currently has **no faucet-token support**.
+Decision: it **should** accept `MUTINYNET_FAUCET_TOKEN` (or a `--faucet-token` flag) in a
+CLI-only `faucet`/`fund-bdk` command, keeping token handling out of the core wallet. Not
+implemented here.

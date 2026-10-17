@@ -161,6 +161,9 @@ pub struct AdoptedClaim {
     pub operation_id: OperationId,
     pub value: bitcoin::Amount,
     pub fee: bitcoin::Amount,
+    /// Fees charged by the primary module for the claim operation
+    /// (`Client::get_operation_fees`), separate from `fee`.
+    pub operation_fee: fedimint_core::Amount,
 }
 
 #[derive(Debug, Default)]
@@ -236,6 +239,7 @@ pub trait JournalBackend: Send + Sync {
         outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
+        operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()>;
     async fn close_deposit_done(&self, id: &DepositId) -> anyhow::Result<()>;
     async fn claim_adopt_if_absent(
@@ -249,6 +253,7 @@ pub trait JournalBackend: Send + Sync {
         id: &DepositId,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
+        operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()>;
     async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult>;
     async fn insert_withdrawal(&self, row: &WithdrawalRow) -> anyhow::Result<()>;
@@ -500,13 +505,14 @@ impl JournalBackend for MemoryJournal {
         outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
+        operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.deposits.get_mut(id) {
             row.funding_outpoint = Some(outpoint);
             row.gross_deposited = Some(gross);
             row.claim_fee = Some(fee);
-            row.net_credit = Some(net_credit(gross, fee));
+            row.net_credit = Some(net_credit_with_fees(gross, fee, operation_fee));
             row.state = DepositState::Done;
             row.updated_at = now_ms();
         }
@@ -553,7 +559,11 @@ impl JournalBackend for MemoryJournal {
             quoted_fee: None,
             claim_fee: Some(claim.fee),
             gross_deposited: Some(claim.value),
-            net_credit: Some(net_credit(claim.value, claim.fee)),
+            net_credit: Some(net_credit_with_fees(
+                claim.value,
+                claim.fee,
+                claim.operation_fee,
+            )),
             last_error: None,
             created_at: now,
             updated_at: now,
@@ -568,6 +578,7 @@ impl JournalBackend for MemoryJournal {
         id: &DepositId,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
+        operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         let Some(row) = inner.deposits.get_mut(id) else {
@@ -582,7 +593,7 @@ impl JournalBackend for MemoryJournal {
         if row.net_credit.is_none() {
             row.gross_deposited = Some(gross);
             row.claim_fee = Some(fee);
-            row.net_credit = Some(net_credit(gross, fee));
+            row.net_credit = Some(net_credit_with_fees(gross, fee, operation_fee));
         }
         row.state = DepositState::Done;
         row.updated_at = now_ms();
@@ -746,6 +757,17 @@ pub(crate) fn net_credit(gross: bitcoin::Amount, fee: bitcoin::Amount) -> fedimi
     fedimint_core::Amount::from_sats(net.to_sat())
 }
 
+/// Subtract the operation-level fees reported by `Client::get_operation_fees`
+/// (for a deposit claim this is the primary mint module's issuance fee, not the
+/// on-chain claim fee already represented by `fee`).
+pub(crate) fn net_credit_with_fees(
+    gross: bitcoin::Amount,
+    fee: bitcoin::Amount,
+    operation_fee: fedimint_core::Amount,
+) -> fedimint_core::Amount {
+    net_credit(gross, fee).saturating_sub(operation_fee)
+}
+
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -878,6 +900,51 @@ mod tests {
         assert_eq!(
             journal.cancel_deposit(&first.id).await.expect("cancel"),
             ApplyResult::Applied
+        );
+    }
+
+    #[test]
+    fn net_credit_includes_operation_fee() {
+        // Observed Mutinynet deposit: gross 50,000 sat, walletv2 claim fee 324
+        // sat, mintv2 operation fee 105,696 msat; actual balance delta was
+        // 49,570,304 msat.
+        assert_eq!(
+            net_credit_with_fees(
+                bitcoin::Amount::from_sat(50_000),
+                bitcoin::Amount::from_sat(324),
+                fedimint_core::Amount::from_msats(105_696),
+            ),
+            fedimint_core::Amount::from_msats(49_570_304)
+        );
+    }
+
+    #[tokio::test]
+    async fn deposit_row_net_credit_matches_observed_balance_delta() {
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+        let row = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(50_000),
+        );
+        journal.insert_deposit(&row).await.expect("insert");
+        let outpoint = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x33; 32]), 0);
+        journal
+            .finish_deposit(
+                &row.id,
+                outpoint,
+                bitcoin::Amount::from_sat(50_000),
+                bitcoin::Amount::from_sat(324),
+                fedimint_core::Amount::from_msats(105_696),
+            )
+            .await
+            .expect("finish");
+        let row = journal.deposit(&row.id).await.unwrap().unwrap();
+        assert_eq!(
+            row.net_credit,
+            Some(fedimint_core::Amount::from_msats(49_570_304)),
+            "row net_credit must equal the observed spendable balance delta"
         );
     }
 

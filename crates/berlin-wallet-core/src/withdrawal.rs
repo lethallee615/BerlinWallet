@@ -4,7 +4,9 @@ use fedimint_client::Client;
 use fedimint_client::module::transaction::FeeQuote;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
-use fedimint_walletv2_client::{FinalSendOperationState, WalletClientModule};
+use fedimint_walletv2_client::{
+    FinalSendOperationState, SendMeta, WalletClientModule, WalletOperationMeta,
+};
 
 use crate::client::wallet_client_config;
 use crate::error::{ErrorClass, PegError, classify_error};
@@ -62,23 +64,110 @@ pub async fn reconcile_withdrawal(
         .withdrawal(id)
         .await?
         .ok_or_else(|| PegError::WithdrawalNotFound(id.0.clone()))?;
-    if row.state != WithdrawalState::Submitted {
-        return Ok(());
+    match row.state {
+        WithdrawalState::Submitted => {
+            let Some(operation_id) = row.operation_id else {
+                return Ok(());
+            };
+            tokio::time::timeout(
+                RECONCILE_TIMEOUT,
+                await_final_state(client, journal, id, operation_id),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("withdrawal final-state await timed out"))??;
+        }
+        WithdrawalState::Quoting => {
+            if let Some(operation_id) = find_sent_operation(client, journal, id).await? {
+                journal
+                    .set_withdrawal_operation_id(id, operation_id)
+                    .await?;
+                tokio::time::timeout(
+                    RECONCILE_TIMEOUT,
+                    await_final_state(client, journal, id, operation_id),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("withdrawal final-state await timed out"))??;
+            }
+        }
+        _ => {}
     }
-    let Some(operation_id) = row.operation_id else {
+    Ok(())
+}
+
+/// Find the operation id of a send that returned before it was persisted.
+///
+/// Checks the journal first, then the walletv2 operation log by our
+/// `custom_meta.id`. This closes the `send()` -> `set_withdrawal_operation_id`
+/// crash window without re-sending.
+pub async fn find_sent_operation(
+    client: &Client,
+    journal: &Journal,
+    id: &WithdrawalId,
+) -> anyhow::Result<Option<OperationId>> {
+    if let Some(operation_id) = journal.scan_for_send(id).await? {
+        return Ok(Some(operation_id));
+    }
+
+    let log = client.operation_log();
+    let mut last_seen = None;
+    loop {
+        let page = log.paginate_operations_rev(256, last_seen).await;
+        if page.is_empty() {
+            return Ok(None);
+        }
+        for (key, entry) in &page {
+            if entry.operation_module_kind() != fedimint_walletv2_common::KIND.as_str() {
+                continue;
+            }
+            let Ok(meta) = entry.try_meta::<WalletOperationMeta>() else {
+                continue;
+            };
+            if let WalletOperationMeta::Send(SendMeta { custom_meta, .. }) = meta {
+                if custom_meta.get("id").and_then(|value| value.as_str()) == Some(id.0.as_str()) {
+                    return Ok(Some(key.operation_id));
+                }
+            }
+        }
+        last_seen = page.last().map(|(key, _)| *key);
+    }
+}
+
+/// Wait for the primary module change outputs of a successful send before
+/// declaring Broadcast. Without this, a crash immediately after the send final
+/// state can leave the change notes uncredited.
+pub async fn await_change_outputs(
+    client: &Client,
+    operation_id: OperationId,
+) -> anyhow::Result<()> {
+    let Some(entry) = client.operation_log().get_operation(operation_id).await else {
         return Ok(());
     };
+    let Ok(WalletOperationMeta::Send(SendMeta {
+        change_outpoint_range,
+        ..
+    })) = entry.try_meta::<WalletOperationMeta>()
+    else {
+        return Ok(());
+    };
+    for outpoint in change_outpoint_range {
+        client
+            .await_primary_bitcoin_module_output(operation_id, outpoint)
+            .await?;
+    }
+    Ok(())
+}
 
+async fn await_final_state(
+    client: &Client,
+    journal: &Journal,
+    id: &WithdrawalId,
+    operation_id: OperationId,
+) -> anyhow::Result<()> {
     let module = client.get_first_module::<WalletClientModule>()?;
-    let outcome = tokio::time::timeout(
-        RECONCILE_TIMEOUT,
-        module.await_final_send_operation_state(operation_id),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("withdrawal final-state await timed out"))?;
-
-    match outcome {
+    match module.await_final_send_operation_state(operation_id).await {
         Ok(FinalSendOperationState::Success(txid)) => {
+            await_change_outputs(client, operation_id).await?;
+            crate::fault::crash_point("after_broadcast");
             journal.set_broadcast(id, txid).await?;
         }
         Ok(FinalSendOperationState::Aborted) => {
@@ -101,7 +190,7 @@ pub async fn reconcile_withdrawal(
 /// txid; no BDK scan is attempted for external destinations.
 pub async fn reconcile_submitted(client: &Client, journal: &Journal) -> anyhow::Result<()> {
     let rows = journal
-        .withdrawals_in(&[WithdrawalState::Submitted])
+        .withdrawals_in(&[WithdrawalState::Quoting, WithdrawalState::Submitted])
         .await?;
     for row in rows {
         if let Err(err) = reconcile_withdrawal(client, journal, &row.id).await {
@@ -140,6 +229,28 @@ pub async fn send_withdrawal(
         return Err(err);
     }
 
+    // A crash may have happened after send() but before the operation id was
+    // persisted, or after the final state arrived but before Broadcast was
+    // written. Recover from the operation log/journal instead of re-sending.
+    if row.state == WithdrawalState::Submitted {
+        if let Some(operation_id) = row.operation_id {
+            journal
+                .set_withdrawal_operation_id(id, operation_id)
+                .await?;
+            return await_final_state(client, journal, id, operation_id).await;
+        }
+        return Ok(());
+    }
+    if row.state != WithdrawalState::Quoting {
+        return Ok(());
+    }
+    if let Some(operation_id) = find_sent_operation(client, journal, id).await? {
+        journal
+            .set_withdrawal_operation_id(id, operation_id)
+            .await?;
+        return await_final_state(client, journal, id, operation_id).await;
+    }
+
     let chain_fee = module.send_fee().await?;
     let quote: FeeQuote = module.send_fee_quote(value).await?;
     journal.set_withdrawal_quote(id, (&quote).into()).await?;
@@ -163,6 +274,7 @@ pub async fn send_withdrawal(
         .await
     {
         Ok(operation_id) => {
+            crate::fault::crash_point("after_send");
             journal
                 .set_withdrawal_operation_id(id, operation_id)
                 .await?;
@@ -176,24 +288,7 @@ pub async fn send_withdrawal(
         }
     };
 
-    match module.await_final_send_operation_state(operation_id).await {
-        Ok(FinalSendOperationState::Success(txid)) => {
-            journal.set_broadcast(id, txid).await?;
-        }
-        Ok(FinalSendOperationState::Aborted) => {
-            journal.set_refunded(id).await?;
-        }
-        Ok(FinalSendOperationState::Failure) => {
-            journal.set_failed(id).await?;
-        }
-        Err(err) => {
-            if classify_error(&err) == ErrorClass::Permanent {
-                journal.set_withdrawal_failed(id, &err.to_string()).await?;
-            }
-            return Err(err);
-        }
-    }
-
+    await_final_state(client, journal, id, operation_id).await?;
     Ok(())
 }
 

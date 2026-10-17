@@ -230,7 +230,8 @@ the address to a third party) follows the same row/observation path minus the BD
 
 **Fees (order matters: quote → show net → fund).** Quote `module.receive_fee().await?` before
 funding and persist it; show `net = amount − quoted_fee`. At claim time persist the actual
-`ReceiveMeta.fee` and compute `net_credit = gross_deposited − claim_fee` (fall back to the quoted
+`ReceiveMeta.fee` plus the operation-level fees from `Client::get_operation_fees(operation_id)` and
+compute `net_credit = gross_deposited − claim_fee − operation_fee` (fall back to the quoted
 `receive_fee()` if the claim has not recorded one). The Bitcoin network fee for the funding
 transaction is paid by the BDK wallet and is **not** part of `receive_fee()`.
 
@@ -293,7 +294,7 @@ Steps:
    - `operation_id` comes from `ReceivePaymentEvent.operation_id` carried by the scan.
    - `claim_bind(federation_id, claim.outpoint, R.id)`:
      - `Bound` → finish R from `ReceiveMeta { outpoint, value, fee }`: `gross_deposited = value`,
-       `claim_fee = fee`, `net_credit = value − fee`, `funding_outpoint = outpoint`,
+       `claim_fee = fee`, `net_credit = value − fee − operation_fee`, `funding_outpoint = outpoint`,
        `operation_id`, `state = Done`.
      - `TakenBy(other)` → the adoption pass already recorded this claim on row `other`; set R
        `Done` **without** inserting a second claim row and **without** a second credit (R's credit
@@ -904,7 +905,7 @@ adopted elsewhere.
   returns the same row/address (single-flight) and never inserts a second open row; crash/restart
   at each transition (`AwaitingAddress → AddressShown → Done`); kill between the claim commit and
   its event-log entry (#9338) and assert boot reconciliation credits exactly once; assert
-  `net_credit = gross_deposited − claim_fee` and that `receive_fee()` was applied.
+  `net_credit = gross_deposited − claim_fee − operation_fee` and that `receive_fee()` was applied.
 - **Withdrawal:** move the feerate between `send_fee_quote()` and `send()` to exercise quote drift
   (#9098) and assert the send is refused/re-quoted; crash after `send()` but before `operation_id`
   is persisted and assert boot reconciliation adopts the operation instead of re-sending; assert
@@ -1029,7 +1030,7 @@ address is shown only after the `AddressShown` write commits. BDK funding is a s
 
 **Units at the FFI boundary.** `balance_sat()` returns **sats**; `DepositView.net_credit_msat`
 returns **msat** (`fedimint_core::Amount`). 1 sat = 1000 msat. Convert exactly with
-`fedimint_core::Amount::from_sats(gross_sats - claim_fee_sats)` (×1000) and read with `.msats()`;
+`gross − claim_fee − operation_fee` in msat (`Client::get_operation_fees`) and read with `.msats()`;
 never round `net_credit` down to sats for accounting. `balance_sat()` is display-only:
 `balance_msat / 1000` (floor). The remainder (`balance_msat % 1000`) stays in the federation
 balance — it is not discarded, not rounded into the next send, and not sent anywhere. Expose
@@ -1051,7 +1052,7 @@ methods + polling, then add async streams once bindings are verified.
 - `Client::await_primary_bitcoin_module_output(s)(...)`
 - `Client::subscribe_balance_changes(unit) -> BoxStream<Amount>`
 - `Client::spawn_federation_reconnect()`, `start_executor()` (**receiver `self: &Arc<Self>`; use `ClientHandle::start_executor(&self)`, since `ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only**), `db()`, `executor()`, `operation_log()`, `handle_events()`, `get_event_log_transient_receiver()`
-- `Client::chain_id()`, `federation_id()`, `config()`
+- `Client::chain_id()`, `federation_id()`, `config()`, `get_operation_fees(operation_id)`
 - `ClientContext`, `OperationId` = `fedimint_core::core::OperationId`, `OutPointRange` = `fedimint_core::OutPointRange`, `TransactionBuilder` = `fedimint_client::module::transaction::TransactionBuilder`
 
 **fedimint-walletv2-client (0.12.0)** — SUPERSEDES the v1 `fedimint-wallet-client`

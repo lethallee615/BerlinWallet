@@ -9,6 +9,7 @@ pub mod bdk;
 pub mod client;
 pub mod deposit;
 pub mod error;
+mod fault;
 pub mod journal;
 mod journal_db;
 pub mod network;
