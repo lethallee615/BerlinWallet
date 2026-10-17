@@ -642,6 +642,15 @@ The source's guardian-count table (`config.rs:52-72`) includes 1 → 166/192, 4 
   comment; the actual feerate comes from federation consensus, so this is not a mainnet-safety
   concern by itself.
 
+**Federation trust-boundary note (for the fedimint dev).** `WalletClientConfig` is decoded from
+the federation's config; the client does **not** re-run `FeeConsensus::new`, so the 1% cap on
+`parts_per_million` is not re-validated after decoding, and it does **not** recompute
+`send_tx_vbytes`/`receive_tx_vbytes`. A malicious or buggy federation can therefore publish an
+out-of-cap relative fee or inconsistent vbytes. The user-visible mitigation is the quote
+(`send_fee()` + `FeeQuote`) before `send()`. Ask the fedimint dev whether `WalletClientModule`
+should validate the decoded fee cap and vbytes; until then, treat both as federation
+trust-boundary items.
+
 ### 19.3 Pre-send validation
 
 `send_withdrawal` (`withdrawal.rs:57`) now takes `&Client`, resolves the module and config, and
@@ -673,6 +682,16 @@ index) and the typed error is returned. Test:
 `WalletClientModule::send` still performs its own `value < self.cfg.dust_limit` check and returns
 `SendError::DustValue` (`fedimint-walletv2-client-0.12.0/src/lib.rs:380-382`); the pre-send check is
 the early, typed path.
+
+The UI-facing minimum is `client::min_withdrawal_sat(client) -> anyhow::Result<u64>`
+(`client.rs:47`), re-exported as `berlin_wallet_core::min_withdrawal_sat` (`lib.rs:19`). It returns
+`wallet_client_config(client).await?.dust_limit.to_sat()`; PLAN §6 specifies the FFI method
+`min_withdrawal_sat() -> Result<u64>` so the UI can display and enforce the same value before
+creating a withdrawal row.
+
+A dust-rejected withdrawal is persisted as `Failed` and must be re-created with a new
+`WithdrawalId`; the row's `value` is immutable, so retrying `send_withdrawal` on the same row cannot
+recover (PLAN §4.2).
 
 ### 19.4 Docs links
 

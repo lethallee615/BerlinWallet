@@ -590,6 +590,11 @@ federation-chosen `parts_per_million` (0..=10,000 = up to 1%); `send_tx_vbytes` 
 `receive_tx_vbytes` are derived from the guardian count (4 guardians: 228/316). Validate
 `value >= dust_limit` against the decoded config before `send()`.
 
+Expose this minimum to the UI through `client::min_withdrawal_sat()` (core) /
+`min_withdrawal_sat() -> Result<u64>` (FFI, §6). A dust-rejected withdrawal ends `Failed` and must
+be re-created with a new `WithdrawalId`; the row's amount is immutable, so retrying
+`send_withdrawal` on the same row cannot recover.
+
 ### 4.3 State enums
 
 ```rust
@@ -862,6 +867,7 @@ adopted elsewhere.
 | `fedimint/fedimint#9205` | Walletv2 client panics on first start when the address search outlives the DB write history (first-address derivation is a hash-prefix search that can take a long time). | Bound `receive()` at **120 s** and retry on timeout up to `MAX_ADDRESS_ATTEMPTS`; the row stays `AwaitingAddress` while retrying, then moves to `Failed` (releasing the single-flight invariant) if the budget is exhausted. Let the client/scanner run before the first `receive()`; never hold a DB transaction across the address search. |
 | `fedimint/fedimint#9338` | The claim is committed in one DB transaction and its event-log announcement in another; a client stopping between them keeps the claim without the `ReceivePaymentEvent`. An event-only subscriber can miss the deposit. | `await_receive(position)` is the source of truth, not the event. On boot, **also reconcile via module operations**: scan the operation log for `WalletOperationMeta::Receive(ReceiveMeta { outpoint, .. })` and match the deposit's funding outpoint (fedimint-sdk `find_claim` pattern). `ReceivePaymentEvent` is UI-only. |
 | `fedimint/fedimint#9098` | Quote and submit are not atomic; a concurrent spend between the quote and the funding can change what is selected, so the quoted fee/total may not match what is debited. | Re-quote immediately before `send()` (`send_fee()` + `send_fee_quote()`); compare with the persisted quote and abort with a `QuoteChanged`-style error on any drift; never silently absorb the difference. Serialize withdrawals per federation (single-flight) so our own sends cannot race each other. |
+| Federation fee/vbyte config | `WalletClientConfig` is decoded from the federation's config. The client does not re-validate `fee_consensus.parts_per_million` against the 1% cap enforced by `FeeConsensus::new`, and it trusts `send_tx_vbytes`/`receive_tx_vbytes` instead of recomputing them. A malicious or buggy federation can overcharge or misestimate mining fees. | Treat both as federation trust-boundary items; show `send_fee()` + `FeeQuote` before sending and abort on drift. **Ask the fedimint dev** whether `WalletClientModule` should re-validate the 1% cap and the derived vbytes after decoding. |
 
 ### 4.7 Testing
 
@@ -970,6 +976,9 @@ can stop the task cleanly without aborting a journal write mid-transaction.
   - `deposit_status(id: String) -> Result<DepositView>` — current state, address (null until `AddressShown`), quoted fee, gross, net credit, funding txid.
   - `cancel_deposit(id: String) -> Result<DepositView>` — allowed only from `AwaitingAddress`/`AddressShown` while `funding_txid` is null; sets `Cancelled` and releases the single-flight invariant.
   - `withdraw(address: String, sat_amount: u64) -> Result<String>` (creates a `withdrawal_requests` row, returns its id)
+  - `min_withdrawal_sat() -> Result<u64>` — the federation's decoded `WalletClientConfig.dust_limit`
+    (default 10,000 sat). The UI must display this minimum and reject/disable smaller amounts
+    **before** calling `withdraw`, instead of surfacing a post-quote dust rejection.
   - `withdrawal_status(id: String) -> Result<WithdrawalView>` (state + operation_id + txid)
   - `cancel_withdrawal(id: String) -> Result<WithdrawalView>` — allowed only from `Quoting`; sets `Cancelled` and releases the invariant.
   - `sync() -> Result<()>`

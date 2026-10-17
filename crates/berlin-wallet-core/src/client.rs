@@ -41,6 +41,13 @@ pub async fn wallet_client_config(client: &Client) -> anyhow::Result<WalletClien
     Ok(wallet_config.clone())
 }
 
+/// Minimum on-chain withdrawal value in sats, as enforced by the federation's
+/// decoded `WalletClientConfig.dust_limit`. The UI should display this value and
+/// reject or disable smaller withdrawals before calling `withdraw`.
+pub async fn min_withdrawal_sat(client: &Client) -> anyhow::Result<u64> {
+    Ok(wallet_client_config(client).await?.dust_limit.to_sat())
+}
+
 /// App journal partition.
 pub fn journal_db(db: &Database) -> Database {
     db.with_prefix(vec![0x00])
