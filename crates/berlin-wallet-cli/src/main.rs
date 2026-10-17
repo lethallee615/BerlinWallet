@@ -7,6 +7,7 @@ use anyhow::{Context, anyhow};
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet};
 use berlin_wallet_core::client::{build_client, client_db, min_withdrawal_sat, open_rocksdb};
 use berlin_wallet_core::journal::Journal;
+use berlin_wallet_core::network::client_network;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
@@ -20,7 +21,7 @@ use fedimint_core::invite_code::InviteCode;
 use fedimint_walletv2_client::WalletClientModule;
 use tokio::sync::{Mutex, watch};
 
-const NETWORK: Network = Network::Regtest;
+const DEFAULT_NETWORK: Network = Network::Regtest;
 const DEFAULT_ESPLORA_URL: &str = "http://127.0.0.1:3002";
 
 #[tokio::main]
@@ -37,12 +38,15 @@ async fn main() -> anyhow::Result<()> {
         .get(3)
         .cloned()
         .unwrap_or_else(|| DEFAULT_ESPLORA_URL.to_owned());
-    let bdk = BdkWallet::open_or_create(&data_dir.join(BDK_DB_FILE), &seed, NETWORK, esplora_url)?;
-
     match args.get(1).map(String::as_str) {
         None | Some("init") => {
-            let mut bdk = bdk;
-            println!("network: {NETWORK}");
+            let mut bdk = BdkWallet::open_or_create(
+                &data_dir.join(BDK_DB_FILE),
+                &seed,
+                DEFAULT_NETWORK,
+                esplora_url,
+            )?;
+            println!("network: {DEFAULT_NETWORK}");
             println!("data dir: {}", data_dir.display());
             println!("mnemonic: {}", mnemonic_path.display());
             println!("bdk db: {}", data_dir.join(BDK_DB_FILE).display());
@@ -65,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
             let invite = args
                 .get(2)
                 .ok_or_else(|| anyhow!("usage: berlin-wallet run <invite-code> [esplora-url]"))?;
-            run(invite, bdk, root_secret, &data_dir).await
+            run(invite, &seed, root_secret, &data_dir, &esplora_url).await
         }
         Some(other) => {
             print_help();
@@ -117,17 +121,20 @@ async fn join(invite: &str, root_secret: RootSecret, data_dir: &Path) -> anyhow:
     let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
 
     let module = client.get_first_module::<WalletClientModule>()?;
+    let chain_network = client_network(&client).await?;
     println!("federation id: {}", client.federation_id());
-    println!("network: {}", module.get_network());
+    println!("chain-id network: {chain_network}");
+    println!("config network: {}", module.get_network());
     println!("min withdrawal: {} sat", min_withdrawal_sat(&client).await?);
     Ok(())
 }
 
 async fn run(
     invite: &str,
-    bdk: BdkWallet,
+    seed: &[u8; 64],
     root_secret: RootSecret,
     data_dir: &Path,
+    esplora_url: &str,
 ) -> anyhow::Result<()> {
     let db = open_database(data_dir).await?;
     let journal = Journal::new(db.clone(), vec![0x00]);
@@ -137,6 +144,13 @@ async fn run(
     let invite = InviteCode::from_str(invite).context("invalid invite code")?;
     let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
     let federation_id = client.federation_id();
+    let chain_network = client_network(&client).await?;
+    let bdk = BdkWallet::open_or_create(
+        &data_dir.join(BDK_DB_FILE),
+        seed,
+        chain_network,
+        esplora_url,
+    )?;
     let wallet = Arc::new(Mutex::new(bdk));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -155,7 +169,8 @@ async fn run(
 
     let module = client.get_first_module::<WalletClientModule>()?;
     println!("federation id: {federation_id}");
-    println!("network: {}", module.get_network());
+    println!("chain-id network: {chain_network}");
+    println!("config network: {}", module.get_network());
     println!("bdk address: {}", wallet.lock().await.reveal_destination()?);
     println!("min withdrawal: {} sat", min_withdrawal_sat(&client).await?);
     println!("type `help` for commands");

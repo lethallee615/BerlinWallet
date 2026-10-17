@@ -149,6 +149,13 @@ asserts it equals `PlainRootSecretStrategy::to_root_secret(&mnemonic.to_seed("")
 uses the **same BIP39 seed** with the standard BIP32/BIP84 hierarchy; fedimint salts its own root,
 so no raw key material is shared.
 
+**Network from chain id.** The federation-reported chain id is available client-side via
+`Client::chain_id()` (`fedimint-client/src/client.rs:599`; cached under `ChainIdKey`, otherwise fetched
+from `api.chain_id()`). `network_from_chain_id` lives in `fedimint-server-core` (not a client dep), so
+it is replicated in `berlin-wallet-core::network` with the four block-1 constants: mainnet, testnet,
+signet-4, and mutinynet. Mutinynet and signet both map to `Network::Signet`; the chain source URL
+must distinguish them. BDK descriptors use this derived network, not a hard-coded regtest network.
+
 Storage layout (douglaz `MultiClient`): one `Database`; fedimint client `i` lives at
 `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under `[0x00]`. The core
 accepts any `Database`; the CLI uses the persistent SQLite backend

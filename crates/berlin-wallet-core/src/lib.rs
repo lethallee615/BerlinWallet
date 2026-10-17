@@ -11,6 +11,7 @@ pub mod deposit;
 pub mod error;
 pub mod journal;
 mod journal_db;
+pub mod network;
 pub mod ops;
 pub mod seed;
 pub mod sqlite;
@@ -24,6 +25,7 @@ pub use journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositOrigin, DepositRow, DepositState, Journal,
     JournalBackend, WithdrawalRow, WithdrawalState,
 };
+pub use network::{client_network, network_from_chain_id};
 pub use ops::{DepositId, WithdrawalId};
 pub use seed::{load_or_create_mnemonic, mnemonic_seed, root_secret_from_mnemonic};
 pub use sqlite::SqliteDb;

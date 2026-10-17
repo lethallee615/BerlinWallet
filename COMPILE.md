@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (15 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (18 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (15 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (18 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (15 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (18 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (16 core tests + CLI 0 tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (18 core tests + CLI 0 tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -1023,3 +1023,75 @@ RocksDB APIs: <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-rocksd
 - <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/enum.DatabaseError.html>
 - <https://docs.rs/rusqlite/0.31.0/rusqlite/struct.Connection.html>
 - <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-bip39/src/lib.rs>
+
+
+---
+
+## 21. Chain ID → network (Mutinynet)
+
+### 21.1 Server function is not client-reachable
+
+`network_from_chain_id` is in `fedimint-server-core/src/bitcoin_rpc.rs:35`. `fedimint-server-core`
+is not a dependency of `fedimint-client`, `fedimint-client-module`, `fedimint-connectors`, or any
+client-side crate in our graph. It is replicated client-side instead of adding a server crate.
+
+The four constants (`bitcoin_rpc.rs:21-31`) are:
+
+| Network | Block-1 hash |
+|---|---|
+| mainnet | `00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048` |
+| testnet | `00000000b873e79784647a6c82962c70d228557d24a747ea4d1b8bbe878e1206` |
+| signet-4 | `00000086d6b2636cb2a392d45edc4ec544a10024d30141c9adf4bfd9de533b53` |
+| mutinynet | `000002855893a0a9b24eaffc5efc770558a326fee4fc10c9da22fc19cd2954f9` |
+
+Unknown hashes map to `Network::Regtest`. Mutinynet and signet-4 both map to `Network::Signet`, so
+`Network` alone cannot distinguish them; the Esplora/chain-source URL must.
+
+### 21.2 Real client path for the chain id
+
+`fedimint_core::ChainId(pub bitcoin::BlockHash)` (`fedimint-core/src/lib.rs:194`). The client obtains
+it with:
+
+```rust
+// fedimint-client-0.12.0/src/client.rs:599
+pub async fn chain_id(&self) -> anyhow::Result<ChainId>
+```
+
+`Client::chain_id` first reads `ChainIdKey` from the client DB; on a miss it fetches
+`self.api.chain_id().await?` (`client.rs:612`) and caches it (`client.rs:616`). The federation's
+`GlobalClientConfig` does **not** carry a chain id. Fetching `/block-height/1` directly from the
+chain source is the server-side fallback (`fedimint-server-core/src/bitcoin_rpc.rs`), not the
+client path.
+
+### 21.3 Client-side implementation and BDK wiring
+
+`berlin-wallet-core::network` (`network.rs`):
+
+```rust
+pub fn network_from_chain_id(chain_id: ChainId) -> Network; // network.rs:26
+pub async fn client_network(client: &Client) -> anyhow::Result<Network>; // network.rs:37
+```
+
+Tests (`network.rs`): all four constants, plus unknown-hash → Regtest.
+
+The CLI derives the network **after** joining/opening the client:
+
+```rust
+let chain_network = client_network(&client).await?;
+let bdk = BdkWallet::open_or_create(
+    &data_dir.join(BDK_DB_FILE),
+    seed,
+    chain_network,
+    esplora_url,
+)?;
+```
+
+`init` has no federation yet and defaults to `Network::Regtest`. Because signet-4 and mutinynet both
+produce `Network::Signet`, the BDK address prefix is the same (`tb1...`); use the correct Esplora
+URL (or a separate data dir) to distinguish them.
+
+Docs:
+- <https://docs.rs/fedimint-core/0.12.0/fedimint_core/struct.ChainId.html>
+- <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.chain_id>
+- <https://docs.rs/bitcoin/0.32.8/bitcoin/enum.Network.html>
+- <https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-server-core/src/bitcoin_rpc.rs>
