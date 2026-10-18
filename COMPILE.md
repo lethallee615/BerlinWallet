@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (30 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (36 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (30 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (36 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (30 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (36 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 3 CLI tests + 4 FFI tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (36 core tests + 3 CLI tests + 4 FFI tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -2230,5 +2230,78 @@ fedimint-client `uniffi` feature is enabled.
 ### 33.4 Tests
 
 - `cargo check --workspace`: exit 0.
-- `cargo test --workspace`: 30 core + 3 CLI + 4 FFI unit tests, exit 0.
+- `cargo test --workspace`: 36 core + 3 CLI + 4 FFI unit tests, exit 0.
 - FFI smoke script: exit 0.
+
+---
+
+## 34. BDK sync: height-decreasing reorg and transient errors
+
+### 34.1 Exact no-op mechanism in the pinned BDK
+
+Source verified against `Cargo.lock` pins:
+
+- `bdk_wallet 3.2.0`, `bdk_chain 0.23.3`, `bdk_esplora 0.22.1`, `esplora-client 0.12.3`.
+- `Wallet::latest_checkpoint()` returns `self.chain.tip()` (`bdk_wallet-3.2.0/src/wallet/mod.rs:874`).
+- `Wallet::apply_update()` calls `LocalChain::apply_update` (`wallet/mod.rs:2459`;
+  `bdk_chain-0.23.3/src/local_chain.rs:174`).
+- `bdk_esplora::chain_update()` (`async_ext.rs:227`) walks the **local** checkpoint from the tip down
+  and calls `fetch_block()` (`async_ext.rs:197`). `fetch_block` returns `None` for a requested height
+  above the latest remote tip (`async_ext.rs:206-216`), so when the remote tip is lower, the update
+  checkpoint's highest block is the remote tip.
+- `LocalChain::merge_chains()` (`local_chain.rs:560`) collects original heights above the update
+  into `potentially_invalidated_heights` (`:608`) but only removes them in the **hash-mismatch**
+  branch (`:650-657`). When the remote tip is lower and all overlapping hashes agree, it finds a
+  point of agreement at the lower tip and returns an **empty changeset**. The local tip above the
+  remote tip stays, and its anchors remain confirmed.
+
+This is reproduced in `bdk::tests::lower_tip_update_is_a_noop_in_bdk`: local chain 0..5, update
+checkpoint 0..2 with matching hashes → `changeset.blocks.is_empty()` and local tip remains height 5.
+
+### 34.2 Fix
+
+`BdkWallet::sync` (`bdk.rs:291`) now:
+
+1. Reads `wallet.latest_checkpoint()`.
+2. Fetches `/blocks/tip/height` and `/blocks/tip/hash` via
+   `esplora_client::AsyncClient::get_height()`/`get_tip_hash()`.
+3. If `remote_height >= local_height`, fetches `/block-height/{local_height}` via
+   `get_block_hash(local_height)` and compares it to the stored tip hash.
+4. `reorg_decision(local_height, local_hash, remote_height, remote_at_local)` (`bdk.rs:85`) returns
+   `Orphaned` if the remote tip is lower or the hash at the local height differs.
+5. If orphaned, **does not run the incremental update**. It calls
+   `reset_and_full_scan()` (`bdk.rs:368`): builds a fresh BDK DB from the same seed/descriptors at a
+   temporary path, full-scans, then replaces the old DB. This forces the tip to the remote chain and
+   handles fork points deeper than any partial checkpoint. The old DB is replaced only after the
+   fresh full scan succeeds.
+6. If ancestry is valid, runs the normal partial `bdk_esplora::sync` and persists.
+
+No on-disk format or journal changes. `BdkWallet` stores its path/seed/network solely to rebuild the
+same descriptors.
+
+### 34.3 Transient error handling
+
+`sync` (`bdk.rs:291`) retries **3 attempts** with 250 ms exponential backoff for:
+
+- `esplora_client::Error::Reqwest` where `is_connect() || is_timeout() || is_request()` (connection
+  refused, DNS/request failures, timeouts);
+- our own `tokio::time::timeout` expiry.
+
+Malformed/parsing/encoding errors and `HttpResponse` 4xx are returned immediately as normal
+surfaced errors (`is_transient_esplora`, `bdk.rs:40`; tests `http_4xx_is_a_permanent_sync_error`,
+`malformed_body_is_a_permanent_sync_error`). After 3 failed attempts the last error is returned.
+
+The CLI `sync` arm (`main.rs:292`) no longer uses `?` outside the REPL command error handling; it
+returns the error to the loop, which prints it and returns to the prompt. Background
+`bdk_chain_task` already catches/logs and retries on its next tick.
+
+### 34.4 Tests
+
+- `bdk::tests::ancestry_decision_accepts_same_hash`
+- `bdk::tests::ancestry_decision_rejects_lower_remote_tip`
+- `bdk::tests::ancestry_decision_rejects_conflicting_hash`
+- `bdk::tests::lower_tip_update_is_a_noop_in_bdk`
+- `bdk::tests::http_4xx_is_a_permanent_sync_error`
+- `bdk::tests::malformed_body_is_a_permanent_sync_error`
+
+`cargo check --workspace`: exit 0. `cargo test --workspace`: 36 core + 3 CLI + 4 FFI tests pass.

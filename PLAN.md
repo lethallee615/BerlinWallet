@@ -1040,9 +1040,17 @@ Two sync tasks plus the adoption task (and the fedimint client's internal execut
 - `BdkWallet` owns a `PersistedWallet<bdk_chain::rusqlite::Connection>` plus its SQLite persister.
   It is opened/created with BIP84 descriptors derived from the BIP39 seed at
   `<data-dir>/bdk.sqlite`.
-- Loop: `wallet.start_sync_with_revealed_spks()` → `EsploraAsyncExt::sync(request, 4)` against the
-  configured URL → `wallet.apply_update(update)` → `wallet.persist(&mut connection)`. There is
-  **no `EsploraClient` type and no `scan` method**.
+- Loop: verify ancestry, then `wallet.start_sync_with_revealed_spks()` →
+  `EsploraAsyncExt::sync(request, 4)` against the configured URL → `wallet.apply_update(update)` →
+  `wallet.persist(&mut connection)`. There is **no `EsploraClient` type and no `scan` method**.
+- **Height-decreasing reorg guard:** read `Wallet::latest_checkpoint()`, fetch remote tip height/hash
+  and `/block-height/{local_height}`; if the remote tip is lower or the hash differs, rebuild a
+  fresh BDK DB from the same seed and **full-scan** instead of trusting the incremental update.
+  `bdk_chain::merge_chains` returns an empty changeset for a lower-tip update with agreeing
+  hashes, leaving orphaned anchors confirmed.
+- **Transient network errors:** connection refused / timeout / DNS are retried 3 times with bounded
+  backoff; malformed bodies and 4xx surface normally. The REPL `sync` arm returns errors to the
+  loop instead of `?`-ing out of `run`.
 - First pass is immediate; later passes use `BDK_SYNC_INTERVAL` (30 s) with ±10% jitter. The task
   stops on the shared `watch::Receiver<bool>` shutdown signal.
 - Peg-in funding is built/signed and broadcast through the same Esplora URL by

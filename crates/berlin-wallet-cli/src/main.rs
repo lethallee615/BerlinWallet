@@ -289,11 +289,13 @@ async fn run(
                 println!("{} sat", min_withdrawal_sat(&client).await?);
                 Ok(())
             }
-            "sync" => {
-                wallet.lock().await.sync().await?;
-                println!("bdk synced");
-                Ok(())
-            }
+            "sync" => match wallet.lock().await.sync().await {
+                Ok(()) => {
+                    println!("bdk synced");
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            },
             "request-deposit" => {
                 let amount = parse_sat(parts.next())?;
                 command_request_deposit(&client, &journal, federation_id, amount).await
