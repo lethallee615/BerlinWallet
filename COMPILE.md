@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 2 CLI tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 3 CLI tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -923,8 +923,9 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
 
 - `init` — create/open the BIP39 mnemonic and SQLite BDK wallet, print a regtest address/balance.
 - `join <invite>` — build a client, print federation id, client identity, wallet network, and minimum withdrawal.
-- `backup <destination-dir>` / `restore-backup <source-dir>` — full data-directory copy
-  (`mnemonic`, `fedimint.rocksdb`, `bdk.sqlite`); app must be stopped, encryption is external.
+- `backup <destination-dir>` / `restore-backup <source-dir>` — full data-directory tree copy
+  (`mnemonic`, `bdk.sqlite` + `-wal`/`-shm`, `fedimint.rocksdb` and sidecars); non-blocking DB lock
+  check; app must be stopped; encryption is external.
 - `restore <invite> [esplora-url] [expected-fed-id] [expected-client-identity]` — recover on a fresh
   data dir, assert identity/federation, then full-scan BDK.
 - `run <invite> [esplora-url]` — interactive session with `balance`, `ecash-balance`, `address`,
@@ -1996,19 +1997,27 @@ berlin-wallet backup <destination-dir>
 berlin-wallet restore-backup <source-dir>
 ```
 
-- `backup` requires `mnemonic`, `fedimint.rocksdb`, and `bdk.sqlite`; copies them recursively and
-  refuses a non-empty destination. It must be run with the app stopped.
-- `restore-backup` requires an empty data dir and copies all three back.
-- Encryption is external: e.g. `age -p -o backup.tar.gz.age backup.tar.gz` or `gpg`.
+- `backup` copies the **entire data directory tree**, not a file list, so SQLite `bdk.sqlite-wal` /
+  `-shm` and all `fedimint.rocksdb` files/sidecars are included. It physically cannot lose recent
+  BDK WAL commits. It refuses a non-empty destination and must run with the app stopped.
+- **Lock check:** before copying, `backup` takes a non-blocking try-lock on the same advisory lock
+  fedimint-rocksdb uses (`source/fedimint.rocksdb`.with_extension(`.db.lock`) →
+  `source/fedimint.db.lock`). If held, it exits nonzero:
+  `database is locked (...); stop the wallet before running backup`. This was verified against a
+  live `run` process.
+- `restore-backup` requires an empty data dir and copies the whole tree back.
+- **Encryption:** the backup is **unencrypted by design**; the operator must use `age`/`gpg` or
+  equivalent. The mnemonic is inside the archive — treat the archive as key material.
 - After import, start normally with `run`; **do not call `restore`**. The retained client DB is what
   preserves the walletv2 scanner/index state and the operation log.
 - **A journal-only export is not a recovery backup** and does not fix stranded deposits. The
   scanner/address-index state lives in the client DB.
 
-Verified manually: backup/import of the live data dir reopened with the same federation id,
-client identity, primary module, and minimum withdrawal. CLI unit test
-`data_dir_backup_round_trips_the_full_artifact` covers file copying; the live import was also opened
-with `join`.
+Verified manually: whole-directory backup/import of the live data dir reopened with the same
+federation id, client identity, primary module, and minimum withdrawal. CLI unit tests:
+`data_dir_backup_round_trips_bdk_state_and_sidecars` (opens real BDK SQLite before/after, asserts
+balance and next address match, and asserts WAL/SHM sidecars were copied) and
+`backup_refuses_a_locked_database` (held lock → loud failure).
 
 ### 31.3 Re-claim limitation (precise)
 

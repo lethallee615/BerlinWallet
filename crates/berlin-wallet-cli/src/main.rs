@@ -156,17 +156,40 @@ fn backup_data_dir(source: &Path, destination: &Path) -> anyhow::Result<()> {
         "backup destination must not exist or must be empty: {}",
         destination.display()
     );
+    anyhow::ensure!(
+        !destination.starts_with(source),
+        "backup destination must not be inside the data directory"
+    );
     std::fs::create_dir_all(destination)?;
 
-    copy_file(&source.join("mnemonic"), &destination.join("mnemonic"))?;
-    copy_file(&source.join(BDK_DB_FILE), &destination.join(BDK_DB_FILE))?;
-    copy_dir(
-        &source.join("fedimint.rocksdb"),
-        &destination.join("fedimint.rocksdb"),
-    )?;
+    // Hold the same advisory lock fedimint-rocksdb uses. `LockedBuilder::new`
+    // blocks on contention; fail loudly instead of copying a live database.
+    let db_path = source.join("fedimint.rocksdb");
+    let lock_path = db_path.with_extension("db.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    let _lock = match fs_lock::FileLock::new_try_exclusive(lock_file) {
+        Ok(lock) => lock,
+        Err((_file, None)) => anyhow::bail!(
+            "database is locked ({}); stop the wallet before running backup",
+            lock_path.display()
+        ),
+        Err((_file, Some(err))) => {
+            return Err(err).context("could not acquire the database lock");
+        }
+    };
+
+    // Copy the whole data directory so SQLite `-wal`/`-shm` sidecars and all
+    // RocksDB files are included. A file-list copy can silently lose recent
+    // BDK commits held in WAL.
+    copy_dir(source, destination)?;
 
     println!("backup written: {}", destination.display());
-    println!("contents: mnemonic, {BDK_DB_FILE}, fedimint.rocksdb");
+    println!("contents: entire data directory (mnemonic, bdk.sqlite + sidecars, fedimint.rocksdb)");
     println!("stop the wallet before copying/archiving; encrypt the result with age/gpg.");
     println!(
         "restore by importing this directory with `restore-backup`, then run normally (never `restore`)."
@@ -200,14 +223,12 @@ fn import_data_dir(destination: &Path, source: &Path) -> anyhow::Result<()> {
         "restore target must not exist or must be empty: {}",
         destination.display()
     );
+    anyhow::ensure!(
+        !destination.starts_with(source),
+        "restore target must not be inside the backup source"
+    );
     std::fs::create_dir_all(destination)?;
-
-    copy_file(&source.join("mnemonic"), &destination.join("mnemonic"))?;
-    copy_file(&source.join(BDK_DB_FILE), &destination.join(BDK_DB_FILE))?;
-    copy_dir(
-        &source.join("fedimint.rocksdb"),
-        &destination.join("fedimint.rocksdb"),
-    )?;
+    copy_dir(source, destination)?;
 
     println!("backup imported: {}", destination.display());
     println!(
@@ -763,7 +784,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn data_dir_backup_round_trips_the_full_artifact() {
+    fn data_dir_backup_round_trips_bdk_state_and_sidecars() {
         let base = std::env::temp_dir().join(format!(
             "berlin-wallet-backup-test-{}",
             std::time::SystemTime::now()
@@ -776,21 +797,84 @@ mod tests {
         let imported = base.join("imported");
         std::fs::create_dir_all(source.join("fedimint.rocksdb")).unwrap();
         std::fs::write(source.join("mnemonic"), b"test mnemonic").unwrap();
-        std::fs::write(source.join(BDK_DB_FILE), b"bdk").unwrap();
         std::fs::write(source.join("fedimint.rocksdb/CURRENT"), b"rocks").unwrap();
+
+        let seed = [0x42u8; 64];
+        let esplora = "http://127.0.0.1:1";
+        let source_db = source.join(BDK_DB_FILE);
+        let mut source_wallet =
+            BdkWallet::open_or_create(&source_db, &seed, Network::Regtest, esplora).unwrap();
+        source_wallet.reveal_destination().unwrap();
+        source_wallet.reveal_destination().unwrap();
+        let source_balance = source_wallet.balance();
+        drop(source_wallet);
+
+        // Simulate SQLite WAL sidecars. A whole-directory backup must carry
+        // them; a file-list copy would silently drop them.
+        std::fs::write(source.join("bdk.sqlite-wal"), b"wal").unwrap();
+        std::fs::write(source.join("bdk.sqlite-shm"), b"shm").unwrap();
 
         backup_data_dir(&source, &backup).expect("backup");
         import_data_dir(&imported, &backup).expect("import");
 
+        assert!(imported.join("bdk.sqlite-wal").is_file());
+        assert!(imported.join("bdk.sqlite-shm").is_file());
+        // Remove synthetic sidecars before SQLite opens the imported DB.
+        std::fs::remove_file(imported.join("bdk.sqlite-wal")).unwrap();
+        std::fs::remove_file(imported.join("bdk.sqlite-shm")).unwrap();
+        std::fs::remove_file(source.join("bdk.sqlite-wal")).unwrap();
+        std::fs::remove_file(source.join("bdk.sqlite-shm")).unwrap();
+
+        let mut imported_wallet = BdkWallet::open_or_create(
+            &imported.join(BDK_DB_FILE),
+            &seed,
+            Network::Regtest,
+            esplora,
+        )
+        .unwrap();
+        let imported_next = imported_wallet.reveal_destination().unwrap();
+        let imported_balance = imported_wallet.balance();
+        drop(imported_wallet);
+
+        let mut source_wallet =
+            BdkWallet::open_or_create(&source_db, &seed, Network::Regtest, esplora).unwrap();
+        let source_next = source_wallet.reveal_destination().unwrap();
+        assert_eq!(imported_next, source_next, "address state must match");
         assert_eq!(
-            std::fs::read(imported.join("mnemonic")).unwrap(),
-            b"test mnemonic"
+            format!("{:?}", imported_balance),
+            format!("{:?}", source_balance),
+            "BDK balance must match"
         );
-        assert_eq!(std::fs::read(imported.join(BDK_DB_FILE)).unwrap(), b"bdk");
-        assert_eq!(
-            std::fs::read(imported.join("fedimint.rocksdb/CURRENT")).unwrap(),
-            b"rocks"
-        );
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn backup_refuses_a_locked_database() {
+        let base = std::env::temp_dir().join(format!(
+            "berlin-wallet-lock-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = base.join("source");
+        let backup = base.join("backup");
+        std::fs::create_dir_all(source.join("fedimint.rocksdb")).unwrap();
+        std::fs::write(source.join("mnemonic"), b"test mnemonic").unwrap();
+        std::fs::write(source.join(BDK_DB_FILE), b"bdk").unwrap();
+        std::fs::write(source.join("fedimint.rocksdb/CURRENT"), b"rocks").unwrap();
+
+        let lock_path = source.join("fedimint.rocksdb").with_extension("db.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&lock_path)
+            .unwrap();
+        let _lock = fs_lock::FileLock::new_try_exclusive(lock_file).unwrap();
+
+        let err = backup_data_dir(&source, &backup).expect_err("locked backup must fail");
+        assert!(err.to_string().contains("database is locked"), "{err:#}");
         std::fs::remove_dir_all(base).ok();
     }
 

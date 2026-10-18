@@ -964,8 +964,10 @@ adopted elsewhere.
   restore/network before shipping. Do not expect the local application journal to be restored —
   it is not federation state.
 - **Directory backup:** run `backup` with the app stopped, import with `restore-backup` into an
-  empty dir, and assert the imported tree opens with the same identity and client state (normal
-  `run`, never `restore`). Do not treat a journal-only export as a backup.
+  empty dir, and assert the imported tree opens with the same identity/client state, the same BDK
+  balance and next address, and includes `bdk.sqlite-wal`/`-shm` plus the full RocksDB directory
+  (normal `run`, never `restore`). Assert `backup` fails loudly while the DB lock is held. Do not
+  treat a journal-only export as a backup.
 - **Crash hooks:** `BERLIN_WALLET_CRASH_POINT` is debug-only (`#[cfg(debug_assertions)]`); release
   builds compile it to a no-op. Use it only for the crash/restart matrix.
 - **Withdrawal:** move the feerate between `send_fee_quote()` and `send()` to exercise quote drift
@@ -1069,15 +1071,20 @@ A mnemonic-only restore recovers settled balances but:
 
 **App-level backup (decision: documented full-directory copy).**
 Fedimint's backup APIs are deprecated. The supported app-level artifact is the **entire data
-directory**: `mnemonic`, `fedimint.rocksdb` (client DB + operation log + walletv2 scanner/index
-state), and `bdk.sqlite`. The CLI provides:
+directory**, copied as a tree: `mnemonic`, `bdk.sqlite` **plus its `-wal`/`-shm` sidecars**,
+`fedimint.rocksdb` **and all of its files/sidecars**, and the lock file. Copying a hand-picked file
+list can silently lose recent SQLite WAL commits. The CLI provides:
 
 ```text
 berlin-wallet backup <destination-dir>        # app must be stopped
 berlin-wallet restore-backup <source-dir>     # import into an empty data dir
 ```
 
-Encryption is left to the operator (for example `age -p` or `gpg`) around the directory/archive.
+`backup` acquires the same advisory lock fedimint-rocksdb uses (`fedimint.db.lock`, derived from
+the `fedimint.rocksdb` path) with a **non-blocking** try-lock. If the app is running it fails loudly
+instead of copying a live DB. The archive is **unencrypted by design**; the operator must encrypt
+it with `age`/`gpg` or equivalent. The mnemonic is inside the archive, so treat it as key material.
+
 After import, run the wallet normally (`run`), **not** `restore`: the retained client DB is what
 preserves the scanner/index state. Exporting only the journal is **not** a recovery backup and does
 **not** fix stranded deposits; only the client DB carries the address-index/scanner state.
