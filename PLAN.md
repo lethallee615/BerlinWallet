@@ -714,6 +714,10 @@ transition that leaves the open set deletes the index in that same `dbtx`. This 
 single-open invariant independent of whether prefix scans are conflict-tracked. When the index is
 already present, `insert_deposit` returns the existing open row (same id, no error).
 
+The nullable-credit work queue is `0x07 ++ deposit_id -> b"1"`. It is written/removed in the same
+`dbtx` as the deposit row and is the only thing `reconcile_missing_net_credits` scans (plus one
+row read per pending id), so a tick does not walk the whole deposit table.
+
 ```sql
 CREATE TABLE deposit_requests (
     id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
@@ -731,7 +735,7 @@ CREATE TABLE deposit_requests (
     quoted_fee      INTEGER,                   -- receive_fee() quote, sats
     claim_fee       INTEGER,                   -- actual ReceiveMeta.fee, sats
     gross_deposited INTEGER,                   -- sats (bitcoin::Amount)
-    net_credit      INTEGER,                   -- msat (fedimint_core::Amount)
+    net_credit      INTEGER,                   -- msat; NULL = pending (operation fee not yet known)
     last_error      TEXT,
     created_at      INTEGER NOT NULL,          -- unix ms
     updated_at      INTEGER NOT NULL,          -- unix ms
@@ -746,6 +750,12 @@ CREATE UNIQUE INDEX deposit_requests_claim
     ON deposit_requests (federation_id, funding_outpoint)
     WHERE funding_outpoint IS NOT NULL;
 CREATE INDEX deposit_requests_state ON deposit_requests (state);
+-- Pending net-credit reconciliation (raw equivalent: key 0x07 ++ deposit_id).
+-- This is the only lookup reconcile_missing_net_credits performs; it never
+-- scans all deposits.
+CREATE INDEX deposit_requests_pending_net_credit
+    ON deposit_requests (id)
+    WHERE state = 'Done' AND net_credit IS NULL AND operation_id IS NOT NULL;
 
 CREATE TABLE withdrawal_requests (
     id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
@@ -776,9 +786,15 @@ the previous open row. `deposit_requests_claim` enforces **exactly one row per c
 (`federation_id`, `funding_outpoint`), so orphan adoption is an insert-if-absent on that key.
 Likewise `withdrawal_requests_one_open` serializes our own sends per federation (at most one
 `Quoting`/`Submitted` row). `Broadcast { txid }` is stored as `state='Broadcast'` plus the `txid`
-column. Every state transition writes the row and its open-index entry (plus the claim index where
-applicable) in one `dbtx` (`begin_transaction … commit_tx`), so a crash cannot leave a row indexed
-under a state it no longer holds.
+column. Every state transition writes the row and its open-index entry (plus the claim index and
+the pending-net-credit index where applicable) in one `dbtx` (`begin_transaction … commit_tx`), so a
+crash cannot leave a row indexed under a state it no longer holds.
+
+`net_credit` is `NULL` when the mintv2 operation fee is not known yet. The UI **must render that as
+"pending", never as `0`**. If the operation-log entry is pruned and the fee never becomes
+retrievable, the row stays pending forever (and remains in the 0x07 index). There is deliberately
+no fallback to `gross − claim_fee`: that would over-report spendable credit. A manual export can
+show `gross − claim_fee` only with an explicit "fees unknown" label.
 
 Optimistic commit conflicts (`DatabaseError::WriteConflict` / `DatabaseError::SnapshotTooOld`) are
 retried up to `RETRY_ON_CONFLICT_ATTEMPTS = 5` with jittered backoff. Each retry re-runs the whole
@@ -909,7 +925,9 @@ adopted elsewhere.
   its event-log entry (#9338) and assert boot reconciliation credits exactly once; assert
   `net_credit = gross_deposited − claim_fee − operation_fee` and that `receive_fee()` was applied.
   Force `get_operation_fees()` to return `None` and assert `net_credit` stays unset, then assert a
-  later reconciliation pass fills it.
+  later reconciliation pass fills it; assert the 0x07 pending index contains only that row and is
+  cleared after the fill. Force permanent unavailability (pruned entry) and assert the row stays
+  pending rather than becoming zero.
 - **Crash hooks:** `BERLIN_WALLET_CRASH_POINT` is debug-only (`#[cfg(debug_assertions)]`); release
   builds compile it to a no-op. Use it only for the crash/restart matrix.
 - **Withdrawal:** move the feerate between `send_fee_quote()` and `send()` to exercise quote drift
@@ -1018,7 +1036,7 @@ can stop the task cleanly without aborting a journal write mid-transaction.
   - `balance_sat() -> u64` — primary module resolved (`mintv2`); not yet exposed.
   - `request_deposit_address() -> Result<DepositView>` — **non-blocking**: inserts/returns the single open `deposit_requests` row in `AwaitingAddress` and returns immediately. A background task runs `receive()` (120 s bound + retry) and performs the `AddressShown` write.
   - `fund_deposit(id: String) -> Result<String>` — **idempotent**: if `funding_txid` is already set, returns it without building a second BDK transaction; otherwise builds/signs/broadcasts the peg-in transaction and returns its txid. A BDK balance below `amount` surfaces the `build_tx` error and leaves the row `AddressShown`.
-  - `deposit_status(id: String) -> Result<DepositView>` — current state, address (null until `AddressShown`), quoted fee, gross, net credit, funding txid.
+  - `deposit_status(id: String) -> Result<DepositView>` — current state, address (null until `AddressShown`), quoted fee, gross, funding txid, and `net_credit_msat: Option<u64>` (`None` = pending).
   - `cancel_deposit(id: String) -> Result<DepositView>` — allowed only from `AwaitingAddress`/`AddressShown` while `funding_txid` is null; sets `Cancelled` and releases the single-flight invariant.
   - `withdraw(address: String, sat_amount: u64) -> Result<String>` (creates a `withdrawal_requests` row, returns its id)
   - `min_withdrawal_sat() -> Result<u64>` — the federation's decoded `WalletClientConfig.dust_limit`
@@ -1030,16 +1048,33 @@ can stop the task cleanly without aborting a journal write mid-transaction.
 - Streams: expose a polling `list_deposits()` / `list_withdrawals()` plus a callback subscription; map `anyhow::Error` to a `thiserror`-based `berlin_wallet_ffi::Error` (uniffi cannot expose `anyhow::Error`).
 - **`ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only.** The FFI crate must enable `fedimint-client`'s `uniffi` feature (or reach the executor through `ClientHandle::start_executor(&self)` / `Deref<Target = Client>` instead). `ClientHandleArc` is `Arc<ClientHandle>`; `ClientHandle` derefs to `Client`.
 
+`DepositView` carries the nullable credit explicitly:
+
+```rust
+#[derive(uniffi::Record)]
+pub struct DepositView {
+    pub id: String,
+    pub state: DepositStateView,       // AwaitingAddress | AddressShown | Done | ...
+    pub address: Option<String>,       // None until AddressShown
+    pub quoted_fee_sat: Option<u64>,
+    pub claim_fee_sat: Option<u64>,
+    pub gross_deposited_sat: Option<u64>,
+    pub net_credit_msat: Option<u64>,  // None = pending; UI renders "pending", never 0
+    pub funding_txid: Option<String>,
+}
+```
+
 Note: `request_deposit_address()` does **not** wait up to 120 s. It returns the `AwaitingAddress`
 row at once; the UI polls `deposit_status(id)` (or subscribes) until the address is available. The
 address is shown only after the `AddressShown` write commits. BDK funding is a separate
 `fund_deposit(id)` call so it cannot block the address request.
 
-**Units at the FFI boundary.** `balance_sat()` returns **sats**; `DepositView.net_credit_msat`
-returns **msat** (`fedimint_core::Amount`). 1 sat = 1000 msat. Convert exactly with
-`gross − claim_fee − operation_fee` in msat (`Client::get_operation_fees`) and read with `.msats()`;
-if the operation fee is still unknown, `net_credit` is `None`, never a zero/over-estimated value.
-Never round `net_credit` down to sats for accounting. `balance_sat()` is display-only:
+**Units at the FFI boundary.** `balance_sat()` returns **sats**; `DepositView.net_credit_msat:
+Option<u64>` returns **msat** (`fedimint_core::Amount`). 1 sat = 1000 msat. Convert exactly with
+`gross − claim_fee − operation_fee` in msat (`Client::get_operation_fees`) and read with `.msats`;
+if the operation fee is still unknown, the field is `None`, never zero or a partial value. While it
+is `None`, the UI shows **"pending"**, not `0` and not the quoted estimate. Never round `net_credit`
+down to sats for accounting. `balance_sat()` is display-only:
 `balance_msat / 1000` (floor). The remainder (`balance_msat % 1000`) stays in the federation
 balance — it is not discarded, not rounded into the next send, and not sent anywhere. Expose
 `balance_msat()` if exact accounting is needed.

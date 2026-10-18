@@ -174,6 +174,9 @@ struct JournalInner {
     claims: BTreeMap<(FederationId, bitcoin::OutPoint), DepositId>,
     /// Last operation-log key scanned per federation (scan watermark).
     watermarks: BTreeMap<FederationId, ChronologicalOperationLogKey>,
+    /// Index of `Done` deposits whose `net_credit` is still `None` and can be
+    /// reconciled from `operation_id`.
+    pending_net_credit: BTreeSet<DepositId>,
 }
 
 #[async_trait]
@@ -264,6 +267,9 @@ pub trait JournalBackend: Send + Sync {
         id: &DepositId,
         operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()>;
+    /// Indexed lookup of `Done` rows whose `net_credit` is still unset.
+    /// Implementations must not scan every deposit row.
+    async fn deposits_pending_net_credit(&self) -> anyhow::Result<Vec<DepositRow>>;
     async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult>;
     async fn insert_withdrawal(&self, row: &WithdrawalRow) -> anyhow::Result<()>;
     async fn withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<Option<WithdrawalRow>>;
@@ -518,7 +524,12 @@ impl JournalBackend for MemoryJournal {
         operation_fee: Option<fedimint_core::Amount>,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
-        if let Some(row) = inner.deposits.get_mut(id) {
+        let JournalInner {
+            deposits,
+            pending_net_credit,
+            ..
+        } = &mut *inner;
+        if let Some(row) = deposits.get_mut(id) {
             row.operation_id = Some(operation_id);
             row.funding_outpoint = Some(outpoint);
             row.gross_deposited = Some(gross);
@@ -528,15 +539,22 @@ impl JournalBackend for MemoryJournal {
             }
             row.state = DepositState::Done;
             row.updated_at = now_ms();
+            refresh_pending_net_credit(pending_net_credit, row);
         }
         Ok(())
     }
 
     async fn close_deposit_done(&self, id: &DepositId) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
-        if let Some(row) = inner.deposits.get_mut(id) {
+        let JournalInner {
+            deposits,
+            pending_net_credit,
+            ..
+        } = &mut *inner;
+        if let Some(row) = deposits.get_mut(id) {
             row.state = DepositState::Done;
             row.updated_at = now_ms();
+            refresh_pending_net_credit(pending_net_credit, row);
         }
         Ok(())
     }
@@ -577,6 +595,7 @@ impl JournalBackend for MemoryJournal {
             created_at: now,
             updated_at: now,
         };
+        refresh_pending_net_credit(&mut inner.pending_net_credit, &row);
         inner.claims.insert(key, id.clone());
         inner.deposits.insert(id, row);
         Ok(BindResult::Bound)
@@ -590,7 +609,12 @@ impl JournalBackend for MemoryJournal {
         operation_fee: Option<fedimint_core::Amount>,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
-        let Some(row) = inner.deposits.get_mut(id) else {
+        let JournalInner {
+            deposits,
+            pending_net_credit,
+            ..
+        } = &mut *inner;
+        let Some(row) = deposits.get_mut(id) else {
             return Ok(());
         };
         if !matches!(
@@ -606,6 +630,7 @@ impl JournalBackend for MemoryJournal {
         }
         row.state = DepositState::Done;
         row.updated_at = now_ms();
+        refresh_pending_net_credit(pending_net_credit, row);
         Ok(())
     }
 
@@ -615,15 +640,36 @@ impl JournalBackend for MemoryJournal {
         operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
-        if let Some(row) = inner.deposits.get_mut(id) {
+        let JournalInner {
+            deposits,
+            pending_net_credit,
+            ..
+        } = &mut *inner;
+        if let Some(row) = deposits.get_mut(id) {
             if row.state == DepositState::Done && row.net_credit.is_none() {
                 if let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee) {
                     row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
                     row.updated_at = now_ms();
                 }
             }
+            refresh_pending_net_credit(pending_net_credit, row);
         }
         Ok(())
+    }
+
+    async fn deposits_pending_net_credit(&self) -> anyhow::Result<Vec<DepositRow>> {
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .pending_net_credit
+            .iter()
+            .filter_map(|id| inner.deposits.get(id))
+            .filter(|row| {
+                row.state == DepositState::Done
+                    && row.net_credit.is_none()
+                    && row.operation_id.is_some()
+            })
+            .cloned()
+            .collect())
     }
 
     async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult> {
@@ -792,6 +838,14 @@ pub(crate) fn net_credit_with_fees(
     operation_fee: Option<fedimint_core::Amount>,
 ) -> Option<fedimint_core::Amount> {
     operation_fee.map(|operation_fee| net_credit(gross, fee).saturating_sub(operation_fee))
+}
+
+fn refresh_pending_net_credit(pending: &mut BTreeSet<DepositId>, row: &DepositRow) {
+    if row.state == DepositState::Done && row.net_credit.is_none() && row.operation_id.is_some() {
+        pending.insert(row.id.clone());
+    } else {
+        pending.remove(&row.id);
+    }
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -1013,6 +1067,15 @@ mod tests {
             row.net_credit, None,
             "unknown operation fee must leave net_credit unset"
         );
+        assert_eq!(
+            journal
+                .deposits_pending_net_credit()
+                .await
+                .expect("pending index")
+                .len(),
+            1,
+            "the pending index must contain only the unset Done row"
+        );
 
         journal
             .set_deposit_net_credit_if_none(&row.id, fedimint_core::Amount::from_msats(105_696))
@@ -1022,6 +1085,14 @@ mod tests {
         assert_eq!(
             row.net_credit,
             Some(fedimint_core::Amount::from_msats(49_570_304))
+        );
+        assert!(
+            journal
+                .deposits_pending_net_credit()
+                .await
+                .expect("pending index")
+                .is_empty(),
+            "filling net_credit must remove the pending index entry"
         );
     }
 

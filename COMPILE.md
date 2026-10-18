@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (25 core tests + CLI 0 tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (25 core tests + 1 CLI test).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -1473,13 +1473,21 @@ If the fee lookup returns `None`, the journal leaves `net_credit` unset instead 
 fills it once `get_operation_fees` returns a BTC amount. The lookup is bounded to 5 attempts with
 exponential backoff (500 ms … 2 s).
 
+Rows awaiting a fee are tracked by a dedicated raw index (`TAG_PENDING_NET_CREDIT = 0x07`,
+key `[0x07] ++ deposit_id`), written and removed in the same `dbtx` as the row. The reconciliation
+lookup is a prefix scan over that index plus one read per pending row — it does **not** scan all
+deposit rows each tick. If the operation-log entry has been pruned and the fee never becomes
+retrievable, the row stays in the index and `net_credit` stays `NULL`/pending forever; there is no
+`gross − claim_fee` fallback because that would over-report spendable credit.
+
 Tests:
 `journal::tests::net_credit_includes_operation_fee`,
 `journal::tests::deposit_row_net_credit_matches_observed_balance_delta`,
 `journal::tests::deposit_net_credit_stays_unset_until_fee_known`,
 `deposit::tests::missing_operation_fee_is_not_treated_as_zero`, and
 `journal_db::tests::net_credit_reconciles_from_none` pin the observed vector and the None path
-(in-memory and DB-backed journals):
+(in-memory and DB-backed journals). `crates/berlin-wallet-cli` also has
+`pending_net_credit_is_not_rendered_as_zero`, so the CLI displays `pending`, not `0`:
 
 ```text
 50000 sat − 324 sat − 105696 msat = 49570304 msat
@@ -1492,7 +1500,8 @@ Live verification after the fix:
 10,000 sat deposit: net_credit=9574912 msat;  balance 58809344 -> 68384256 (delta 9574912)
 ```
 
-The row now equals the real credited delta.
+The row now equals the real credited delta. The CLI `status`/`watch` output renders an unset
+`net_credit` as `net_credit: pending (operation fee not available yet)`, never as zero.
 
 ---
 

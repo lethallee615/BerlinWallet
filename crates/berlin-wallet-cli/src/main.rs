@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet};
 use berlin_wallet_core::client::{build_client, client_db, min_withdrawal_sat, open_rocksdb};
-use berlin_wallet_core::journal::{Journal, WithdrawalState};
+use berlin_wallet_core::journal::{DepositRow, Journal, WithdrawalState};
 use berlin_wallet_core::network::client_network;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
@@ -470,7 +470,9 @@ async fn command_watch(
         .ok_or_else(|| anyhow!("deposit has no event-log position"))?;
     let module = client.get_first_module::<WalletClientModule>()?;
     deposit::watch_deposit(client, journal, module.inner(), id, federation_id, position).await?;
-    println!("{:#?}", journal.deposit(id).await?);
+    if let Some(row) = journal.deposit(id).await? {
+        print_deposit(&row);
+    }
     Ok(())
 }
 
@@ -498,7 +500,7 @@ async fn command_withdraw(
 
 async fn command_status(journal: &Journal, id: &str) -> anyhow::Result<()> {
     if let Some(row) = journal.deposit(&DepositId(id.to_owned())).await? {
-        println!("{row:#?}");
+        print_deposit(&row);
         return Ok(());
     }
     if let Some(row) = journal.withdrawal(&WithdrawalId(id.to_owned())).await? {
@@ -508,8 +510,37 @@ async fn command_status(journal: &Journal, id: &str) -> anyhow::Result<()> {
     anyhow::bail!("no deposit or withdrawal found with id {id}")
 }
 
+fn net_credit_display(net_credit: Option<fedimint_core::Amount>) -> String {
+    match net_credit {
+        Some(net_credit) => format!("{} msat", net_credit.msats),
+        None => "pending (operation fee not available yet)".to_owned(),
+    }
+}
+
+fn print_deposit(row: &DepositRow) {
+    println!("{row:#?}");
+    println!("net_credit: {}", net_credit_display(row.net_credit));
+}
+
 fn parse_sat(value: Option<&str>) -> anyhow::Result<Amount> {
     let value = value.ok_or_else(|| anyhow!("missing sat amount"))?;
     let sats: u64 = value.parse().context("invalid sat amount")?;
     Ok(Amount::from_sat(sats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_net_credit_is_not_rendered_as_zero() {
+        assert_eq!(
+            net_credit_display(None),
+            "pending (operation fee not available yet)"
+        );
+        assert_eq!(
+            net_credit_display(Some(fedimint_core::Amount::from_msats(9_574_912))),
+            "9574912 msat"
+        );
+    }
 }

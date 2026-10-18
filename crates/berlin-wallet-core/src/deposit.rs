@@ -542,7 +542,7 @@ pub async fn reconcile_missing_net_credits(
     client: &Client,
     journal: &Journal,
 ) -> anyhow::Result<()> {
-    for row in journal.deposits_in(&[DepositState::Done]).await? {
+    for row in journal.deposits_pending_net_credit().await? {
         if row.net_credit.is_some() {
             continue;
         }

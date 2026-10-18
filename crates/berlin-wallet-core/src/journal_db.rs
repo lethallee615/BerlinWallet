@@ -190,12 +190,36 @@ impl DbJournal {
 
 const TAG_OPEN_DEPOSIT: u8 = 0x05;
 const TAG_OPEN_WITHDRAWAL: u8 = 0x06;
+/// Index of `Done` deposits whose `net_credit` is still unset and whose
+/// `operation_id` is known. Keys are `[0x07] ++ deposit_id_utf8`; values are
+/// empty. Written/removed atomically with the deposit row.
+const TAG_PENDING_NET_CREDIT: u8 = 0x07;
 const RETRY_ON_CONFLICT_ATTEMPTS: u32 = 5;
 
 fn open_deposit_key(federation_id: &FederationId) -> Vec<u8> {
     let mut key = vec![TAG_OPEN_DEPOSIT];
     key.extend_from_slice(&federation_bytes(federation_id));
     key
+}
+
+fn pending_net_credit_key(id: &DepositId) -> Vec<u8> {
+    let mut key = vec![TAG_PENDING_NET_CREDIT];
+    key.extend_from_slice(id.0.as_bytes());
+    key
+}
+
+async fn refresh_pending_net_credit(
+    dbtx: &mut DatabaseTransaction<'_, Committable>,
+    row: &DepositRow,
+) -> anyhow::Result<()> {
+    if row.state == DepositState::Done && row.net_credit.is_none() && row.operation_id.is_some() {
+        dbtx.raw_insert_bytes(&pending_net_credit_key(&row.id), &[1])
+            .await?;
+    } else {
+        dbtx.raw_remove_entry(&pending_net_credit_key(&row.id))
+            .await?;
+    }
+    Ok(())
 }
 
 fn open_withdrawal_key(federation_id: &FederationId) -> Vec<u8> {
@@ -674,6 +698,7 @@ impl JournalBackend for DbJournal {
                     row.state = DepositState::Done;
                     row.updated_at = now_ms();
                     write_deposit(&mut dbtx, &row).await?;
+                    refresh_pending_net_credit(&mut dbtx, &row).await?;
                     clear_open_deposit(&mut dbtx, &row.federation_id, &row.id).await?;
                 }
                 dbtx.commit_tx_result().await?;
@@ -694,6 +719,7 @@ impl JournalBackend for DbJournal {
                     row.state = DepositState::Done;
                     row.updated_at = now_ms();
                     write_deposit(&mut dbtx, &row).await?;
+                    refresh_pending_net_credit(&mut dbtx, &row).await?;
                     clear_open_deposit(&mut dbtx, &row.federation_id, &row.id).await?;
                 }
                 dbtx.commit_tx_result().await?;
@@ -746,6 +772,7 @@ impl JournalBackend for DbJournal {
                     updated_at: now,
                 };
                 write_deposit(&mut dbtx, &row).await?;
+                refresh_pending_net_credit(&mut dbtx, &row).await?;
                 write_claim(&mut dbtx, &federation_id, outpoint, &id).await?;
                 dbtx.commit_tx_result().await?;
                 Ok(BindResult::Bound)
@@ -777,6 +804,7 @@ impl JournalBackend for DbJournal {
                         row.state = DepositState::Done;
                         row.updated_at = now_ms();
                         write_deposit(&mut dbtx, &row).await?;
+                        refresh_pending_net_credit(&mut dbtx, &row).await?;
                         clear_open_deposit(&mut dbtx, &row.federation_id, &row.id).await?;
                     }
                 }
@@ -804,6 +832,7 @@ impl JournalBackend for DbJournal {
                             row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
                             row.updated_at = now_ms();
                             write_deposit(&mut dbtx, &row).await?;
+                            refresh_pending_net_credit(&mut dbtx, &row).await?;
                         }
                     }
                 }
@@ -812,6 +841,31 @@ impl JournalBackend for DbJournal {
             }
         })
         .await
+    }
+
+    async fn deposits_pending_net_credit(&self) -> anyhow::Result<Vec<DepositRow>> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let mut ids = Vec::new();
+        let mut stream = dbtx.raw_find_by_prefix(&[TAG_PENDING_NET_CREDIT]).await?;
+        while let Some((key, _value)) = stream.next().await {
+            let id = std::str::from_utf8(&key[1..])?;
+            ids.push(DepositId(id.to_owned()));
+        }
+        drop(stream);
+        dbtx.commit_tx_result().await?;
+
+        let mut rows = Vec::new();
+        for id in ids {
+            if let Some(row) = self.deposit(&id).await? {
+                if row.state == DepositState::Done
+                    && row.net_credit.is_none()
+                    && row.operation_id.is_some()
+                {
+                    rows.push(row);
+                }
+            }
+        }
+        Ok(rows)
     }
 
     async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult> {
@@ -1184,6 +1238,14 @@ mod tests {
         let row = journal.deposit(&row.id).await.unwrap().unwrap();
         assert_eq!(row.state, DepositState::Done);
         assert_eq!(row.net_credit, None);
+        assert_eq!(
+            journal
+                .deposits_pending_net_credit()
+                .await
+                .expect("pending index")
+                .len(),
+            1
+        );
 
         journal
             .set_deposit_net_credit_if_none(&row.id, fedimint_core::Amount::from_msats(105_696))
@@ -1193,6 +1255,13 @@ mod tests {
         assert_eq!(
             row.net_credit,
             Some(fedimint_core::Amount::from_msats(49_570_304))
+        );
+        assert!(
+            journal
+                .deposits_pending_net_credit()
+                .await
+                .expect("pending index")
+                .is_empty()
         );
     }
 
