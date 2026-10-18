@@ -928,6 +928,10 @@ adopted elsewhere.
   later reconciliation pass fills it; assert the 0x07 pending index contains only that row and is
   cleared after the fill. Force permanent unavailability (pruned entry) and assert the row stays
   pending rather than becoming zero.
+- **Restore:** copy the existing mnemonic into a fresh data dir, run `restore`, and assert the
+  federation id, derived client identity, ecash balance, and BDK balance match the original; the
+  BDK pass must be `start_full_scan` (partial sync only covers revealed scripts). Do not expect the
+  local application journal to be restored — it is not federation state.
 - **Crash hooks:** `BERLIN_WALLET_CRASH_POINT` is debug-only (`#[cfg(debug_assertions)]`); release
   builds compile it to a no-op. Use it only for the crash/restart matrix.
 - **Withdrawal:** move the feerate between `send_fee_quote()` and `send()` to exercise quote drift
@@ -1020,7 +1024,7 @@ can stop the task cleanly without aborting a journal write mid-transaction.
 - `Journal::pending` / `Journal::failed` read index + rows from ONE `begin_transaction_nc` snapshot.
 - Every money intent gets an **idempotency key** and a **deterministic correlation id** (deposit: `position`; withdrawal: client ULID).
 - `FederationInfo` registry row (`invite`, `db_prefix`, `joined_at`) persisted so restart can reopen existing partitions.
-- Recovery: `ClientPreview::recover(...)` then `wait_for_all_recoveries()`; shutdown the recovery client and reopen before reading balance.
+- Recovery: `ClientPreview::recover(self, db_no_decoders: Database, pre_root_secret: RootSecret, backup: Option<ClientBackup>) -> Result<ClientHandle>` then `Client::wait_for_all_recoveries().await`; modules held back during recovery become usable only after `ClientHandle::shutdown(self).await` and `ClientBuilder::open(...)`. The implementation (`client::recover_client`) performs shutdown+reopen on a fresh DB and asserts `all_modules_usable()`. The local application journal is not part of federation recovery.
 - A `join_lock` (`Mutex<()>`) + `active_recoveries` reservation serialize prefix allocation.
 - `open_all` is best-effort: one un-openable federation is warn-logged and skipped.
 
@@ -1162,7 +1166,13 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 6. **UniFFI async** — uniffi 0.32 async export support and per-language binding generation **unverified**.
 7. **Depending on douglaz's `wallet_core`/`wallet-fedimint`** — AGPL-3.0, not on crates.io (git dep at a pinned commit). Either re-implement a small journal inline or take the git dep with the license consequence.
 8. **`tx_builder` construction for fedimint transactions** — **RESOLVED** for walletv2: `send()` is the high-level wrapper that builds/submits internally and returns an `OperationId`; no manual `TransactionBuilder` is needed for peg-out.
-9. **Recovery path (§5)** — `ClientPreview::recover` + `Client::wait_for_all_recoveries()` is on the boot critical path but **unverified**: VERIFY.md did not exercise a restore/recovery. The step that shuts down the recovery client and reopens the partition before reading balance is unconfirmed; treat it as blocking a production boot/restore implementation.
+9. **Recovery path (§5)** — **RESOLVED live (COMPILE.md §28)**. Exact 0.12.0 signatures:
+   - `ClientPreview::recover(self, db_no_decoders: Database, pre_root_secret: RootSecret, backup: Option<ClientBackup>) -> Result<ClientHandle>` (`builder.rs:1519`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientPreview.html#method.recover>).
+   - `Client::wait_for_all_recoveries(&self) -> Result<()>` (`client.rs:1966`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.wait_for_all_recoveries>). It reports success only when every module recovery completed, and returns early on a terminal module failure.
+   - `ClientHandle::shutdown(self)` (`client/handle.rs:57`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientHandle.html#method.shutdown>) stops the executor and joins the client task group with a 30 s bound.
+   - Reopen with `ClientBuilder::open(self, connectors, db_no_decoders, pre_root_secret) -> Result<ClientHandle>` (`builder.rs:483`). The docs for `Client::all_modules_usable` explicitly say a module held back during recovery "only becomes available once the client is reopened". `open` itself does not check for a live previous handle, so `shutdown` is an operational requirement (task-group/DB lifecycle), not an assertion enforced by `open`; our in-process restore always performs it. On a fresh process, exiting and reopening achieves the same state.
+   - Backups: `Option<ClientBackup>` is `None`; `create_backup`/`download_backup_from_federation` are deprecated in 0.12.0 and slated for removal in 0.13.0.
+   - Live proof: fresh dir + original mnemonic recovered federation `05d83c30…`, identity `f306ff2e…`, ecash `36,402,688 msat`, BDK full scan found `0.00059473 BTC`.
 10. **`WalletClientConfig` construction/defaults** — **RESOLVED** (COMPILE.md §19). `WalletClientInit` is a unit struct with `Default`; the config is per-federation module config delivered via `ClientModuleInitArgs::cfg()`. After join, read it with `Client::config().await` + `ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`. Defaults live in `WalletConfigConsensus::new`: `dust_limit = 10_000 sats`, `fee_consensus.base = 100 sats` plus a federation-chosen `parts_per_million` (capped at 10_000 = 1%), and `send_tx_vbytes`/`receive_tx_vbytes` derived from the guardian count (4 guardians: 228/316). `send_withdrawal` rejects `value < dust_limit` before quoting.
 11. **`ReceiveMeta` full field set** — **UNVERIFIED** beyond `outpoint` and `fee` (VERIFY §8.3/§8.5 exercise those two): the adopted-row path also reads `address`, `value`, and `change_outpoint_range`. Confirm the exact `ReceiveMeta` fields on the pinned 0.12.0 before relying on them; orphan adoption depends on `outpoint` (dedup key), `value` (gross), `fee` (claim fee), and `address` (display).
 12. **Deposit detection without a local bitcoind RPC** — **UNVERIFIED**: `WalletClientInit::default()` is assumed to carry no `DynBitcoindRpc`. The `receive`/`await_receive` path is expected to read **federation-reported chain state** (the federation's wallet module watches the chain), not a local RPC; confirm this before assuming deposits are detected without `ClientBuilder::with_bitcoind_rpc`.

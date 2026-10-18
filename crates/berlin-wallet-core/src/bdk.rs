@@ -14,6 +14,11 @@ pub const BDK_DB_FILE: &str = "bdk.sqlite";
 
 /// Bound each Esplora HTTP operation so a hung endpoint cannot wedge a task.
 const ESPLORA_TIMEOUT: Duration = Duration::from_secs(30);
+/// A restore scan has to walk historical gap limits; give it a much larger
+/// bound than a normal incremental sync.
+const ESPLORA_FULL_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
+const FULL_SCAN_STOP_GAP: usize = 20;
+const FULL_SCAN_PARALLEL_REQUESTS: usize = 4;
 
 /// Derive BIP84 external/change descriptors from the BIP39 seed.
 ///
@@ -154,6 +159,31 @@ impl BdkWallet {
         self.wallet.apply_unconfirmed_txs([(tx.clone(), last_seen)]);
         self.persist()?;
         Ok(tx)
+    }
+
+    /// Full script-pubkey scan from index 0 for a restored wallet.
+    ///
+    /// `start_full_scan()` uses the wallet's unbounded script iterators, so it
+    /// starts at derivation index 0 even on a fresh BDK database. A partial
+    /// `sync()` only covers already-revealed scripts and would miss historical
+    /// addresses.
+    pub async fn full_scan(&mut self) -> anyhow::Result<Vec<(KeychainKind, u32)>> {
+        let request = self.wallet.start_full_scan();
+        let client = bdk_esplora::esplora_client::Builder::new(&self.esplora_url).build_async()?;
+        let response = tokio::time::timeout(
+            ESPLORA_FULL_SCAN_TIMEOUT,
+            client.full_scan(request, FULL_SCAN_STOP_GAP, FULL_SCAN_PARALLEL_REQUESTS),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Esplora full scan timed out"))??;
+        let last_active = response
+            .last_active_indices
+            .iter()
+            .map(|(keychain, index)| (keychain.clone(), *index))
+            .collect();
+        self.wallet.apply_update(response)?;
+        self.persist()?;
+        Ok(last_active)
     }
 
     /// One partial Esplora sync over the revealed script pubkeys, then persist

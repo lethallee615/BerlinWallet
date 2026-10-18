@@ -102,7 +102,7 @@ cargo check   # -> exit 0
 
 Compile-verified against the real crates; see VERIFY.md §1 for full signatures and source locations.
 
-**fedimint-client 0.12.0**: `Client::builder()`, `ClientBuilder::with_module()`, `ClientBuilder::preview()`, `ClientPreview::join()` (**returns `ClientHandle`, not `Client`**), `Client::get_balance_for_unit()`, `get_operation_fees(operation_id)`, `get_first_module::<M>()`, `get_first_module_arc::<M>()`, `finalize_and_submit_transaction()`, `transaction_updates()`, `await_primary_bitcoin_module_output()`, `subscribe_balance_changes()`, `spawn_federation_reconnect()`, `start_executor()` (**receiver is `self: &Arc<Self>`**), `db()`, `executor()`, `handle_events()`, `get_event_log_transient_receiver()`, `chain_id()`, `federation_id()`, `config()`.
+**fedimint-client 0.12.0**: `Client::builder()`, `ClientBuilder::with_module()`, `ClientBuilder::preview()`, `ClientPreview::join()` / `ClientPreview::recover(...)` (**both return `ClientHandle`, not `Client`**), `Client::wait_for_all_recoveries()`, `Client::all_modules_usable()`, `ClientHandle::shutdown(self)`, `Client::get_balance_for_unit()`, `get_operation_fees(operation_id)`, `get_first_module::<M>()`, `get_first_module_arc::<M>()`, `finalize_and_submit_transaction()`, `transaction_updates()`, `await_primary_bitcoin_module_output()`, `subscribe_balance_changes()`, `spawn_federation_reconnect()`, `start_executor()` (**receiver is `self: &Arc<Self>`**), `db()`, `executor()`, `handle_events()`, `get_event_log_transient_receiver()`, `chain_id()`, `federation_id()`, `config()`.
 - `OutPointRange` = `fedimint_core::OutPointRange` (crate root)
 - `TransactionBuilder` = `fedimint_client::module::transaction::TransactionBuilder`
 - `OperationId` = `fedimint_core::core::OperationId`
@@ -112,7 +112,7 @@ Compile-verified against the real crates; see VERIFY.md §1 for full signatures 
 
 **fedimint-mintv2-client 0.12.0**: `MintClientInit`/`MintClientModule`; v1 `fedimint-mint-client` is not registered. The live federation exposes `lnv2`/`meta`/`mintv2`/`walletv2`; `lnv2` is out of scope and not registered.
 
-**bdk_wallet 3.2.0**: `Wallet::create()` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`), `reveal_next_address()`, `next_unused_address()`, `list_unspent()`, `get_utxo()`, `get_tx()`, `build_tx()`, `create_psbt()` (requires `bdk-tx` + `--cfg bdk_wallet_unstable`), `sign_with_signers()`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`, `start_sync_with_revealed_spks()`, `apply_update_events()` (`WalletEvent::TxConfirmed`), `WalletPersister`/`PersistedWallet` (`PersistedWallet::create(&mut P, CreateParams)` / `PersistedWallet::load(&mut P, LoadParams)`; rusqlite or bdk_file_store).
+**bdk_wallet 3.2.0**: `Wallet::create()` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`), `reveal_next_address()`, `next_unused_address()`, `list_unspent()`, `get_utxo()`, `get_tx()`, `build_tx()`, `create_psbt()` (requires `bdk-tx` + `--cfg bdk_wallet_unstable`), `sign_with_signers()`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`, `start_sync_with_revealed_spks()`, `start_full_scan()` (restore), `apply_update_events()` (`WalletEvent::TxConfirmed`), `WalletPersister`/`PersistedWallet` (`PersistedWallet::create(&mut P, CreateParams)` / `PersistedWallet::load(&mut P, LoadParams)`; rusqlite or bdk_file_store).
 - `Update` = `bdk_wallet::Update` (crate root — **not** `bdk_wallet::chain::Update`)
 
 **bdk_esplora 0.22.1** (chain source): trait `bdk_esplora::EsploraAsyncExt` (blocking: `EsploraExt`), impl'd for `esplora_client::AsyncClient` / `BlockingClient`. Methods: `full_scan(request, stop_gap, parallel_requests)` (full) and `sync(request, parallel_requests)` (partial). There is **no `EsploraClient` type and no `scan` method**. `bdk_esplora::esplora_client` is re-exported.
@@ -121,7 +121,7 @@ Compile-verified against the real crates; see VERIFY.md §1 for full signatures 
 
 **fedimint-client-module 0.12.0**: `ClientModuleInit` = `fedimint_client::module::module::init::ClientModuleInit` (≡ `fedimint_client_module::module::init::ClientModuleInit`); `FeeQuote` = `fedimint_client::module::transaction::FeeQuote`.
 
-**douglaz/fedimint-wallets (crash-safe patterns)**: `MultiClient` per-federation clients at `[0x01] ++ u32_le(db_prefix)`, `join_lock`, `active_recoveries` reservation, `open_all` best-effort, `wait_for_all_active_state_machines`, `Client::shutdown()` before replacing a handle; `FedimintJournal` app prefix `[0x00]`, raw byte API + serde_json, atomic status+index transitions; `runtime::Runtime` single actor + watch scheduler.
+**douglaz/fedimint-wallets (crash-safe patterns)**: `MultiClient` per-federation clients at `[0x01] ++ u32_le(db_prefix)`, `join_lock`, `active_recoveries` reservation, `open_all` best-effort, `wait_for_all_active_state_machines`, `ClientHandle::shutdown(self)` before replacing a handle; `FedimintJournal` app prefix `[0x00]`, raw byte API + serde_json, atomic status+index transitions; `runtime::Runtime` single actor + watch scheduler.
 
 ## Not verified (reference only — not compile-verified)
 

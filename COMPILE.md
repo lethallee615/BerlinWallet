@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (25 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (26 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (25 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (26 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (25 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (26 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (25 core tests + 1 CLI test).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (26 core tests + 1 CLI test).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -922,7 +922,9 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
 `crates/berlin-wallet-cli` (binary `berlin-wallet`) is a manual-run harness:
 
 - `init` — create/open the BIP39 mnemonic and SQLite BDK wallet, print a regtest address/balance.
-- `join <invite>` — build a client, print federation id, wallet network, and minimum withdrawal.
+- `join <invite>` — build a client, print federation id, client identity, wallet network, and minimum withdrawal.
+- `restore <invite> [esplora-url] [expected-fed-id] [expected-client-identity]` — recover on a fresh
+  data dir, assert identity/federation, then full-scan BDK.
 - `run <invite> [esplora-url]` — interactive session with `balance`, `ecash-balance`, `address`,
   `min`, `request-deposit <sat>`, `fund-deposit <id>`, `deposit <sat>` (both steps), `watch <id>`,
   `request-withdraw <address> <sat>`, `send-withdraw <id>`, `cancel-withdraw <id>`, `withdraw
@@ -1588,3 +1590,144 @@ the user funding the BDK address directly. The CLI currently has **no faucet-tok
 Decision: it **should** accept `MUTINYNET_FAUCET_TOKEN` (or a `--faucet-token` flag) in a
 CLI-only `faucet`/`fund-bdk` command, keeping token handling out of the core wallet. Not
 implemented here.
+
+---
+
+## 28. Restore from mnemonic on a fresh data dir (live)
+
+### 28.1 Exact APIs (fedimint-client 0.12.0)
+
+```rust
+// ClientPreview, builder.rs:1519
+pub async fn recover(
+    self,
+    db_no_decoders: Database,
+    pre_root_secret: RootSecret,
+    backup: Option<ClientBackup>,
+) -> anyhow::Result<ClientHandle>;
+
+// Client, client.rs:1966
+pub async fn wait_for_all_recoveries(&self) -> anyhow::Result<()>;
+
+// ClientHandle, client/handle.rs:57
+pub async fn shutdown(self);
+
+// ClientBuilder, builder.rs:483
+pub async fn open(
+    self,
+    connectors: ConnectorRegistry,
+    db_no_decoders: Database,
+    pre_root_secret: RootSecret,
+) -> anyhow::Result<ClientHandle>;
+```
+
+- https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientPreview.html#method.recover
+- https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.wait_for_all_recoveries
+- https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientHandle.html#method.shutdown
+- https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.all_modules_usable
+
+### 28.2 Is shutdown-before-reopen required?
+
+**Yes for an in-process restore.** `all_modules_usable` docs state that a module held back during
+recovery only becomes available once the client is **reopened**. `ClientBuilder::open` itself does
+not check whether a previous handle is still alive, so this is not a compile-time constraint; it is
+an operational one. `ClientHandle::shutdown(self)` is the documented explicit stop: it stops the
+executor, joins the client task group (30 s bound), and drops the last `Client` handle. Before that
+it is not safe to reopen the same RocksDB partition: background tasks and DB handles are still
+live. On a fresh process, exiting and reopening has the same effect. Our `recover_client` always
+does `recover → wait_for_all_recoveries → shutdown → open`.
+
+### 28.3 Implemented flow
+
+`client::recover_client(db, connectors, root_secret, invite)`:
+
+1. Assert `Client::get_config_from_db(&db).await.is_none()` (fresh partition).
+2. Build the same v2 module set (`mintv2`, `walletv2`), `preview(connectors, &invite)`.
+3. Assert preview federation id == invite federation id.
+4. `preview.recover(db.clone(), root_secret.clone(), None)` — `backup` is `None`; backups are
+   deprecated in 0.12.0 and scheduled for removal in 0.13.0.
+5. `handle.wait_for_all_recoveries().await`.
+6. `handle.shutdown().await`.
+7. `configured_builder().open(connectors, db, root_secret)`.
+8. Assert the reopened federation id and `all_modules_usable()`.
+
+`cli::restore` additionally:
+
+- requires an existing `mnemonic` file (does not generate one);
+- requires a fresh dir: no `bdk.sqlite` and no persisted fedimint config;
+- derives `client_identity` from the same BIP39 root secret;
+- optionally asserts caller-supplied expected federation id and identity;
+- runs a **full** BDK scan, not partial sync.
+
+### 28.4 Client identity definition (deviation)
+
+fedimint 0.12.0 does not expose a public one-line "client identity" accessor.
+`Client::get_internal_payment_markers()` is **federation-derived only** (fake LN pubkey from the
+federation id), so it cannot prove the root secret. We define the printable identity as:
+
+```text
+SHA256(get_default_client_secret(global_root_secret, federation_id).to_random_bytes::<32>())
+```
+
+where `get_default_client_secret` is mirrored exactly:
+`global.child_key(0).federation_key(fed).child_key(0).child_key(0)`. This is the same derivation
+fedimint-client uses internally; only the SHA-256 digest is printed, never secret bytes. The
+recovered identity matched the original.
+
+### 28.5 BDK full scan (partial-sync gap)
+
+```rust
+Wallet::start_full_scan() -> FullScanRequestBuilder<KeychainKind>   // bdk_wallet 3.2.0
+EsploraAsyncExt::full_scan(request, stop_gap, parallel_requests)
+```
+
+- https://docs.rs/bdk_wallet/3.2.0/bdk_wallet/struct.Wallet.html#method.start_full_scan
+- https://docs.rs/bdk_esplora/0.22.1/bdk_esplora/trait.EsploraAsyncExt.html
+
+`start_full_scan()` uses the wallet's unbounded script iterators, so a freshly created wallet
+starts at derivation index 0. `sync()`/`start_sync_with_revealed_spks()` only covers already
+revealed scripts; on a fresh BDK DB that set is empty, so historical addresses are missed. The
+restore uses `stop_gap = 20`, `parallel_requests = 4`, and a 600 s timeout, then
+`apply_update(response)` + `persist()`.
+
+### 28.6 Live restore output
+
+Original data dir `/tmp/opencode/berlin-join`; fresh dir `/tmp/opencode/berlin-restore` containing
+only a copy of the mnemonic file. Original `join`:
+
+```text
+federation id: 05d83c302c5acff9c8e28d22cefa8b3eeaacbfddea0bd2d602e1972318013936
+client identity: f306ff2e35e596e172b8c28393164e2a28619c6299096df37562e7dd7d161ace
+```
+
+Restore:
+
+```text
+restore federation id: 05d83c302c5acff9c8e28d22cefa8b3eeaacbfddea0bd2d602e1972318013936
+restore client identity: f306ff2e35e596e172b8c28393164e2a28619c6299096df37562e7dd7d161ace
+restore modules usable: true
+restore chain-id network: signet
+restore ecash balance: 36402688 msat (36402 sat)
+restore bdk full scan last active: [(External, 11), (Internal, 2)]
+restore bdk balance: { immature: 0 BTC, trusted_pending: 0 BTC, untrusted_pending: 0 BTC, confirmed: 0.00059473 BTC }
+restore assertions: ok
+```
+
+Original balances were the same: ecash `36,402,688 msat`, BDK `0.00059473 BTC`. The full scan
+found activity out to external index 11 / internal index 2 — addresses a fresh partial sync would
+never have requested. Unit coverage:
+`seed::tests::client_identity_is_stable_for_the_same_seed`; the restore itself is an end-to-end
+live test (it needs the federation).
+
+### 28.7 Deviations and limits
+
+- **Identity is our hash**, not a fedimint built-in; rationale in §28.4.
+- **App journal is not restored.** Deposit/withdrawal rows and `custom_meta` history live in the
+  local journal, not in the federation. A restored client recovers ecash and BDK funds, but
+  application history starts empty; on-chain history is re-derived by the BDK full scan and
+  federation operations by operation-log scanners.
+- **Backups are not used** (`Option<ClientBackup> = None`); backup APIs are deprecated in 0.12.0.
+- **Only registered modules recover.** `mintv2` and `walletv2` are registered; `lnv2`/`meta` are
+  intentionally not, so they are skipped by recovery.
+- **Fresh-dir enforcement** is in `recover_client` (config absent) and `cli::restore` (BDK file
+  absent). A non-fresh dir must use normal `open`, not recover.

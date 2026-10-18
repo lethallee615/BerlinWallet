@@ -2,11 +2,13 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use bip39::{Language, Mnemonic};
+use bitcoin::hashes::Hash as _;
 use fedimint_client::RootSecret;
 use fedimint_client::secret::RootSecretStrategy;
+use fedimint_core::config::FederationId;
 use fedimint_core::encoding::{Decodable, DecodeError, Encodable};
 use fedimint_core::module::registry::ModuleRegistry;
-use fedimint_derive_secret::DerivableSecret;
+use fedimint_derive_secret::{ChildId, DerivableSecret};
 use rand::{CryptoRng, RngCore};
 
 /// Load the wallet mnemonic from `path`, creating and persisting a fresh
@@ -91,6 +93,27 @@ pub fn root_secret_from_mnemonic(mnemonic: &Mnemonic) -> RootSecret {
     RootSecret::StandardDoubleDerive(Bip39RootSecretStrategy::<12>::to_root_secret(mnemonic))
 }
 
+/// Stable, non-secret client identity for one federation.
+///
+/// Mirrors `fedimint_client_module::secret::get_default_client_secret`:
+/// `global.child(0).federation_key(fed).child(0).child(0)`, then hashes the
+/// derived client secret. This is what must match after restore; it is safe to
+/// print because only the SHA-256 digest leaves the process.
+pub fn client_identity(
+    root_secret: &RootSecret,
+    federation_id: FederationId,
+) -> anyhow::Result<String> {
+    let RootSecret::StandardDoubleDerive(global_root_secret) = root_secret else {
+        anyhow::bail!("client identity is only defined for StandardDoubleDerive root secrets");
+    };
+    let multi_federation = global_root_secret.child_key(ChildId(0));
+    let federation_root = multi_federation.federation_key(&federation_id);
+    let wallet_root = federation_root.child_key(ChildId(0));
+    let client_root = wallet_root.child_key(ChildId(0));
+    let secret_bytes = client_root.to_random_bytes::<32>();
+    Ok(bitcoin::hashes::sha256::Hash::hash(&secret_bytes).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use fedimint_client::secret::PlainRootSecretStrategy;
@@ -113,6 +136,20 @@ mod tests {
             plain.to_random_bytes::<32>(),
             "canonical BIP39 and plain-seed strategies must derive the same root"
         );
+    }
+
+    #[test]
+    fn client_identity_is_stable_for_the_same_seed() {
+        let mnemonic = Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .expect("valid mnemonic");
+        let root = root_secret_from_mnemonic(&mnemonic);
+        let federation_id = FederationId::dummy();
+        let first = client_identity(&root, federation_id).expect("identity");
+        let second = client_identity(&root, federation_id).expect("identity");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
     }
 
     #[test]

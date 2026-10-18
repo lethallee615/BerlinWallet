@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet};
-use berlin_wallet_core::client::{build_client, client_db, min_withdrawal_sat, open_rocksdb};
+use berlin_wallet_core::client::{
+    build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
+};
 use berlin_wallet_core::journal::{DepositRow, Journal, WithdrawalState};
 use berlin_wallet_core::network::client_network;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
@@ -34,7 +36,14 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)?;
 
+    let command = args.get(1).map(String::as_str);
     let mnemonic_path = data_dir.join("mnemonic");
+    if command == Some("restore") && !mnemonic_path.exists() {
+        anyhow::bail!(
+            "restore requires an existing mnemonic at {}",
+            mnemonic_path.display()
+        );
+    }
     let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path)?;
     let seed = seed::mnemonic_seed(&mnemonic);
     let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
@@ -42,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .get(3)
         .cloned()
         .unwrap_or_else(|| DEFAULT_ESPLORA_URL.to_owned());
-    match args.get(1).map(String::as_str) {
+    match command {
         None | Some("init") => {
             let mut bdk = BdkWallet::open_or_create(
                 &data_dir.join(BDK_DB_FILE),
@@ -75,6 +84,27 @@ async fn main() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow!("usage: berlin-wallet run <invite-code> [esplora-url]"))?;
             run(invite, &seed, root_secret, &data_dir, &esplora_url).await
         }
+        Some("restore") => {
+            let invite = args.get(2).ok_or_else(|| {
+                anyhow!(
+                    "usage: berlin-wallet restore <invite-code> [esplora-url] [expected-fed-id] [expected-client-identity]"
+                )
+            })?;
+            let esplora_url = args
+                .get(3)
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_ESPLORA_URL.to_owned());
+            restore(
+                invite,
+                &seed,
+                root_secret,
+                &data_dir,
+                &esplora_url,
+                args.get(4).map(String::as_str),
+                args.get(5).map(String::as_str),
+            )
+            .await
+        }
         Some(other) => {
             print_help();
             anyhow::bail!("unknown command: {other}")
@@ -97,6 +127,8 @@ fn print_help() {
     println!("commands:");
     println!("  init                                create/open the local wallet");
     println!("  join <invite>                       join a federation and print its config");
+    println!("  restore <invite> [esplora] [fed] [identity]");
+    println!("                                      recover on a fresh data dir + full BDK scan");
     println!("  run <invite> [esplora-url]          interactive manual-run session");
     println!();
     println!("interactive commands:");
@@ -129,11 +161,13 @@ async fn join(invite: &str, root_secret: RootSecret, data_dir: &Path) -> anyhow:
         .bind()
         .await?;
     let invite = InviteCode::from_str(invite).context("invalid invite code")?;
+    let identity = seed::client_identity(&root_secret, invite.federation_id())?;
     let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
 
     let module = client.get_first_module::<WalletClientModule>()?;
     let chain_network = client_network(&client).await?;
     println!("federation id: {}", client.federation_id());
+    println!("client identity: {identity}");
     println!("chain-id network: {chain_network}");
     println!("config network: {}", module.get_network());
     for (id, config) in &client.config().await.modules {
@@ -162,6 +196,7 @@ async fn run(
         .bind()
         .await?;
     let invite = InviteCode::from_str(invite).context("invalid invite code")?;
+    let identity = seed::client_identity(&root_secret, invite.federation_id())?;
     let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
     let federation_id = client.federation_id();
     let chain_network = client_network(&client).await?;
@@ -189,6 +224,7 @@ async fn run(
 
     let module = client.get_first_module::<WalletClientModule>()?;
     println!("federation id: {federation_id}");
+    println!("client identity: {identity}");
     println!("chain-id network: {chain_network}");
     println!("config network: {}", module.get_network());
     println!("bdk address: {}", wallet.lock().await.reveal_destination()?);
@@ -361,6 +397,73 @@ async fn run(
     }
 
     let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+async fn restore(
+    invite: &str,
+    seed: &[u8; 64],
+    root_secret: RootSecret,
+    data_dir: &Path,
+    esplora_url: &str,
+    expected_federation_id: Option<&str>,
+    expected_identity: Option<&str>,
+) -> anyhow::Result<()> {
+    let bdk_path = data_dir.join(BDK_DB_FILE);
+    anyhow::ensure!(
+        !bdk_path.exists(),
+        "restore requires a fresh data dir (bdk.sqlite already exists)"
+    );
+
+    let invite = InviteCode::from_str(invite).context("invalid invite code")?;
+    let federation_id = invite.federation_id();
+    let identity = seed::client_identity(&root_secret, federation_id)?;
+
+    if let Some(expected) = expected_federation_id {
+        anyhow::ensure!(
+            federation_id.to_string() == expected,
+            "restored federation id {federation_id} does not match expected {expected}"
+        );
+    }
+    if let Some(expected) = expected_identity {
+        anyhow::ensure!(
+            identity == expected,
+            "restored client identity {identity} does not match expected {expected}"
+        );
+    }
+
+    println!("restore federation id: {federation_id}");
+    println!("restore client identity: {identity}");
+
+    let db = open_database(data_dir).await?;
+    let connectors = ConnectorRegistry::build_from_client_defaults()
+        .bind()
+        .await?;
+    let client = recover_client(client_db(&db, 0), connectors, root_secret, invite).await?;
+    anyhow::ensure!(
+        client.federation_id() == federation_id,
+        "recovered client federation id mismatch"
+    );
+    anyhow::ensure!(
+        client.all_modules_usable(),
+        "recovered client still has unavailable modules"
+    );
+
+    let chain_network = client_network(&client).await?;
+    let mut bdk = BdkWallet::open_or_create(&bdk_path, seed, chain_network, esplora_url)?;
+    let last_active = bdk.full_scan().await?;
+    let ecash = client.get_balance_for_unit(AmountUnit::BITCOIN).await?;
+
+    println!("restore modules usable: true");
+    println!("restore chain-id network: {chain_network}");
+    println!(
+        "restore ecash balance: {} msat ({} sat)",
+        ecash.msats,
+        ecash.msats / 1000
+    );
+    println!("restore bdk full scan last active: {last_active:?}");
+    println!("restore bdk balance: {}", bdk.balance());
+    println!("restore assertions: ok");
     Ok(())
 }
 

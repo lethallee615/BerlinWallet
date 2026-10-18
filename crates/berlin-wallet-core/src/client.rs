@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use fedimint_client::{Client, ClientHandleArc, RootSecret};
+use fedimint_client::{Client, ClientBuilder, ClientHandleArc, RootSecret};
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
@@ -10,13 +10,8 @@ use fedimint_walletv2_client::WalletClientInit;
 use fedimint_walletv2_common::KIND as WALLET_V2_KIND;
 use fedimint_walletv2_common::config::WalletClientConfig;
 
-/// Build a client with the walletv2 module registered.
-pub async fn build_client(
-    db: Database,
-    connectors: ConnectorRegistry,
-    root_secret: RootSecret,
-    invite: InviteCode,
-) -> anyhow::Result<ClientHandleArc> {
+/// Build a client builder with the v2 module family registered.
+async fn configured_builder() -> anyhow::Result<ClientBuilder> {
     let mut builder = Client::builder().await?;
     // The federation family is v2: mintv2 is the primary BTC module. The v1
     // mint client is intentionally not registered (it is not in the v2
@@ -26,6 +21,17 @@ pub async fn build_client(
     // `WalletClientConfig` is per-federation module config delivered through
     // `ClientModuleInitArgs::cfg()`, not a client-builder argument.
     builder.with_module(WalletClientInit::default());
+    Ok(builder)
+}
+
+/// Build a client with the walletv2 module registered.
+pub async fn build_client(
+    db: Database,
+    connectors: ConnectorRegistry,
+    root_secret: RootSecret,
+    invite: InviteCode,
+) -> anyhow::Result<ClientHandleArc> {
+    let builder = configured_builder().await?;
 
     // A restarted process must open the existing client rather than trying to
     // join a fresh one. `ClientBuilder::open` also verifies the root-secret
@@ -49,6 +55,73 @@ pub async fn build_client(
     Ok(Arc::new(client))
 }
 
+/// Restore a client from a mnemonic-derived root secret on a fresh database.
+///
+/// `ClientPreview::recover` runs module recovery but holds recovering modules
+/// out of the registry. `Client::wait_for_all_recoveries` waits for progress;
+/// `ClientHandle::shutdown` then stops the executor/task group, and
+/// `ClientBuilder::open` reopens the same DB so all modules are usable.
+///
+/// The DB must be fresh (no persisted `ClientConfig`); otherwise this is an
+/// ordinary boot and `build_client` should be used.
+pub async fn recover_client(
+    db: Database,
+    connectors: ConnectorRegistry,
+    root_secret: RootSecret,
+    invite: InviteCode,
+) -> anyhow::Result<ClientHandleArc> {
+    let federation_id = invite.federation_id();
+    anyhow::ensure!(
+        Client::get_config_from_db(&db).await.is_none(),
+        "restore requires a fresh client database (existing config found)"
+    );
+
+    let preview = configured_builder()
+        .await?
+        .preview(connectors.clone(), &invite)
+        .await?;
+    anyhow::ensure!(
+        preview.config().calculate_federation_id() == federation_id,
+        "invite federation id does not match preview config"
+    );
+
+    let handle = preview
+        .recover(db.clone(), root_secret.clone(), None)
+        .await?;
+    anyhow::ensure!(
+        handle.federation_id() == federation_id,
+        "recovered client federation id mismatch"
+    );
+
+    handle.wait_for_all_recoveries().await?;
+    let all_modules_usable_while_recovering = handle.all_modules_usable();
+
+    // Modules held back during recovery become usable only after reopening.
+    // Explicit shutdown stops the executor and joins the client task group
+    // (bounded at 30 s) before the same DB is reopened.
+    handle.shutdown().await;
+
+    let reopened = configured_builder()
+        .await?
+        .open(connectors, db, root_secret)
+        .await?;
+    anyhow::ensure!(
+        reopened.federation_id() == federation_id,
+        "reopened client federation id mismatch"
+    );
+    anyhow::ensure!(
+        reopened.all_modules_usable(),
+        "recovery finished, but some modules are still unavailable after reopen"
+    );
+    tracing::debug!(
+        %federation_id,
+        all_modules_usable_while_recovering,
+        "client recovery completed and reopened"
+    );
+    Ok(Arc::new(reopened))
+}
+
+/// Read the per-federation walletv2 client config from the joined client.
 /// Read the per-federation walletv2 client config from the joined client.
 ///
 /// `WalletClientInit` is a unit struct, so `WalletClientInit::default()` is
