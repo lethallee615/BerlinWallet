@@ -5,6 +5,7 @@
 //! Operation-log lookups that the plan glosses over are explicit stubs (see
 //! COMPILE.md).
 
+pub mod backup;
 pub mod bdk;
 pub mod client;
 pub mod deposit;

@@ -2,10 +2,11 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bdk_esplora::EsploraAsyncExt;
+pub use bdk_wallet::KeychainKind;
 use bdk_wallet::descriptor::IntoWalletDescriptor;
 use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::signer::{SignOptions, SignersContainer};
-use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
+use bdk_wallet::{PersistedWallet, Wallet};
 use bitcoin::Network;
 use bitcoin::bip32::Xpriv;
 
@@ -151,7 +152,8 @@ impl BdkWallet {
         anyhow::ensure!(finalized, "BDK could not finalize the PSBT");
 
         let tx = psbt.extract_tx()?;
-        self.broadcast(&tx).await?;
+        let esplora_url = self.esplora_url.clone();
+        Self::broadcast_url(&esplora_url, &tx).await?;
         let last_seen = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -199,8 +201,8 @@ impl BdkWallet {
         Ok(())
     }
 
-    async fn broadcast(&self, tx: &bitcoin::Transaction) -> anyhow::Result<()> {
-        let client = bdk_esplora::esplora_client::Builder::new(&self.esplora_url).build_async()?;
+    async fn broadcast_url(esplora_url: &str, tx: &bitcoin::Transaction) -> anyhow::Result<()> {
+        let client = bdk_esplora::esplora_client::Builder::new(esplora_url).build_async()?;
         tokio::time::timeout(ESPLORA_TIMEOUT, client.broadcast(tx))
             .await
             .map_err(|_| anyhow::anyhow!("Esplora broadcast timed out"))??;

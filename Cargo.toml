@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/berlin-wallet-core", "crates/berlin-wallet-cli"]
+members = ["crates/berlin-wallet-core", "crates/berlin-wallet-cli", "crates/berlin-wallet-ffi"]
 
 [patch.crates-io]
 fedimint-aead = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }

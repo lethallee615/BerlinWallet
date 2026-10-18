@@ -431,6 +431,13 @@ impl JournalBackend for DbJournal {
             .collect())
     }
 
+    async fn deposits_all(&self) -> anyhow::Result<Vec<DepositRow>> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let rows = scan_deposits(&mut dbtx).await?;
+        dbtx.commit_tx_result().await?;
+        Ok(rows)
+    }
+
     async fn deposit_funding_txid(&self, id: &DepositId) -> anyhow::Result<Option<bitcoin::Txid>> {
         let mut dbtx = self.db.begin_transaction().await;
         let row = get_deposit(&mut dbtx, id).await?;

@@ -232,6 +232,7 @@ pub trait JournalBackend: Send + Sync {
     async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<DepositRow>;
     async fn deposit(&self, id: &DepositId) -> anyhow::Result<Option<DepositRow>>;
     async fn deposits_in(&self, states: &[DepositState]) -> anyhow::Result<Vec<DepositRow>>;
+    async fn deposits_all(&self) -> anyhow::Result<Vec<DepositRow>>;
     async fn deposit_funding_txid(&self, id: &DepositId) -> anyhow::Result<Option<bitcoin::Txid>>;
     async fn set_deposit_quoted_fee(
         &self,
@@ -403,6 +404,11 @@ impl JournalBackend for MemoryJournal {
             .filter(|row| states.contains(&row.state))
             .cloned()
             .collect())
+    }
+
+    async fn deposits_all(&self) -> anyhow::Result<Vec<DepositRow>> {
+        let inner = self.inner.lock().await;
+        Ok(inner.deposits.values().cloned().collect())
     }
 
     async fn deposit_funding_txid(&self, id: &DepositId) -> anyhow::Result<Option<bitcoin::Txid>> {

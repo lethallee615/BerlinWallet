@@ -1,0 +1,30 @@
+[package]
+name = "berlin-wallet-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "UniFFI surface for Berlin Wallet."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[features]
+uniffi-bindgen = ["uniffi/cli"]
+
+[dependencies]
+berlin-wallet-core = { path = "../berlin-wallet-core" }
+anyhow = "=1.0.98"
+bitcoin = "=0.32.8"
+fedimint-client = "=0.12.0"
+fedimint-connectors = "=0.12.0"
+fedimint-core = "=0.12.0"
+fedimint-walletv2-client = "=0.12.0"
+fedimint-walletv2-common = "=0.12.0"
+thiserror = "=2.0.18"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+uniffi = { version = "=0.32.0", features = ["tokio"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["uniffi-bindgen"]

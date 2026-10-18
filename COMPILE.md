@@ -2112,3 +2112,87 @@ A devimint/regtest test with bitcoind `invalidateblock` + `generatetoaddress` sh
 
 This is the only way to test the >6-conf finality assumption; it cannot be reproduced with the
 read-only Esplora client.
+
+---
+
+## 33. UniFFI crate (`berlin-wallet-ffi`)
+
+### 33.1 Crate and namespace decision
+
+- `crates/berlin-wallet-ffi`, `crate-type = ["cdylib", "staticlib", "lib"]`.
+- `uniffi = "=0.32.0"`, feature `tokio`.
+- `uniffi::setup_scaffolding!()` — exactly one namespace (`berlin_wallet_ffi`).
+- **Fedimint's own `uniffi` feature is not enabled.** The object stores `ClientHandleArc` directly
+  and uses `Deref<Target = Client>` plus `get_first_module_arc`/`get_first_module`.
+  `ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only and is not needed. This avoids
+  two UniFFI namespaces and the fedimint-client uniffi dependency.
+- `#[derive(uniffi::Object)] PegWallet`; `#[uniffi::export(async_runtime = "tokio")]` impl.
+- `request_deposit` persists `AwaitingAddress` and `tokio::spawn`s `run_address_task`, then returns;
+  the address is observed via `deposit_status`. No synchronous FFI call blocks on network or
+  address derivation. `backup`/`restore_backup` use `spawn_blocking`.
+
+### 33.2 Surface
+
+```rust
+PegWallet::new(data_dir: String) -> Arc<PegWallet>;
+
+init() -> Result<InitView>;
+join(invite_code: String, esplora_url: String) -> Result<WalletInfo>;       // async
+restore(invite_code: String, esplora_url: String) -> Result<RestoreView>;   // async, fresh dir
+restore_backup(source_dir: String, invite_code: String, esplora_url: String)
+    -> Result<WalletInfo>;                                                  // async, retained DB
+backup(destination_dir: String) -> Result<()>;                              // async
+
+request_deposit(amount_sat: u64) -> Result<DepositView>;
+fund_deposit(deposit_id: String) -> Result<DepositView>;
+deposit_status(deposit_id: String) -> Result<DepositView>;
+cancel_deposit(deposit_id: String) -> Result<DepositView>;
+list_deposits() -> Result<Vec<DepositView>>;
+
+request_withdrawal(address: String, amount_sat: u64) -> Result<WithdrawalView>;
+send_withdrawal(withdrawal_id: String) -> Result<WithdrawalView>;
+withdrawal_status(withdrawal_id: String) -> Result<WithdrawalView>;
+cancel_withdrawal(withdrawal_id: String) -> Result<WithdrawalView>;
+list_withdrawals() -> Result<Vec<WithdrawalView>>;
+
+balance_sat() -> Result<u64>;            // BDK trusted_spendable
+ecash_balance_msat() -> Result<u64>;     // mintv2 primary balance
+min_withdrawal_sat() -> Result<u64>;
+```
+
+Records: `InitView`, `WalletInfo`, `DepositView`, `WithdrawalView`, `RestoreView`.
+Enums: `DepositOriginView`, `DepositStateView`, `WithdrawalOriginView`,
+`WithdrawalStateView`.
+One error enum: `PegWalletError::Message { message }` (converts `anyhow`/I/O; no `anyhow` across
+the boundary).
+
+`DepositView.net_credit_msat: Option<u64>`; `None` means pending and the UI must render
+**"pending"**, never 0. `DepositView` also carries `origin`, state, amount, gross, claim fee,
+address, funding txid, operation id, and timestamps.
+
+`RestoreView` includes balances, min withdrawal, `operation_log_empty`,
+`history_unavailable`, journal counts, and BDK last-active external/internal indices.
+
+### 33.3 Smoke test
+
+`scripts/ffi-smoke.sh`:
+
+1. `cargo build -p berlin-wallet-ffi`;
+2. generates Kotlin bindings from `target/debug/libberlin_wallet_ffi.so` with the crate's
+   `uniffi-bindgen` bin (`--features uniffi-bindgen`);
+3. checks the generated `PegWallet` class and `netCreditMsat`/`requestDeposit` surface.
+
+Verified: `ffi smoke ok: cdylib + kotlin bindings (PegWallet/DepositView surface present)`.
+Generated Kotlin methods exactly: `backup`, `balanceSat`, `cancelDeposit`, `cancelWithdrawal`,
+`depositStatus`, `ecashBalanceMsat`, `fundDeposit`, `init`, `join`, `listDeposits`,
+`listWithdrawals`, `minWithdrawalSat`, `requestDeposit`, `requestWithdrawal`, `restore`,
+`restoreBackup`, `sendWithdrawal`, `withdrawalStatus`.
+
+`cargo tree -p berlin-wallet-ffi -e features` shows only the top-level `uniffi` crate/features; no
+fedimint-client `uniffi` feature is enabled.
+
+### 33.4 Tests
+
+- `cargo check --workspace`: exit 0.
+- `cargo test --workspace`: 30 core + 3 CLI + 0 FFI unit tests, exit 0.
+- FFI smoke script: exit 0.
