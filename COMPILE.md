@@ -1879,7 +1879,8 @@ berlin-wallet> berlin-wallet> berlin-wallet> 36402688 msat (36402 sat)
   still have no local row/history (operation log empty).
 - Therefore in-flight funds are **not guaranteed safe across device loss** in 0.12.0. The app must
   either keep the client DB safe (device backup) or prevent/avoid device loss between `send()` and
-  settlement; a mnemonic-only restore is insufficient.
+  settlement; a mnemonic-only restore is insufficient. Requesting a new deposit did not re-claim
+  the stranded UTXO (§30.7).
 
 ### 30.6 Questions for the fedimint dev
 
@@ -1891,3 +1892,67 @@ berlin-wallet> berlin-wallet> berlin-wallet> 36402688 msat (36402 sat)
 3. Is there a supported way to recover history now that backup APIs are deprecated for removal in
    0.13.0? If not, what is the recommended app-level strategy for retaining the operation log and
    journal across device loss?
+
+### 30.7 Re-claim attempt (new deposit after restore)
+
+On the fresh-restore data dir, with the 10,000 sat stranded UTXO still unspent at
+`tb1q44wuvcjuy6s5fkyaljjxshgnmgt04s0dxuzptncxfye3h6khz3yqpeejfu`:
+
+```text
+ecash before: 36402688 msat
+request-deposit 10000
+  deposit 01a14cf3-f75c-7675-ae0e-b0384e27edf3
+  state=AddressShown
+  address=tb1qen7rhvlway2w3q7w6ktykd5g3wz5780jkp5f67c4zkqfdw6wjj3snydtvm
+```
+
+- `receive()` returned a **different** address (`tb1qen7…`), not the stranded
+  `tb1q44…` address.
+- After >100 s of a live client (the walletv2 output scanner runs every 60 s),
+  ecash was still `36,402,688 msat`; the deposit row remained `AddressShown`,
+  `funding_txid=None`, `net_credit=None`.
+- The stranded UTXO remained unspent.
+
+**Conclusion:** simply requesting a new deposit does **not** re-derive the old tweak index or
+re-claim the stranded UTXO in 0.12.0.
+
+### 30.8 What the 0.12.0 walletv2 API allows
+
+Public:
+
+```rust
+WalletClientModule::receive() -> Address
+WalletClientModule::await_receive(position) -> Result<(FinalReceiveOperationState, EventLogId)>
+```
+
+Internal/private:
+
+```rust
+derive_address(index)          // private
+derive_tweak(index)            // private
+valid_index()                  // private
+next_valid_index(start, handle) // private
+receive_output(...)            // private
+spawn_output_scanner(...)      // private
+```
+
+There is no public method to request a specific tweak index, force a rescan from index 0, enumerate
+valid indices, or claim a specific outpoint. The scanner owns an internal `ValidAddressIndexPrefix`
+set and `NextOutputIndexKey`; `receive()` only returns the highest tracked valid index. An app can
+reimplement the derivation from root secret + `WalletClientConfig` (public `descriptor` /
+`is_potential_receive`) and could theoretically manipulate the module DB keys, but that is internal
+DB surgery and constructing the claim still requires the private receive state machine. It is not a
+supported recovery path.
+
+**UX requirement:** after restore, warn that an earlier in-flight deposit may be stranded and must
+be re-claimed; do not discard the original client data, and do not imply that requesting a new
+deposit will recover it.
+
+### 30.9 Additional fedimint-dev questions
+
+1. Is there a supported deposit re-claim/scan path after mnemonic-only restore, or must an app
+   re-derive tweak indices itself?
+2. Is the deposit-address derivation index recoverable from federation state (or only from local
+   client DB state)?
+3. Given backups are deprecated, what is the recommended app-level strategy for retaining the
+   operation log/journal? Should the app export/import its own journal?
