@@ -1046,8 +1046,11 @@ Two sync tasks plus the adoption task (and the fedimint client's internal execut
 - **Height-decreasing reorg guard:** read `Wallet::latest_checkpoint()`, fetch remote tip height/hash
   and `/block-height/{local_height}`; if the remote tip is lower or the hash differs, rebuild a
   fresh BDK DB from the same seed and **full-scan** instead of trusting the incremental update.
-  `bdk_chain::merge_chains` returns an empty changeset for a lower-tip update with agreeing
-  hashes, leaving orphaned anchors confirmed.
+  The scanned temp DB is checkpointed, the temp connection is closed, the file is atomically
+  renamed over the live path, and a **new** `PersistedWallet`/`Connection` is opened against the
+  final path (keeping the old connection would hit SQLite error 1032). The next keychain index is
+  raised to max(rebuilt, previous). `bdk_chain::merge_chains` returns an empty changeset for a
+  lower-tip update with agreeing hashes, leaving orphaned anchors confirmed.
 - **Transient network errors:** connection refused / timeout / DNS are retried 3 times with bounded
   backoff; malformed bodies and 4xx surface normally. The REPL `sync` arm returns errors to the
   loop instead of `?`-ing out of `run`.

@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (36 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (37 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (36 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (37 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (36 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (37 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (36 core tests + 3 CLI tests + 4 FFI tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (37 core tests + 3 CLI tests + 4 FFI tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -2230,7 +2230,7 @@ fedimint-client `uniffi` feature is enabled.
 ### 33.4 Tests
 
 - `cargo check --workspace`: exit 0.
-- `cargo test --workspace`: 36 core + 3 CLI + 4 FFI unit tests, exit 0.
+- `cargo test --workspace`: 37 core + 3 CLI + 4 FFI unit tests, exit 0.
 - FFI smoke script: exit 0.
 
 ---
@@ -2271,13 +2271,19 @@ checkpoint 0..2 with matching hashes → `changeset.blocks.is_empty()` and local
    `Orphaned` if the remote tip is lower or the hash at the local height differs.
 5. If orphaned, **does not run the incremental update**. It calls
    `reset_and_full_scan()` (`bdk.rs:368`): builds a fresh BDK DB from the same seed/descriptors at a
-   temporary path, full-scans, then replaces the old DB. This forces the tip to the remote chain and
-   handles fork points deeper than any partial checkpoint. The old DB is replaced only after the
-   fresh full scan succeeds.
-6. If ancestry is valid, runs the normal partial `bdk_esplora::sync` and persists.
+   temporary path, full-scans, then hands it to `swap_in_scanned_db()` (`bdk.rs:398`).
+6. The handoff checkpoints both SQLite DBs, **closes the temp connection**, drops the old
+   connection, atomically renames the scanned temp file over the final path, and **reopens a new
+   `Connection`/`PersistedWallet` against the final path**. The old connection must not be kept: it
+   still refers to the unlinked old inode and would return SQLite error 1032 on the next write.
+7. The reopened wallet's next derivation index is raised to `max(rebuilt, previous)` for both
+   external and internal keychains (using `next_derivation_index` and `reveal_addresses_to`), so a
+   revealed-but-unused address is never handed out twice.
+8. If ancestry is valid, runs the normal partial `bdk_esplora::sync` and persists.
 
-No on-disk format or journal changes. `BdkWallet` stores its path/seed/network solely to rebuild the
-same descriptors.
+The temp DB is fully scanned and checkpointed before the atomic rename. A crash before the rename
+leaves the old DB intact; a crash after it leaves the new, valid DB. No on-disk format or journal
+changes. `BdkWallet` stores its path/seed/network solely to rebuild the same descriptors.
 
 ### 34.3 Transient error handling
 
@@ -2303,5 +2309,8 @@ returns the error to the loop, which prints it and returns to the prompt. Backgr
 - `bdk::tests::lower_tip_update_is_a_noop_in_bdk`
 - `bdk::tests::http_4xx_is_a_permanent_sync_error`
 - `bdk::tests::malformed_body_is_a_permanent_sync_error`
+- `bdk::tests::swap_reopens_connection_and_preserves_next_index` (unit regression: open DB, swap
+  in a scanned temp DB, write on the same `BdkWallet`; asserts no SQLite 1032 and next index does
+  not regress)
 
-`cargo check --workspace`: exit 0. `cargo test --workspace`: 36 core + 3 CLI + 4 FFI tests pass.
+`cargo check --workspace`: exit 0. `cargo test --workspace`: 37 core + 3 CLI + 4 FFI tests pass.

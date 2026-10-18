@@ -385,14 +385,61 @@ impl BdkWallet {
             return Err(err);
         }
 
-        // Drop the old connection before replacing the DB files.
+        self.swap_in_scanned_db(fresh)
+    }
+
+    /// Replace this wallet's DB with an already-scanned temp DB.
+    ///
+    /// The SQLite connection follows the inode, so the temp connection must be
+    /// closed before the rename and a new connection opened against the final
+    /// path. Both DBs are checkpointed first; the final rename is atomic. On a
+    /// crash before the rename the old DB is intact; after the rename the new
+    /// (fully scanned) DB is valid.
+    fn swap_in_scanned_db(&mut self, temp: BdkWallet) -> anyhow::Result<()> {
+        let previous_external = self.wallet().next_derivation_index(KeychainKind::External);
+        let previous_internal = self.wallet().next_derivation_index(KeychainKind::Internal);
+        let temp_path = temp.path.clone();
+
+        // Flush both WALs and close the temp connection before touching files.
+        temp.checkpoint()?;
+        drop(temp);
+        self.checkpoint()?;
         self.wallet = None;
         self.persister = None;
-        remove_sqlite_files(&self.path);
+
+        remove_sqlite_sidecars(&self.path);
         std::fs::rename(&temp_path, &self.path)?;
         rename_sqlite_sidecars(&temp_path, &self.path);
-        fresh.path = self.path.clone();
-        *self = fresh;
+
+        // Rebuild the Wallet against the new inode/connection.
+        let mut reopened = Self::open_or_create(
+            &self.path,
+            &self.seed,
+            self.network,
+            self.esplora_url.clone(),
+        )?;
+
+        // Never hand out a previously revealed-but-unused index again.
+        let rebuilt_external = reopened
+            .wallet()
+            .next_derivation_index(KeychainKind::External);
+        if rebuilt_external < previous_external {
+            for _ in reopened
+                .wallet_mut()
+                .reveal_addresses_to(KeychainKind::External, previous_external - 1)
+            {}
+        }
+        let rebuilt_internal = reopened
+            .wallet()
+            .next_derivation_index(KeychainKind::Internal);
+        if rebuilt_internal < previous_internal {
+            for _ in reopened
+                .wallet_mut()
+                .reveal_addresses_to(KeychainKind::Internal, previous_internal - 1)
+            {}
+        }
+        reopened.persist()?;
+        *self = reopened;
         Ok(())
     }
 
@@ -401,6 +448,14 @@ impl BdkWallet {
         tokio::time::timeout(ESPLORA_TIMEOUT, client.broadcast(tx))
             .await
             .map_err(|_| anyhow::anyhow!("Esplora broadcast timed out"))??;
+        Ok(())
+    }
+
+    fn checkpoint(&self) -> anyhow::Result<()> {
+        self.persister
+            .as_ref()
+            .expect("BDK persister is present")
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
     }
 
@@ -418,6 +473,10 @@ impl BdkWallet {
 
 fn remove_sqlite_files(path: &Path) {
     let _ = std::fs::remove_file(path);
+    remove_sqlite_sidecars(path);
+}
+
+fn remove_sqlite_sidecars(path: &Path) {
     let _ = std::fs::remove_file(sqlite_sidecar(path, "-wal"));
     let _ = std::fs::remove_file(sqlite_sidecar(path, "-shm"));
 }
@@ -483,6 +542,41 @@ mod tests {
         let error =
             bdk_esplora::esplora_client::Error::Parsing("not-a-number".parse::<u32>().unwrap_err());
         assert!(!is_transient_esplora(&error));
+    }
+
+    #[test]
+    fn swap_reopens_connection_and_preserves_next_index() {
+        let base =
+            std::env::temp_dir().join(format!("berlin-wallet-bdk-swap-{}", uuid::Uuid::now_v7()));
+        let source_path = base.join("source.sqlite");
+        let temp_path = base.join("temp.sqlite");
+        let seed = [0x44u8; 64];
+        let url = "http://127.0.0.1:1";
+
+        let mut wallet =
+            BdkWallet::open_or_create(&source_path, &seed, Network::Regtest, url).unwrap();
+        wallet.reveal_destination().unwrap();
+        wallet.reveal_destination().unwrap();
+        let previous = wallet
+            .wallet()
+            .next_derivation_index(KeychainKind::External);
+
+        let temp = BdkWallet::open_or_create(&temp_path, &seed, Network::Regtest, url).unwrap();
+        wallet.swap_in_scanned_db(temp).expect("swap");
+
+        assert!(
+            wallet
+                .wallet()
+                .next_derivation_index(KeychainKind::External)
+                >= previous,
+            "next index must not regress"
+        );
+        // This is the regression: the old connection pointed at the removed
+        // inode and returned SQLite error 1032 on this write.
+        wallet
+            .reveal_destination()
+            .expect("write on the reopened connection");
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
