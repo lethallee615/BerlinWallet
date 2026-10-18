@@ -2045,3 +2045,70 @@ mnemonic-only restore leaves older funded deposit indices unreachable.**
    DB state?
 4. Given backups are deprecated, what is the recommended app-level strategy for retaining the
    operation log/journal? Should the app export/import its own full data directory?
+
+---
+
+## 32. Reorg handling decision
+
+### 32.1 Source findings
+
+**Deposits — walletv2 server/client:**
+- `CONFIRMATION_FINALITY_DELAY = 6` (`walletv2-server/src/lib.rs:95`). Block-count votes are
+  `tip − 6`; `process_block_count` requires a strictly higher per-peer vote and asserts the
+  consensus count never decreases (`old <= new`).
+- Potential receive outputs are appended to an append-only `OutputPrefix` log while scanning those
+  finalized blocks. There is no rollback path for a reorg that removes/renumbers a block.
+- `ReceiveStateMachine` only awaits `await_tx_accepted(txid)` and then enters `Success`
+  (`walletv2-client/src/receive_sm.rs`). It does **not** track Bitcoin confirmations or unconfirm.
+- The server keeps `UnconfirmedTx` entries and rebroadcasts them in the background. So a claim tx
+  can be accepted and later reorged out of the active chain; it is rebroadcast, not reflected as a
+  client state transition.
+- A reorg deeper than the 6-block finality assumption is outside 0.12.0's server rollback model;
+  the append-only output log and monotonic block count cannot repair it.
+
+**Withdrawals — walletv2 `SendStateMachine`:**
+- `await_funding` waits for `await_tx_accepted(outpoint.txid)` then calls the federation `tx_id`
+  API; that becomes `FinalSendOperationState::Success(txid)`.
+- This is **broadcast/acceptance-only**, not confirmation. No confirmation height or reorg watch is
+  represented. The recipient chain/BDK owns confirmation tracking; the federation rebroadcasts
+  unconfirmed txs.
+
+**BDK:**
+- `Wallet::apply_update` / `LocalChain::apply_update` uses `merge_chains`
+  (`bdk_chain-0.23.3/src/local_chain.rs:560`). On a competing checkpoint it invalidates blocks above
+  the point of agreement and updates the tip; `TxGraph` keeps the tx and updates its anchor. The
+  on-chain wallet self-corrects its confirmed/unconfirmed balance.
+
+### 32.2 States required
+
+**None.** There are no `Reorged` variants in `DepositState` or `WithdrawalState`, and none are
+required for the 0.12.0 API/behaviour above. No speculative state was added or removed. The
+existing `Done`/`Broadcast` states represent federation-accepted settlement/broadcast, not Bitcoin
+finality.
+
+### 32.3 What is testable without a controlled chain
+
+- Esplora (`bdk_esplora 0.22.1`) is read-only: no `invalidateblock`, rewind, or chain-reorg API.
+  A deterministic reorg cannot be produced against Mutinynet/Esplora.
+- There is no client reorg transition to unit-test. The existing state tests already cover the
+  terminal `Done`/`Broadcast` paths.
+- A local BDK checkpoint invalidate round-trip would require constructing synthetic `CheckPoint` /
+  `TxUpdate` anchors; not attempted here because the app has no reorg state and the library
+  `merge_chains` path is already source-verified. (The esplora crate cannot drive it.)
+
+### 32.4 Deterministic devimint test (needed)
+
+A devimint/regtest test with bitcoind `invalidateblock` + `generatetoaddress` should cover:
+
+1. Fund a deposit, mine past the 6-block finality window, then invalidate the deposit/claim block
+   and mine an alternate chain. Assert how walletv2's monotonic block count and append-only output
+   log behave, whether the claim is re-observed/re-broadcast, and whether the ecash balance is
+   credited or remains/returns.
+2. Broadcast a withdrawal, mine it, invalidate its block, and mine an alternate chain. Assert the
+   federation rebroadcasts the `UnconfirmedTx`, the client stays `Broadcast { txid }`, and BDK
+   updates the destination/confirmation state.
+3. Reorg through BDK's own sync path (checkpoint rollback) and assert confirmed/unconfirmed balance
+   self-correction.
+
+This is the only way to test the >6-conf finality assumption; it cannot be reproduced with the
+read-only Esplora client.

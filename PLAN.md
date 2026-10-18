@@ -682,6 +682,26 @@ pub enum WithdrawalState {
 Transient errors do **not** advance the state: the row stays `AwaitingAddress`/`AddressShown` or
 `Quoting`/`Submitted` and is retried on boot.
 
+**Reorg policy (0.12.0): no explicit `Reorged` state is required, and none exists.**
+
+- **Deposits:** walletv2's server scans only blocks up to `tip − CONFIRMATION_FINALITY_DELAY` (6)
+  and appends potential receives to an append-only output log. `FinalReceiveOperationState::Success`
+  means the **claim transaction was accepted into federation consensus**, not that it is confirmed.
+  The server rebroadcasts `UnconfirmedTx` entries; the client has no unconfirm/reorg transition.
+  A reorg deeper than the federation's 6-block finality assumption is **not rolled back** by 0.12.0
+  (block-count votes are monotonic and the output log is append-only); no client state can repair
+  that, so do not add a speculative `Reorged` row.
+- **Withdrawals:** `FinalSendOperationState::Success(txid)` comes from `await_tx_accepted` plus the
+  federation's `tx_id`; it is **broadcast/acceptance-only**, not confirmation. The recipient chain
+  and BDK handle confirmations/reorgs; the server rebroadcasts unconfirmed txs. The journal needs no
+  confirmation or `Reorged` state.
+- **BDK:** `Wallet::apply_update` feeds a `CheckPoint` into `LocalChain::apply_update`; `merge_chains`
+  invalidates blocks above the point of agreement and updates the tip, so the on-chain wallet
+  self-corrects on a reorg. `TxGraph` retains the transaction and updates its confirmation anchor.
+  No app-level reorg state is needed.
+
+There are **no `Reorged` variants** in `DepositState`/`WithdrawalState`; nothing to remove.
+
 **Terminal vs retryable (explicit).**
 - *Retryable*: timeouts, transport/federation-unreachable errors, `TryAgain`/storage-busy, and
   `FinalReceiveOperationState::Aborted` claims (reprocessed under a new receive op).
@@ -963,6 +983,12 @@ adopted elsewhere.
   gap larger than 20 and miss older funds. Consider 25–50 or make the gap configurable per
   restore/network before shipping. Do not expect the local application journal to be restored —
   it is not federation state.
+- **Reorg/finality (devimint only):** a deterministic reorg test needs a local regtest bitcoind with
+  `invalidateblock`; the Esplora client is read-only and provides no invalidate/rewind API. Build a
+  deposit and a withdrawal, mine, invalidate the containing block, mine an alternate chain, and
+  assert (i) walletv2's monotonic block-count/append-only output behavior, (ii) unconfirmed-tx
+  rebroadcast for both send and claim, and (iii) BDK's checkpoint rollback/confirmation update.
+  This covers the >6-conf finality assumption; it cannot be reproduced against Mutinynet/Esplora.
 - **Directory backup:** run `backup` with the app stopped, import with `restore-backup` into an
   empty dir, and assert the imported tree opens with the same identity/client state, the same BDK
   balance and next address, and includes `bdk.sqlite-wal`/`-shm` plus the full RocksDB directory
