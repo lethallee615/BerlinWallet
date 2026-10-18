@@ -160,6 +160,8 @@ pub async fn fund_deposit(
     let tx = wallet.build_and_finalize(&destination, row.amount).await?;
     let txid = tx.compute_txid();
     journal.set_deposit_funding_txid(id, txid).await?;
+    // Debug-only crash point for the in-flight deposit restore matrix.
+    crate::fault::crash_point("after_deposit_broadcast");
     Ok(txid)
 }
 

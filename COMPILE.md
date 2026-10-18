@@ -1729,6 +1729,9 @@ live test (it needs the federation).
   application history starts empty; on-chain history is re-derived by the BDK full scan and
   federation operations by operation-log scanners. Withdrawal Send adoption covers a retained
   operation log; in a fresh 0.12.0 recover the operation log itself was empty (§29.4).
+- **Post-restore UI:** empty deposit/withdrawal lists are **by design**, not an empty-activity
+  state. Show the recovered balances plus a banner such as "History unavailable after restore —
+  balances recovered". Old row ids are not recoverable from federation state.
 - **Backups are not used** (`Option<ClientBackup> = None`); backup APIs are deprecated in 0.12.0.
 - **Only registered modules recover.** `mintv2` and `walletv2` are registered; `lnv2`/`meta` are
   intentionally not, so they are skipped by recovery.
@@ -1806,3 +1809,85 @@ recover.
 
 Also note: `stop_gap = 20` in the BDK restore is a **floor**. A wallet that revealed unused
 addresses can have a larger gap and miss historical funds; consider 25–50 or make it configurable.
+See §30 for the live in-flight deposit/withdrawal restore result: neither is resumed.
+
+---
+
+## 30. In-flight operations across a fresh restore (live experiment)
+
+### 30.1 Setup
+
+- Source client data copied from `/tmp/opencode/berlin-join` to
+  `/tmp/opencode/berlin-inflight`. Baseline: ecash `36,402,688 msat`, BDK `0.00059473 BTC`.
+- The fresh restore used `/tmp/opencode/berlin-inflight-restore` containing only the original
+  mnemonic.
+
+### 30.2 Deposit killed after funding broadcast
+
+```text
+deposit 01a14ceb-a66b-716d-82e5-313985b40d26
+address tb1q44wuvcjuy6s5fkyaljjxshgnmgt04s0dxuzptncxfye3h6khz3yqpeejfu
+funding tx 1922343bbf09515b698f3441ed1eb4971d24b728e613c1d03c3c7bde07d2a5e1 (vout 0, 10000 sat)
+BERLIN_WALLET_CRASH_POINT=after_deposit_broadcast -> exit 134
+```
+
+The funding transaction was confirmed (block `3514519`). After the fresh restore, the deposit
+address UTXO was **still unspent** and the restored ecash balance was unchanged at
+`36,402,688 msat`. The deposit was **not resumed and not credited**.
+
+### 30.3 Withdrawal killed after `send()` before completion
+
+```text
+withdraw tb1qav6qxadyxh3pcndq788fzk79njhwvc3eycmgkf 10000
+BERLIN_WALLET_CRASH_POINT=after_send -> exit 134
+```
+
+No new transaction appeared at the destination address after >2 minutes. The fresh restore
+reported ecash `36,402,688 msat` — unchanged. There was no resumption and no on-chain withdrawal.
+
+### 30.4 Fresh restore result
+
+```text
+restore federation id: 05d83c302c5acff9c8e28d22cefa8b3eeaacbfddea0bd2d602e1972318013936
+restore client identity: f306ff2e35e596e172b8c28393164e2a28619c6299096df37562e7dd7d161ace
+restore modules usable: true
+restore ecash balance: 36402688 msat (36402 sat)
+restore bdk full scan last active: [(External, 11), (Internal, 3)]
+restore bdk balance: { immature: 0 BTC, trusted_pending: 0 BTC, untrusted_pending: 0 BTC, confirmed: 0.00049252 BTC }
+restore assertions: ok
+```
+
+BDK dropped from `0.00059473` to `0.00049252 BTC` — exactly the 10,000 sat deposit plus the 221 sat
+funding fee. The deposit is on-chain at the federation deposit address, but the fresh client has no
+operation/row to claim it.
+
+`operations`, `list-withdrawals`, and the fresh journal were empty:
+
+```text
+berlin-wallet> berlin-wallet> berlin-wallet> 36402688 msat (36402 sat)
+```
+
+### 30.5 Conclusion
+
+**fedimint-client 0.12.0 does not resume in-flight operations on a fresh recover.**
+
+- Deposit funded but not claimed → funding is unspent at the federation address; fresh restore
+  does not claim or credit it. Recovering it requires the retained client DB (operation log/module
+  state) or a supported history mechanism.
+- Withdrawal sent but not completed → no on-chain tx in this test; ecash was unchanged after
+  restore. If a withdrawal had already broadcast, recovery would restore the reduced balance but
+  still have no local row/history (operation log empty).
+- Therefore in-flight funds are **not guaranteed safe across device loss** in 0.12.0. The app must
+  either keep the client DB safe (device backup) or prevent/avoid device loss between `send()` and
+  settlement; a mnemonic-only restore is insufficient.
+
+### 30.6 Questions for the fedimint dev
+
+1. Does 0.12.0 recovery intend to resume in-flight operations, or only rebuild settled module
+   state? Our live test says it does not resume either a funded-unclaimed deposit or a
+   sent-incomplete withdrawal.
+2. Is the operation log supposed to be restored? It is empty after a fresh recover, which removes
+   all local history and makes orphan adoption impossible unless the client DB is retained.
+3. Is there a supported way to recover history now that backup APIs are deprecated for removal in
+   0.13.0? If not, what is the recommended app-level strategy for retaining the operation log and
+   journal across device loss?
