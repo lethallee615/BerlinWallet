@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -143,12 +144,12 @@ pub struct WithdrawalView {
     pub origin: WithdrawalOriginView,
     pub state: WithdrawalStateView,
     pub address: String,
-    pub value_sat: u64,
+    pub recipient_amount_sat: u64,
     pub quoted_fee_sat: Option<u64>,
     pub quote_input_msat: Option<u64>,
     pub quote_output_msat: Option<u64>,
     pub quote_dust_msat: Option<u64>,
-    pub net_msat: Option<u64>,
+    pub total_debit_msat: Option<u64>,
     pub operation_id: Option<String>,
     pub txid: Option<String>,
     pub custom_meta: String,
@@ -189,6 +190,7 @@ pub struct PegWallet {
     data_dir: PathBuf,
     inner: Mutex<Option<WalletState>>,
     shutdown: StdMutex<Option<watch::Sender<bool>>>,
+    closed: AtomicBool,
 }
 
 impl Drop for PegWallet {
@@ -209,12 +211,14 @@ impl PegWallet {
             data_dir: PathBuf::from(data_dir),
             inner: Mutex::new(None),
             shutdown: StdMutex::new(None),
+            closed: AtomicBool::new(false),
         })
     }
 
     /// Create/load the mnemonic. This is local-only and fast; joining or
     /// restoring is a separate async call.
     pub fn init(&self) -> Result<InitView> {
+        self.ensure_open()?;
         std::fs::create_dir_all(&self.data_dir)?;
         let mnemonic_path = self.data_dir.join("mnemonic");
         seed::load_or_create_mnemonic(&mnemonic_path)?;
@@ -226,6 +230,7 @@ impl PegWallet {
 
     /// Join (or open) a federation using this data directory.
     pub async fn join(&self, invite_code: String, esplora_url: String) -> Result<WalletInfo> {
+        self.ensure_open()?;
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
         }
@@ -275,12 +280,14 @@ impl PegWallet {
     /// Open an existing wallet without an invite. Use this on app restart when
     /// the data directory already contains a joined client.
     pub async fn open(&self, esplora_url: String) -> Result<WalletInfo> {
+        self.ensure_open()?;
         self.open_existing(esplora_url, None).await
     }
 
     /// Restore a fresh data directory from the mnemonic. This performs the
     /// 0.12.0 recover/wait/shutdown/reopen flow and a full BDK scan.
     pub async fn restore(&self, invite_code: String, esplora_url: String) -> Result<RestoreView> {
+        self.ensure_open()?;
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
         }
@@ -364,6 +371,7 @@ impl PegWallet {
         invite_code: String,
         esplora_url: String,
     ) -> Result<WalletInfo> {
+        self.ensure_open()?;
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
         }
@@ -379,6 +387,7 @@ impl PegWallet {
 
     /// Full-directory backup. Fails loudly if the client DB is live.
     pub async fn backup(&self, destination_dir: String) -> Result<()> {
+        self.ensure_open()?;
         let source = self.data_dir.clone();
         let destination = PathBuf::from(destination_dir);
         tokio::task::spawn_blocking(move || backup::backup_data_dir(&source, &destination))
@@ -391,6 +400,9 @@ impl PegWallet {
     /// DB lock. Mobile MUST call this when backgrounding; otherwise backup will
     /// fail with "database is locked".
     pub async fn shutdown(&self) -> Result<()> {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         let state = {
             let mut guard = self.inner.lock().await;
             guard.take()
@@ -429,6 +441,7 @@ impl PegWallet {
     /// background address task writes the address, which is polled via
     /// `deposit_status`.
     pub async fn request_deposit(&self, amount_sat: u64) -> Result<DepositView> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let row = deposit::request_deposit(
@@ -453,6 +466,7 @@ impl PegWallet {
     }
 
     pub async fn fund_deposit(&self, deposit_id: String) -> Result<DepositView> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let module = state
@@ -477,6 +491,7 @@ impl PegWallet {
     }
 
     pub async fn deposit_status(&self, deposit_id: String) -> Result<DepositView> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let row = state
@@ -488,6 +503,7 @@ impl PegWallet {
     }
 
     pub async fn cancel_deposit(&self, deposit_id: String) -> Result<DepositView> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let id = DepositId(deposit_id);
@@ -504,6 +520,7 @@ impl PegWallet {
     }
 
     pub async fn list_deposits(&self) -> Result<Vec<DepositView>> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         Ok(state
@@ -520,6 +537,7 @@ impl PegWallet {
         address: String,
         amount_sat: u64,
     ) -> Result<WithdrawalView> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let min = min_withdrawal_sat(&state.client).await?;
@@ -540,6 +558,7 @@ impl PegWallet {
     }
 
     pub async fn send_withdrawal(&self, withdrawal_id: String) -> Result<WithdrawalView> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let id = WithdrawalId(withdrawal_id);
@@ -553,6 +572,7 @@ impl PegWallet {
     }
 
     pub async fn withdrawal_status(&self, withdrawal_id: String) -> Result<WithdrawalView> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let row = state
@@ -564,6 +584,7 @@ impl PegWallet {
     }
 
     pub async fn cancel_withdrawal(&self, withdrawal_id: String) -> Result<WithdrawalView> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let id = WithdrawalId(withdrawal_id);
@@ -580,6 +601,7 @@ impl PegWallet {
     }
 
     pub async fn list_withdrawals(&self) -> Result<Vec<WithdrawalView>> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         Ok(state
@@ -592,6 +614,7 @@ impl PegWallet {
     }
 
     pub async fn balance_sat(&self) -> Result<u64> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         Ok(state
@@ -604,6 +627,7 @@ impl PegWallet {
     }
 
     pub async fn ecash_balance_msat(&self) -> Result<u64> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         Ok(state
@@ -614,6 +638,7 @@ impl PegWallet {
     }
 
     pub async fn min_withdrawal_sat(&self) -> Result<u64> {
+        self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         min_withdrawal_sat(&state.client)
@@ -623,6 +648,15 @@ impl PegWallet {
 }
 
 impl PegWallet {
+    fn ensure_open(&self) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(err(
+                "wallet instance is shut down; create a new PegWallet and call open()",
+            ));
+        }
+        Ok(())
+    }
+
     async fn install_state(&self, mut state: WalletState) -> Result<()> {
         let mut guard = self.inner.lock().await;
         if guard.is_some() {
@@ -782,7 +816,7 @@ fn quote_unit_msat(
     amounts.get(&AmountUnit::BITCOIN).map(|amount| amount.msats)
 }
 
-fn withdrawal_net_msat(row: &WithdrawalRow) -> Option<u64> {
+fn withdrawal_total_debit_msat(row: &WithdrawalRow) -> Option<u64> {
     let fee = row.fee?;
     let quote = row.quote.as_ref()?;
     let quote_fee_msat = quote_unit_msat(&quote.input).unwrap_or(0)
@@ -811,12 +845,12 @@ fn withdrawal_view(row: &WithdrawalRow) -> WithdrawalView {
             WithdrawalState::Cancelled => WithdrawalStateView::Cancelled,
         },
         address: row.address.clone(),
-        value_sat: row.value.to_sat(),
+        recipient_amount_sat: row.value.to_sat(),
         quoted_fee_sat: row.fee.map(|a| a.to_sat()),
         quote_input_msat: row.quote.as_ref().and_then(|q| quote_unit_msat(&q.input)),
         quote_output_msat: row.quote.as_ref().and_then(|q| quote_unit_msat(&q.output)),
         quote_dust_msat: row.quote.as_ref().and_then(|q| quote_unit_msat(&q.dust)),
-        net_msat: withdrawal_net_msat(row),
+        total_debit_msat: withdrawal_total_debit_msat(row),
         operation_id: row.operation_id.map(|id| id.fmt_full().to_string()),
         txid: row.txid.map(|t| t.to_string()),
         custom_meta: row.custom_meta.clone(),
@@ -847,9 +881,28 @@ mod tests {
             "tb1q".to_owned(),
             Amount::from_sat(10_000),
         );
-        assert_eq!(withdrawal_net_msat(&row), None);
-        assert_eq!(withdrawal_view(&row).net_msat, None);
+        assert_eq!(withdrawal_total_debit_msat(&row), None);
+        assert_eq!(withdrawal_view(&row).total_debit_msat, None);
         assert_eq!(withdrawal_view(&row).quoted_fee_sat, None);
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_terminal_and_methods_error_not_panic() {
+        let wallet = PegWallet::new(std::env::temp_dir().to_string_lossy().into_owned());
+        wallet.shutdown().await.expect("first shutdown");
+        let error = wallet.init().expect_err("init after shutdown");
+        assert!(error.to_string().contains("create a new PegWallet"));
+        let error = wallet
+            .balance_sat()
+            .await
+            .expect_err("balance after shutdown");
+        assert!(error.to_string().contains("create a new PegWallet"));
+        let error = wallet
+            .open("http://127.0.0.1:1".to_owned())
+            .await
+            .expect_err("open after shutdown");
+        assert!(error.to_string().contains("create a new PegWallet"));
+        wallet.shutdown().await.expect("idempotent shutdown");
     }
 
     #[tokio::test]
@@ -884,12 +937,12 @@ mod tests {
             )]
             .into(),
         });
-        assert_eq!(withdrawal_net_msat(&row), Some(10_334_000));
+        assert_eq!(withdrawal_total_debit_msat(&row), Some(10_334_000));
         let view = withdrawal_view(&row);
         assert_eq!(view.quoted_fee_sat, Some(234));
         assert_eq!(view.quote_input_msat, Some(50_000));
         assert_eq!(view.quote_output_msat, Some(40_000));
         assert_eq!(view.quote_dust_msat, Some(10_000));
-        assert_eq!(view.net_msat, Some(10_334_000));
+        assert_eq!(view.total_debit_msat, Some(10_334_000));
     }
 }

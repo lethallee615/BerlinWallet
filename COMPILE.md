@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 3 CLI tests + 3 FFI tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 3 CLI tests + 4 FFI tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -2182,13 +2182,16 @@ quoted_fee_sat       on-chain send_fee at quote time
 quote_input_msat     FeeQuote.input BTC amount
 quote_output_msat    FeeQuote.output BTC amount
 quote_dust_msat      FeeQuote.dust BTC amount
-net_msat             value + quoted_fee + federation quote fees
+total_debit_msat      recipient_amount + quoted_fee + federation quote fees (TOTAL DEBIT, not net)
+recipient_amount_sat  amount the recipient gets (withdrawal value)
 ```
 
 `request_withdrawal` quotes and persists while `Quoting`; the UI must display these and require
-explicit confirmation before `send_withdrawal`. `send_withdrawal` re-quotes immediately before
-send and compares to the persisted quote. On drift it persists the new quote and returns an error;
-the UI must re-display and re-confirm.
+explicit confirmation before `send_withdrawal`. `total_debit_msat` is the total debit, not a net
+amount; fees Y are `quoted_fee_sat` plus quote components (equivalently
+`total_debit_msat − recipient_amount_sat`). `send_withdrawal` re-quotes immediately before send and
+compares to the persisted quote. On drift it persists the new quote and returns an error; the UI
+must re-display and re-confirm.
 
 ### 33.2.1 Open/shutdown contract
 
@@ -2198,10 +2201,12 @@ the UI must re-display and re-confirm.
 - `join(invite, esplora_url)` is fresh-join only and errors if a client config already exists.
 - `restore` is mnemonic-only fresh recovery; `restore_backup` imports the full directory and opens
   the retained client DB (verifying the invite's federation id).
-- `shutdown()` takes the state, sends the watch shutdown signal, waits up to 5 s per task and aborts
-  stragglers, then consumes `ClientHandle` via `ClientHandle::shutdown` to stop the executor/task
-  group. Mobile MUST call it on backgrounding; otherwise the DB stays locked and `backup` fails
-  with `database is locked`.
+- `shutdown()` is **terminal for that instance**: it sets a closed flag, takes the state, sends the
+  watch shutdown signal, waits up to 5 s per task and aborts stragglers, then consumes `ClientHandle`
+  via `ClientHandle::shutdown` to stop the executor/task group. Every other method after shutdown
+  returns an error (no panic); construct a new `PegWallet` and call `open()` to resume. Mobile MUST
+  call it on backgrounding; otherwise the DB stays locked and `backup` fails with
+  `database is locked`.
 
 ### 33.3 Smoke test
 
@@ -2210,9 +2215,10 @@ the UI must re-display and re-confirm.
 1. `cargo build -p berlin-wallet-ffi`;
 2. generates Kotlin bindings from `target/debug/libberlin_wallet_ffi.so` with the crate's
    `uniffi-bindgen` bin (`--features uniffi-bindgen`);
-3. checks the generated `PegWallet` class and `netCreditMsat`/`requestDeposit` surface.
+3. checks the generated `PegWallet` class, `open`/`shutdown`, and
+   `netCreditMsat`/`requestDeposit`/`quotedFeeSat`/`totalDebitMsat`/`recipientAmountSat` surface.
 
-Verified: `ffi smoke ok: cdylib + kotlin bindings (PegWallet/DepositView surface present)`.
+Verified: `ffi smoke ok: cdylib + kotlin bindings (PegWallet/DepositView/WithdrawalView surface present)`.
 Generated Kotlin methods exactly: `backup`, `balanceSat`, `cancelDeposit`, `cancelWithdrawal`,
 `depositStatus`, `ecashBalanceMsat`, `fundDeposit`, `init`, `join`, `listDeposits`,
 `listWithdrawals`, `minWithdrawalSat`, `open`, `requestDeposit`, `requestWithdrawal`, `restore`,
@@ -2224,5 +2230,5 @@ fedimint-client `uniffi` feature is enabled.
 ### 33.4 Tests
 
 - `cargo check --workspace`: exit 0.
-- `cargo test --workspace`: 30 core + 3 CLI + 3 FFI unit tests, exit 0.
+- `cargo test --workspace`: 30 core + 3 CLI + 4 FFI unit tests, exit 0.
 - FFI smoke script: exit 0.

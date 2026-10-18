@@ -1195,7 +1195,7 @@ pub struct DepositView {
 ```
 
 `WithdrawalView` carries `origin`, state (including `Broadcast`), value, `quoted_fee_sat`, the
-three quote components, `net_msat`, `operation_id`, `txid`, `custom_meta`, error, and timestamps.
+three quote components, `total_debit_msat`, `operation_id`, `txid`, `custom_meta`, error, and timestamps.
 
 ### 6.3 Open / join / restore contract
 
@@ -1211,7 +1211,9 @@ three quote components, `net_msat`, `operation_id`, `txid`, `custom_meta`, error
 
 ### 6.4 Shutdown contract (mobile)
 
-`shutdown()` must be called when the app is backgrounded. It:
+`shutdown()` must be called when the app is backgrounded. It is **terminal for that instance**:
+after it returns, every other method returns an error instead of panicking; construct a new
+`PegWallet` and call `open()` to resume. It:
 
 1. removes the wallet state (no new commands),
 2. sends the shared watch shutdown signal to the BDK/fedimint/adoption tasks,
@@ -1232,11 +1234,14 @@ quoted_fee_sat       on-chain send_fee at quote time
 quote_input_msat     FeeQuote.input BTC amount
 quote_output_msat    FeeQuote.output BTC amount
 quote_dust_msat      FeeQuote.dust BTC amount
-net_msat             value + quoted_fee + federation quote fees
+total_debit_msat      recipient_amount + quoted_fee + federation quote fees (TOTAL DEBIT, not net)
+recipient_amount_sat  amount the recipient gets (withdrawal value)
 ```
 
-The UI must show `quoted_fee_sat`, the quote components, and `net_msat`, and require **explicit user
-confirmation** before calling `send_withdrawal`. `send_withdrawal` re-quotes immediately before
+The UI must show `recipient_amount_sat` ("recipient gets X"), `quoted_fee_sat` plus the quote
+components ("fees Y"), and `total_debit_msat` ("total debit Z"), and require **explicit user
+confirmation** before calling `send_withdrawal`. `total_debit_msat` is not a net amount. Fees Y are `quoted_fee_sat` plus the quote components
+(equivalently `total_debit_msat − recipient_amount_sat`). `send_withdrawal` re-quotes immediately before
 `send()` and drift-checks against the persisted quote. On drift it persists the new quote and
 returns an error (`QuoteChanged`); the UI must re-display the new quote and ask for confirmation
 again. No silent send on a changed quote.
