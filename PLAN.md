@@ -336,6 +336,17 @@ Steps:
    and must not insert or credit again. `Cancelled`/`Failed` rows are terminal and never block the
    next request; an `Adopted` row is `Done` and does not hold the single-flight slot.
 
+   c. **Adopt orphan withdrawal Sends:** scan the operation log for
+      `WalletOperationMeta::Send(SendMeta { address, value, fee, custom_meta, .. })`. For every
+      `operation_id` not already in `withdrawal_requests.operation_id`, insert an
+      `origin = Adopted` row from those figures. The row state comes from the cached final state:
+      `Success(txid) → Broadcast`, `Aborted → Refunded`, `Failure → Failed`, and not-yet-final →
+      `Submitted`. If `custom_meta.id` matches an existing `Quoting` row (crash after `send()`
+      before operation-id persistence), bind that row and preserve `origin = Requested` instead of
+      inserting a duplicate. `sync::adoption_task` runs this at boot and every
+      `ADOPTION_INTERVAL` (60 s). **Invariant:** every walletv2 Send op in the log is represented
+      by exactly one withdrawal row, enforced by the unique operation-id index.
+
    **Double-payment behaviour (chosen):** a second payment to the same address is a second funding
    output → a second claim → a **second row**. The original request row records the first claim and
    reaches `Done`; the second claim is adopted as `origin = Adopted`, `state = Done`, with the same
@@ -718,6 +729,10 @@ The nullable-credit work queue is `0x07 ++ deposit_id -> b"1"`. It is written/re
 `dbtx` as the deposit row and is the only thing `reconcile_missing_net_credits` scans (plus one
 row read per pending id), so a tick does not walk the whole deposit table.
 
+The withdrawal Send-ownership index is `0x08 ++ operation_id(32) -> Envelope<WithdrawalId>`,
+written in the same `dbtx` as the row. It is the dedup key for withdrawal adoption and enforces
+"every Send op has exactly one row".
+
 ```sql
 CREATE TABLE deposit_requests (
     id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
@@ -760,6 +775,7 @@ CREATE INDEX deposit_requests_pending_net_credit
 CREATE TABLE withdrawal_requests (
     id              BLOB PRIMARY KEY,          -- client-generated idempotency key (UUIDv7/ULID)
     federation_id   BLOB NOT NULL,
+    origin          TEXT NOT NULL,             -- Requested | Adopted
     address         TEXT NOT NULL,             -- caller-supplied external on-chain destination
     value           INTEGER NOT NULL,          -- sats (bitcoin::Amount)
     fee             INTEGER,                   -- send_fee() result, sats
@@ -778,6 +794,11 @@ CREATE INDEX withdrawal_requests_fed_state ON withdrawal_requests (federation_id
 CREATE UNIQUE INDEX withdrawal_requests_one_open
     ON withdrawal_requests (federation_id)
     WHERE state IN ('Quoting', 'Submitted');
+-- Every walletv2 Send operation has exactly one row. Raw equivalent:
+-- key 0x08 ++ operation_id(32) -> Envelope<WithdrawalId>.
+CREATE UNIQUE INDEX withdrawal_requests_operation_id
+    ON withdrawal_requests (operation_id)
+    WHERE operation_id IS NOT NULL;
 ```
 
 `get_next_event_log_id()` is **not** a unique key; the `deposit_requests_one_open` invariant is
@@ -858,6 +879,13 @@ adopted elsewhere.
   `TakenBy` it rolls back its insert and closes the open owner. A double-payment to the same
   address produces two claims and therefore **two rows** (the original request row + one adopted
   row), both credited; the second is never observed by `await_receive(position)`.
+- **Send invariant / withdrawal adoption:** every walletv2 Send operation is represented by
+  exactly one `withdrawal_requests` row. `set_withdrawal_operation_id` writes the unique
+  operation-id index immediately after `send()`; `adopt_orphan_sends` prefix-scans the operation
+  log and inserts/binds only when that index is absent. Dedup is on `operation_id`, not on
+  `custom_meta.id`, so re-scans and heuristic id collisions cannot duplicate a Send. Rows adopted
+  in `Submitted` participate in the normal `reconcile_submitted` loop; terminal rows do not hold
+  the single-flight slot.
 - **Scan watermark, module filter, bounded wait:** `scan_receive_claims` persists the newest
   `ChronologicalOperationLogKey` per federation (`Journal::scan_watermark` /
   `set_scan_watermark`) and resumes from it with a bounded `SCAN_OVERLAP` (32) of older
@@ -930,8 +958,11 @@ adopted elsewhere.
   pending rather than becoming zero.
 - **Restore:** copy the existing mnemonic into a fresh data dir, run `restore`, and assert the
   federation id, derived client identity, ecash balance, and BDK balance match the original; the
-  BDK pass must be `start_full_scan` (partial sync only covers revealed scripts). Do not expect the
-  local application journal to be restored — it is not federation state.
+  BDK pass must be `start_full_scan` (partial sync only covers revealed scripts). `stop_gap = 20`
+  is a **floor**, not a guarantee: a wallet that has revealed several unused addresses can have a
+  gap larger than 20 and miss older funds. Consider 25–50 or make the gap configurable per
+  restore/network before shipping. Do not expect the local application journal to be restored —
+  it is not federation state.
 - **Crash hooks:** `BERLIN_WALLET_CRASH_POINT` is debug-only (`#[cfg(debug_assertions)]`); release
   builds compile it to a no-op. Use it only for the crash/restart matrix.
 - **Withdrawal:** move the feerate between `send_fee_quote()` and `send()` to exercise quote drift
@@ -1173,6 +1204,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
    - Reopen with `ClientBuilder::open(self, connectors, db_no_decoders, pre_root_secret) -> Result<ClientHandle>` (`builder.rs:483`). The docs for `Client::all_modules_usable` explicitly say a module held back during recovery "only becomes available once the client is reopened". `open` itself does not check for a live previous handle, so `shutdown` is an operational requirement (task-group/DB lifecycle), not an assertion enforced by `open`; our in-process restore always performs it. On a fresh process, exiting and reopening achieves the same state.
    - Backups: `Option<ClientBackup>` is `None`; `create_backup`/`download_backup_from_federation` are deprecated in 0.12.0 and slated for removal in 0.13.0.
    - Live proof: fresh dir + original mnemonic recovered federation `05d83c30…`, identity `f306ff2e…`, ecash `36,402,688 msat`, BDK full scan found `0.00059473 BTC`.
+   - **Observed deviation:** a truly fresh recover in 0.12.0 restores module state but leaves the local **operation log empty** (`operations` printed nothing). Thus there are no Send ops to adopt after that restore. Withdrawal adoption is still required for the journal-loss case where the client DB retains Send ops (and for versions that restore the operation log); it runs on the same adoption tick and is unit-tested.
 10. **`WalletClientConfig` construction/defaults** — **RESOLVED** (COMPILE.md §19). `WalletClientInit` is a unit struct with `Default`; the config is per-federation module config delivered via `ClientModuleInitArgs::cfg()`. After join, read it with `Client::config().await` + `ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`. Defaults live in `WalletConfigConsensus::new`: `dust_limit = 10_000 sats`, `fee_consensus.base = 100 sats` plus a federation-chosen `parts_per_million` (capped at 10_000 = 1%), and `send_tx_vbytes`/`receive_tx_vbytes` derived from the guardian count (4 guardians: 228/316). `send_withdrawal` rejects `value < dust_limit` before quoting.
 11. **`ReceiveMeta` full field set** — **UNVERIFIED** beyond `outpoint` and `fee` (VERIFY §8.3/§8.5 exercise those two): the adopted-row path also reads `address`, `value`, and `change_outpoint_range`. Confirm the exact `ReceiveMeta` fields on the pinned 0.12.0 before relying on them; orphan adoption depends on `outpoint` (dedup key), `value` (gross), `fee` (claim fee), and `address` (display).
 12. **Deposit detection without a local bitcoind RPC** — **UNVERIFIED**: `WalletClientInit::default()` is assumed to carry no `DynBitcoindRpc`. The `receive`/`await_receive` path is expected to read **federation-reported chain state** (the federation's wallet module watches the chain), not a local RPC; confirm this before assuming deposits are detected without `ClientBuilder::with_bitcoind_rpc`.

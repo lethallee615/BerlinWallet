@@ -8,14 +8,13 @@ use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet};
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
 };
-use berlin_wallet_core::journal::{DepositRow, Journal, WithdrawalState};
+use berlin_wallet_core::journal::{DepositRow, Journal};
 use berlin_wallet_core::network::client_network;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::withdrawal::await_change_outputs;
 use berlin_wallet_core::{deposit, withdrawal};
-use bitcoin::hashes::Hash as _;
 use bitcoin::{Amount, Network};
 use fedimint_client::Client;
 use fedimint_client::RootSecret;
@@ -360,18 +359,11 @@ async fn run(
                 Ok(())
             }
             "list-withdrawals" => {
-                let states = [
-                    WithdrawalState::Quoting,
-                    WithdrawalState::Submitted,
-                    WithdrawalState::Broadcast {
-                        txid: bitcoin::Txid::all_zeros(),
-                    },
-                    WithdrawalState::Refunded,
-                    WithdrawalState::Failed,
-                    WithdrawalState::Cancelled,
-                ];
-                for row in journal.withdrawals_in(&states).await? {
-                    println!("{} {:?} {}", row.id.0, row.state, row.value);
+                for row in journal.withdrawals_all().await? {
+                    println!(
+                        "{} {:?} {:?} {}",
+                        row.id.0, row.origin, row.state, row.value
+                    );
                 }
                 Ok(())
             }

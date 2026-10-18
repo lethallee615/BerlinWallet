@@ -148,6 +148,32 @@ async fn write_withdrawal(
     Ok(())
 }
 
+fn withdrawal_op_key(operation_id: OperationId) -> Vec<u8> {
+    let mut key = vec![TAG_WITHDRAWAL_OP];
+    key.extend_from_slice(&operation_id.0);
+    key
+}
+
+async fn read_withdrawal_op(
+    dbtx: &mut DatabaseTransaction<'_, Committable>,
+    operation_id: OperationId,
+) -> anyhow::Result<Option<WithdrawalId>> {
+    match dbtx.raw_get_bytes(&withdrawal_op_key(operation_id)).await? {
+        Some(bytes) => Ok(Some(decode::<WithdrawalId>(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+async fn write_withdrawal_op(
+    dbtx: &mut DatabaseTransaction<'_, Committable>,
+    operation_id: OperationId,
+    id: &WithdrawalId,
+) -> anyhow::Result<()> {
+    dbtx.raw_insert_bytes(&withdrawal_op_key(operation_id), &encode(id)?)
+        .await?;
+    Ok(())
+}
+
 async fn read_claim_owner(
     dbtx: &mut DatabaseTransaction<'_, Committable>,
     federation_id: &FederationId,
@@ -194,6 +220,9 @@ const TAG_OPEN_WITHDRAWAL: u8 = 0x06;
 /// `operation_id` is known. Keys are `[0x07] ++ deposit_id_utf8`; values are
 /// empty. Written/removed atomically with the deposit row.
 const TAG_PENDING_NET_CREDIT: u8 = 0x07;
+/// Unique owner of each walletv2 Send operation:
+/// `[0x08] ++ operation_id(32) -> Envelope<WithdrawalId>`.
+const TAG_WITHDRAWAL_OP: u8 = 0x08;
 const RETRY_ON_CONFLICT_ATTEMPTS: u32 = 5;
 
 fn open_deposit_key(federation_id: &FederationId) -> Vec<u8> {
@@ -921,6 +950,82 @@ impl JournalBackend for DbJournal {
         .await
     }
 
+    async fn insert_adopted_withdrawal(
+        &self,
+        row: &WithdrawalRow,
+    ) -> anyhow::Result<Option<WithdrawalRow>> {
+        let this = self;
+        let row = row.clone();
+        retry_on_conflict(move || {
+            let row = row.clone();
+            async move {
+                let operation_id = row
+                    .operation_id
+                    .ok_or_else(|| anyhow::anyhow!("adopted withdrawal requires operation_id"))?;
+                let mut dbtx = this.db.begin_transaction().await;
+                if let Some(existing_id) = read_withdrawal_op(&mut dbtx, operation_id).await? {
+                    let existing = get_withdrawal(&mut dbtx, &existing_id).await?;
+                    dbtx.commit_tx_result().await?;
+                    return Ok(existing);
+                }
+                if let Some(existing) = get_withdrawal(&mut dbtx, &row.id).await? {
+                    if existing.operation_id == Some(operation_id) {
+                        write_withdrawal_op(&mut dbtx, operation_id, &row.id).await?;
+                        dbtx.commit_tx_result().await?;
+                        return Ok(Some(existing));
+                    }
+                    if existing.operation_id.is_some() {
+                        dbtx.commit_tx_result().await?;
+                        anyhow::bail!(
+                            "withdrawal {} already represents a different Send operation",
+                            row.id.0
+                        );
+                    }
+                    // Bind an existing Quoting row, preserving Requested origin.
+                    let mut bound = existing;
+                    bound.operation_id = Some(operation_id);
+                    bound.address = row.address.clone();
+                    bound.value = row.value;
+                    bound.fee = row.fee;
+                    bound.state = row.state.clone();
+                    bound.txid = row.txid;
+                    bound.custom_meta = row.custom_meta.clone();
+                    bound.updated_at = now_ms();
+                    write_withdrawal(&mut dbtx, &bound).await?;
+                    write_withdrawal_op(&mut dbtx, operation_id, &row.id).await?;
+                    if is_open_withdrawal(&bound.state) {
+                        if read_open_withdrawal(&mut dbtx, &bound.federation_id)
+                            .await?
+                            .is_none()
+                        {
+                            write_open_withdrawal(&mut dbtx, &bound.federation_id, &bound.id)
+                                .await?;
+                        }
+                    } else {
+                        clear_open_withdrawal(&mut dbtx, &bound.federation_id, &bound.id).await?;
+                    }
+                    dbtx.commit_tx_result().await?;
+                    return Ok(None);
+                }
+                write_withdrawal(&mut dbtx, &row).await?;
+                write_withdrawal_op(&mut dbtx, operation_id, &row.id).await?;
+                if is_open_withdrawal(&row.state) {
+                    if read_open_withdrawal(&mut dbtx, &row.federation_id)
+                        .await?
+                        .is_none()
+                    {
+                        write_open_withdrawal(&mut dbtx, &row.federation_id, &row.id).await?;
+                    }
+                } else {
+                    clear_open_withdrawal(&mut dbtx, &row.federation_id, &row.id).await?;
+                }
+                dbtx.commit_tx_result().await?;
+                Ok(None)
+            }
+        })
+        .await
+    }
+
     async fn withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<Option<WithdrawalRow>> {
         let mut dbtx = self.db.begin_transaction().await;
         let row = get_withdrawal(&mut dbtx, id).await?;
@@ -939,6 +1044,13 @@ impl JournalBackend for DbJournal {
             .into_iter()
             .filter(|row| states.contains(&row.state))
             .collect())
+    }
+
+    async fn withdrawals_all(&self) -> anyhow::Result<Vec<WithdrawalRow>> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let rows = scan_withdrawals(&mut dbtx).await?;
+        dbtx.commit_tx_result().await?;
+        Ok(rows)
     }
 
     async fn open_withdrawal(
@@ -967,11 +1079,22 @@ impl JournalBackend for DbJournal {
             let id = id.clone();
             async move {
                 let mut dbtx = this.db.begin_transaction().await;
+                if let Some(owner) = read_withdrawal_op(&mut dbtx, operation_id).await? {
+                    if owner != id {
+                        dbtx.commit_tx_result().await?;
+                        anyhow::bail!(
+                            "send operation {} is already represented by withdrawal {}",
+                            operation_id.fmt_full(),
+                            owner.0
+                        );
+                    }
+                }
                 if let Some(mut row) = get_withdrawal(&mut dbtx, &id).await? {
                     row.operation_id = Some(operation_id);
                     row.state = WithdrawalState::Submitted;
                     row.updated_at = now_ms();
                     write_withdrawal(&mut dbtx, &row).await?;
+                    write_withdrawal_op(&mut dbtx, operation_id, &id).await?;
                 }
                 dbtx.commit_tx_result().await?;
                 Ok(())
@@ -1263,6 +1386,106 @@ mod tests {
                 .expect("pending index")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn adopted_send_is_deduplicated_by_operation_id() {
+        let journal = mem_journal(0x04);
+        let federation_id = FederationId::dummy();
+        let operation_id = OperationId::new_random();
+        let txid = bitcoin::Txid::from_byte_array([0x66; 32]);
+        let first = WithdrawalRow::adopted(
+            WithdrawalId("first".to_owned()),
+            federation_id,
+            "tb1qfirst".to_owned(),
+            bitcoin::Amount::from_sat(10_000),
+            bitcoin::Amount::from_sat(234),
+            operation_id,
+            WithdrawalState::Broadcast { txid },
+            Some(txid),
+            serde_json::json!({ "id": "first" }).to_string(),
+        );
+        assert!(
+            journal
+                .insert_adopted_withdrawal(&first)
+                .await
+                .expect("adopt")
+                .is_none()
+        );
+
+        let duplicate = WithdrawalRow::adopted(
+            WithdrawalId("second".to_owned()),
+            federation_id,
+            "tb1qsecond".to_owned(),
+            bitcoin::Amount::from_sat(10_000),
+            bitcoin::Amount::from_sat(234),
+            operation_id,
+            WithdrawalState::Broadcast { txid },
+            Some(txid),
+            serde_json::json!({ "id": "second" }).to_string(),
+        );
+        assert!(
+            journal
+                .insert_adopted_withdrawal(&duplicate)
+                .await
+                .expect("dedup")
+                .is_some()
+        );
+
+        let rows = journal
+            .withdrawals_in(&[WithdrawalState::Broadcast { txid }])
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, first.id);
+        assert_eq!(rows[0].origin, crate::journal::WithdrawalOrigin::Adopted);
+    }
+
+    #[tokio::test]
+    async fn adopted_send_binds_an_existing_requested_row() {
+        let journal = mem_journal(0x05);
+        let federation_id = FederationId::dummy();
+        let id = WithdrawalId("requested-before-crash".to_owned());
+        let operation_id = OperationId::new_random();
+        let txid = bitcoin::Txid::from_byte_array([0x99; 32]);
+        journal
+            .insert_withdrawal(&WithdrawalRow::new(
+                id.clone(),
+                federation_id,
+                "tb1qrequested".to_owned(),
+                bitcoin::Amount::from_sat(10_000),
+            ))
+            .await
+            .expect("insert requested");
+
+        let adopted = WithdrawalRow::adopted(
+            id.clone(),
+            federation_id,
+            "tb1qrequested".to_owned(),
+            bitcoin::Amount::from_sat(10_000),
+            bitcoin::Amount::from_sat(234),
+            operation_id,
+            WithdrawalState::Broadcast { txid },
+            Some(txid),
+            serde_json::json!({ "id": id.0 }).to_string(),
+        );
+        assert!(
+            journal
+                .insert_adopted_withdrawal(&adopted)
+                .await
+                .expect("bind")
+                .is_none()
+        );
+
+        let row = journal.withdrawal(&id).await.unwrap().expect("row");
+        assert_eq!(
+            row.origin,
+            crate::journal::WithdrawalOrigin::Requested,
+            "adoption must preserve the requested row origin"
+        );
+        assert_eq!(row.operation_id, Some(operation_id));
+        assert_eq!(row.state, WithdrawalState::Broadcast { txid });
+        assert_eq!(journal.withdrawals_all().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

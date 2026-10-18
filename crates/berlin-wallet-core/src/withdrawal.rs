@@ -52,6 +52,128 @@ const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 /// already submitted; on timeout the row stays `Submitted` and reconciliation
 /// retries instead of blocking forever.
 const CHANGE_OUTPUT_TIMEOUT: Duration = Duration::from_secs(20);
+const SEND_SCAN_PAGE: usize = 256;
+
+/// One walletv2 Send operation discovered in the operation log.
+#[derive(Debug, Clone)]
+pub struct AdoptedSend {
+    pub operation_id: OperationId,
+    pub final_state: Option<FinalSendOperationState>,
+    pub address: String,
+    pub value: bitcoin::Amount,
+    pub fee: bitcoin::Amount,
+    pub custom_meta: serde_json::Value,
+}
+
+/// Scan the local operation log for every walletv2 Send operation.
+///
+/// This intentionally does not use the deposit scan watermark: adoption must
+/// see the full log on a restored journal, and dedup is enforced by the
+/// journal's `operation_id` index.
+pub async fn scan_send_operations(client: &Client) -> anyhow::Result<Vec<AdoptedSend>> {
+    let log = client.operation_log();
+    let mut last_seen = None;
+    let mut sends = Vec::new();
+
+    loop {
+        let page = log.paginate_operations_rev(SEND_SCAN_PAGE, last_seen).await;
+        if page.is_empty() {
+            break;
+        }
+        for (key, entry) in &page {
+            if entry.operation_module_kind() != fedimint_walletv2_common::KIND.as_str() {
+                continue;
+            }
+            let Ok(meta) = entry.try_meta::<WalletOperationMeta>() else {
+                continue;
+            };
+            let WalletOperationMeta::Send(send) = meta else {
+                continue;
+            };
+            let final_state = entry
+                .try_outcome::<FinalSendOperationState>()
+                .ok()
+                .flatten();
+            sends.push(AdoptedSend {
+                operation_id: key.operation_id,
+                final_state,
+                address: send.address.assume_checked().to_string(),
+                value: send.value,
+                fee: send.fee,
+                custom_meta: send.custom_meta,
+            });
+        }
+        if page.len() < SEND_SCAN_PAGE {
+            break;
+        }
+        last_seen = page.last().map(|(key, _)| *key);
+    }
+
+    Ok(sends)
+}
+
+/// Adopt Send operations that have no local withdrawal row.
+///
+/// Invariant: every walletv2 Send operation in the log is represented by
+/// exactly one `withdrawal_requests` row, enforced by the journal's unique
+/// operation-id index. Runs at boot and on the adoption tick.
+pub async fn adopt_orphan_sends(
+    client: &Client,
+    journal: &Journal,
+    federation_id: FederationId,
+) -> anyhow::Result<()> {
+    let sends = scan_send_operations(client).await?;
+    adopt_send_claims(journal, federation_id, sends).await
+}
+
+/// Pure adoption step, separated from the operation-log scan for testing.
+pub(crate) async fn adopt_send_claims(
+    journal: &Journal,
+    federation_id: FederationId,
+    sends: Vec<AdoptedSend>,
+) -> anyhow::Result<()> {
+    for send in sends {
+        let (state, txid) = match send.final_state {
+            Some(FinalSendOperationState::Success(txid)) => {
+                (WithdrawalState::Broadcast { txid }, Some(txid))
+            }
+            Some(FinalSendOperationState::Aborted) => (WithdrawalState::Refunded, None),
+            Some(FinalSendOperationState::Failure) => (WithdrawalState::Failed, None),
+            None => (WithdrawalState::Submitted, None),
+        };
+        let mut id = send
+            .custom_meta
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|id| WithdrawalId(id.to_owned()))
+            .unwrap_or_else(WithdrawalId::new);
+        // A custom_meta id must not clobber a different local withdrawal.
+        if let Some(existing) = journal.withdrawal(&id).await? {
+            if existing.operation_id.is_some() && existing.operation_id != Some(send.operation_id) {
+                id = WithdrawalId::new();
+            }
+        }
+        let row = WithdrawalRow::adopted(
+            id,
+            federation_id,
+            send.address,
+            send.value,
+            send.fee,
+            send.operation_id,
+            state,
+            txid,
+            send.custom_meta.to_string(),
+        );
+        if let Some(existing) = journal.insert_adopted_withdrawal(&row).await? {
+            tracing::debug!(
+                operation_id = %send.operation_id.fmt_full(),
+                withdrawal = %existing.id.0,
+                "Send operation already represented by a withdrawal row"
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Reconcile a submitted withdrawal from the federation's final state.
 ///
@@ -346,6 +468,98 @@ pub async fn reconcile_before_resend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completed_send_is_adopted_exactly_once() {
+        use bitcoin::hashes::Hash as _;
+
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+        let operation_id = OperationId::new_random();
+        let txid = bitcoin::Txid::from_byte_array([0x77; 32]);
+        let id = WithdrawalId("adopted-send".to_owned());
+        let send = AdoptedSend {
+            operation_id,
+            final_state: Some(FinalSendOperationState::Success(txid)),
+            address: "tb1qadopted".to_owned(),
+            value: bitcoin::Amount::from_sat(10_000),
+            fee: bitcoin::Amount::from_sat(234),
+            custom_meta: serde_json::json!({ "id": id.0 }),
+        };
+
+        adopt_send_claims(&journal, federation_id, vec![send.clone()])
+            .await
+            .expect("adopt");
+        let rows = journal
+            .withdrawals_in(&[WithdrawalState::Broadcast { txid }])
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].origin, crate::journal::WithdrawalOrigin::Adopted);
+        assert_eq!(rows[0].operation_id, Some(operation_id));
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].fee, Some(bitcoin::Amount::from_sat(234)));
+        assert_eq!(rows[0].txid, Some(txid));
+
+        // Re-scan: same operation, deliberately different custom_meta id. The
+        // operation-id index must still deduplicate it.
+        let mut duplicate = send.clone();
+        duplicate.custom_meta = serde_json::json!({ "id": "different-id" });
+        adopt_send_claims(&journal, federation_id, vec![duplicate])
+            .await
+            .expect("re-adopt");
+        let rows = journal
+            .withdrawals_in(&[WithdrawalState::Broadcast { txid }])
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 1, "Send op must be represented exactly once");
+        assert_eq!(rows[0].id, id);
+    }
+
+    #[tokio::test]
+    async fn adopted_send_binds_an_existing_quoting_row() {
+        use bitcoin::hashes::Hash as _;
+
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+        let id = WithdrawalId("requested-before-crash".to_owned());
+        let op = OperationId::new_random();
+        let txid = bitcoin::Txid::from_byte_array([0x88; 32]);
+        journal
+            .insert_withdrawal(&WithdrawalRow::new(
+                id.clone(),
+                federation_id,
+                "tb1qrequested".to_owned(),
+                bitcoin::Amount::from_sat(10_000),
+            ))
+            .await
+            .expect("insert requested row");
+
+        adopt_send_claims(
+            &journal,
+            federation_id,
+            vec![AdoptedSend {
+                operation_id: op,
+                final_state: Some(FinalSendOperationState::Success(txid)),
+                address: "tb1qrequested".to_owned(),
+                value: bitcoin::Amount::from_sat(10_000),
+                fee: bitcoin::Amount::from_sat(234),
+                custom_meta: serde_json::json!({ "id": id.0 }),
+            }],
+        )
+        .await
+        .expect("bind");
+
+        let row = journal.withdrawal(&id).await.unwrap().expect("row");
+        assert_eq!(row.origin, crate::journal::WithdrawalOrigin::Requested);
+        assert_eq!(row.operation_id, Some(op));
+        assert_eq!(row.state, WithdrawalState::Broadcast { txid });
+        assert_eq!(
+            journal.withdrawals_all().await.expect("all").len(),
+            1,
+            "binding must not create a duplicate row"
+        );
+    }
 
     #[test]
     fn dust_value_is_rejected_before_send() {

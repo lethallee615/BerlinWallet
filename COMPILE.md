@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (26 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (30 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (26 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (30 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (26 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (30 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (26 core tests + 1 CLI test).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 1 CLI test).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -1688,7 +1688,9 @@ EsploraAsyncExt::full_scan(request, stop_gap, parallel_requests)
 starts at derivation index 0. `sync()`/`start_sync_with_revealed_spks()` only covers already
 revealed scripts; on a fresh BDK DB that set is empty, so historical addresses are missed. The
 restore uses `stop_gap = 20`, `parallel_requests = 4`, and a 600 s timeout, then
-`apply_update(response)` + `persist()`.
+`apply_update(response)` + `persist()`. **`stop_gap = 20` is a floor, not a guarantee:** a wallet
+that revealed several unused addresses can have a larger gap and miss older funds. Consider
+25–50 or make it configurable before shipping.
 
 ### 28.6 Live restore output
 
@@ -1725,9 +1727,82 @@ live test (it needs the federation).
 - **App journal is not restored.** Deposit/withdrawal rows and `custom_meta` history live in the
   local journal, not in the federation. A restored client recovers ecash and BDK funds, but
   application history starts empty; on-chain history is re-derived by the BDK full scan and
-  federation operations by operation-log scanners.
+  federation operations by operation-log scanners. Withdrawal Send adoption covers a retained
+  operation log; in a fresh 0.12.0 recover the operation log itself was empty (§29.4).
 - **Backups are not used** (`Option<ClientBackup> = None`); backup APIs are deprecated in 0.12.0.
 - **Only registered modules recover.** `mintv2` and `walletv2` are registered; `lnv2`/`meta` are
   intentionally not, so they are skipped by recovery.
 - **Fresh-dir enforcement** is in `recover_client` (config absent) and `cli::restore` (BDK file
   absent). A non-fresh dir must use normal `open`, not recover.
+
+---
+
+## 29. Withdrawal (Send) adoption on restore / journal loss
+
+### 29.1 Invariant
+
+**Every walletv2 `Send` operation in the local operation log is represented by exactly one
+`withdrawal_requests` row.** Enforcement is the unique operation-id index:
+
+```text
+raw key 0x08 ++ operation_id(32) -> Envelope<WithdrawalId>
+```
+
+- `set_withdrawal_operation_id` writes the index immediately after `send()`.
+- `insert_adopted_withdrawal` reads it first; if present, the existing row is returned and nothing
+  is inserted.
+- Dedup is on `operation_id`, not on `custom_meta.id`. A re-scan, or a different generated local
+  id for the same Send, cannot duplicate the row.
+
+### 29.2 Implementation
+
+`withdrawal::scan_send_operations` pages the operation log and extracts:
+
+```rust
+WalletOperationMeta::Send(SendMeta { address, value, fee, custom_meta, .. })
+```
+
+`withdrawal::adopt_orphan_sends` maps the cached final state:
+
+| Final state | Adopted row state |
+|---|---|
+| `Success(txid)` | `Broadcast { txid }` |
+| `Aborted` | `Refunded` |
+| `Failure` | `Failed` |
+| not final yet | `Submitted` |
+
+It builds `WithdrawalRow::adopted(...)` with `origin = Adopted`, fee from `SendMeta.fee`, value,
+address (`assume_checked().to_string()`), `custom_meta`, and `operation_id`.
+
+If `custom_meta.id` matches an existing `Quoting` row (crash after `send()` but before the
+operation id was persisted), the existing row is **bound** to the Send and keeps
+`origin = Requested`; no duplicate is inserted. A different `Send` with a colliding custom id gets
+a fresh local id.
+
+**Schedule:** `sync::adoption_task` calls it at boot and every `ADOPTION_INTERVAL` (60 s), next to
+deposit orphan adoption. Adopted `Submitted` rows flow into the existing `reconcile_submitted`
+loop; terminal rows do not occupy the single-flight slot.
+
+### 29.3 Tests
+
+- `withdrawal::tests::completed_send_is_adopted_exactly_once` — fresh in-memory journal, one
+  completed Send (`Success(txid)`); first scan inserts exactly one `Adopted`/`Broadcast` row;
+  re-scan with the same operation but a different `custom_meta.id` leaves the count at one.
+- `withdrawal::tests::adopted_send_binds_an_existing_quoting_row` — an existing `Requested`
+  `Quoting` row is bound to the Send, keeps `origin = Requested`, and no duplicate is created.
+- `journal_db::tests::adopted_send_is_deduplicated_by_operation_id` — DB-backed journal enforces
+  the 0x08 operation-id index.
+- `journal_db::tests::adopted_send_binds_an_existing_requested_row` — the DB path binds a
+  `Quoting` row without overwriting its `Requested` origin or duplicating it.
+
+### 29.4 Live-restore limitation (important)
+
+A truly fresh `recover` on fedimint-client 0.12.0 restored the ecash balance, but the local
+**operation log was empty** (`operations` printed nothing). Therefore there were no Send ops to
+adopt after that restore. The adoption pass is still correct and required for the case the client
+DB retains Send ops while the application journal is lost/recreated (and for versions that restore
+the operation log); it is not a substitute for the missing op-log history in a fresh 0.12.0
+recover.
+
+Also note: `stop_gap = 20` in the BDK restore is a **floor**. A wallet that revealed unused
+addresses can have a larger gap and miss historical funds; consider 25–50 or make it configurable.

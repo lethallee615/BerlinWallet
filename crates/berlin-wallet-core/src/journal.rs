@@ -21,6 +21,13 @@ pub enum DepositOrigin {
     Adopted,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WithdrawalOrigin {
+    #[default]
+    Requested,
+    Adopted,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DepositState {
     AwaitingAddress,
@@ -113,6 +120,8 @@ impl DepositRow {
 pub struct WithdrawalRow {
     pub id: WithdrawalId,
     pub federation_id: FederationId,
+    #[serde(default)]
+    pub origin: WithdrawalOrigin,
     pub address: String,
     pub value: bitcoin::Amount,
     pub fee: Option<bitcoin::Amount>,
@@ -139,6 +148,7 @@ impl WithdrawalRow {
             custom_meta: serde_json::json!({ "id": id.0 }).to_string(),
             id,
             federation_id,
+            origin: WithdrawalOrigin::Requested,
             address,
             value,
             fee: None,
@@ -146,6 +156,38 @@ impl WithdrawalRow {
             operation_id: None,
             state: WithdrawalState::Quoting,
             txid: None,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Build a row for a Send operation discovered in the operation log.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopted(
+        id: WithdrawalId,
+        federation_id: FederationId,
+        address: String,
+        value: bitcoin::Amount,
+        fee: bitcoin::Amount,
+        operation_id: OperationId,
+        state: WithdrawalState,
+        txid: Option<bitcoin::Txid>,
+        custom_meta: String,
+    ) -> Self {
+        let now = now_ms();
+        Self {
+            id,
+            federation_id,
+            origin: WithdrawalOrigin::Adopted,
+            address,
+            value,
+            fee: Some(fee),
+            quote: None,
+            operation_id: Some(operation_id),
+            state,
+            txid,
+            custom_meta,
             last_error: None,
             created_at: now,
             updated_at: now,
@@ -171,6 +213,8 @@ pub struct AdoptedClaim {
 struct JournalInner {
     deposits: BTreeMap<DepositId, DepositRow>,
     withdrawals: BTreeMap<WithdrawalId, WithdrawalRow>,
+    /// Unique owner of each walletv2 Send operation.
+    withdrawal_ops: BTreeMap<OperationId, WithdrawalId>,
     claims: BTreeMap<(FederationId, bitcoin::OutPoint), DepositId>,
     /// Last operation-log key scanned per federation (scan watermark).
     watermarks: BTreeMap<FederationId, ChronologicalOperationLogKey>,
@@ -272,11 +316,18 @@ pub trait JournalBackend: Send + Sync {
     async fn deposits_pending_net_credit(&self) -> anyhow::Result<Vec<DepositRow>>;
     async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult>;
     async fn insert_withdrawal(&self, row: &WithdrawalRow) -> anyhow::Result<()>;
+    /// Insert an adopted Send row, deduped on `operation_id`. Returns the
+    /// existing row if the operation is already represented.
+    async fn insert_adopted_withdrawal(
+        &self,
+        row: &WithdrawalRow,
+    ) -> anyhow::Result<Option<WithdrawalRow>>;
     async fn withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<Option<WithdrawalRow>>;
     async fn withdrawals_in(
         &self,
         states: &[WithdrawalState],
     ) -> anyhow::Result<Vec<WithdrawalRow>>;
+    async fn withdrawals_all(&self) -> anyhow::Result<Vec<WithdrawalRow>>;
     async fn open_withdrawal(
         &self,
         federation_id: &FederationId,
@@ -704,6 +755,60 @@ impl JournalBackend for MemoryJournal {
         Ok(())
     }
 
+    async fn insert_adopted_withdrawal(
+        &self,
+        row: &WithdrawalRow,
+    ) -> anyhow::Result<Option<WithdrawalRow>> {
+        let operation_id = row
+            .operation_id
+            .ok_or_else(|| anyhow::anyhow!("adopted withdrawal requires operation_id"))?;
+        let mut inner = self.inner.lock().await;
+        if let Some(existing_id) = inner.withdrawal_ops.get(&operation_id) {
+            return Ok(inner.withdrawals.get(existing_id).cloned());
+        }
+        // Backfill the operation index for a row created before this index
+        // existed (or bound through a path that did not write it).
+        if let Some(existing_id) = inner
+            .withdrawals
+            .iter()
+            .find(|(_id, existing)| existing.operation_id == Some(operation_id))
+            .map(|(id, _row)| id.clone())
+        {
+            let existing = inner.withdrawals.get(&existing_id).cloned();
+            inner.withdrawal_ops.insert(operation_id, existing_id);
+            return Ok(existing);
+        }
+        if let Some(existing) = inner.withdrawals.get(&row.id).cloned() {
+            if existing.operation_id == Some(operation_id) {
+                inner.withdrawal_ops.insert(operation_id, row.id.clone());
+                return Ok(Some(existing));
+            }
+            if existing.operation_id.is_some() {
+                anyhow::bail!(
+                    "withdrawal {} already represents a different Send operation",
+                    row.id.0
+                );
+            }
+            // Bind the Send to an existing Quoting row (crash between send()
+            // and operation-id persistence), preserving its Requested origin.
+            let mut bound = existing;
+            bound.operation_id = Some(operation_id);
+            bound.address = row.address.clone();
+            bound.value = row.value;
+            bound.fee = row.fee;
+            bound.state = row.state.clone();
+            bound.txid = row.txid;
+            bound.custom_meta = row.custom_meta.clone();
+            bound.updated_at = now_ms();
+            inner.withdrawal_ops.insert(operation_id, row.id.clone());
+            inner.withdrawals.insert(row.id.clone(), bound);
+            return Ok(None);
+        }
+        inner.withdrawal_ops.insert(operation_id, row.id.clone());
+        inner.withdrawals.insert(row.id.clone(), row.clone());
+        Ok(None)
+    }
+
     async fn withdrawal(&self, id: &WithdrawalId) -> anyhow::Result<Option<WithdrawalRow>> {
         let inner = self.inner.lock().await;
         Ok(inner.withdrawals.get(id).cloned())
@@ -720,6 +825,11 @@ impl JournalBackend for MemoryJournal {
             .filter(|row| states.contains(&row.state))
             .cloned()
             .collect())
+    }
+
+    async fn withdrawals_all(&self) -> anyhow::Result<Vec<WithdrawalRow>> {
+        let inner = self.inner.lock().await;
+        Ok(inner.withdrawals.values().cloned().collect())
     }
 
     async fn open_withdrawal(
@@ -746,10 +856,25 @@ impl JournalBackend for MemoryJournal {
         operation_id: OperationId,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
-        if let Some(row) = inner.withdrawals.get_mut(id) {
+        let JournalInner {
+            withdrawals,
+            withdrawal_ops,
+            ..
+        } = &mut *inner;
+        if let Some(owner) = withdrawal_ops.get(&operation_id) {
+            if owner != id {
+                anyhow::bail!(
+                    "send operation {} is already represented by withdrawal {}",
+                    operation_id.fmt_full(),
+                    owner.0
+                );
+            }
+        }
+        if let Some(row) = withdrawals.get_mut(id) {
             row.operation_id = Some(operation_id);
             row.state = WithdrawalState::Submitted;
             row.updated_at = now_ms();
+            withdrawal_ops.insert(operation_id, id.clone());
         }
         Ok(())
     }

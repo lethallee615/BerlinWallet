@@ -57,6 +57,14 @@ pub async fn adoption_task(
                         "deposit net-credit reconciliation failed; will retry next tick"
                     );
                 }
+                if let Err(err) =
+                    withdrawal::adopt_orphan_sends(client_ref, &journal, federation_id).await
+                {
+                    tracing::warn!(
+                        ?err,
+                        "withdrawal Send adoption failed; will retry next tick"
+                    );
+                }
             }
         }
     }
