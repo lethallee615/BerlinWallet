@@ -48,6 +48,10 @@ pub fn validate_withdrawal_value(
 }
 
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound for waiting on contiguous primary-module change outputs. The send is
+/// already submitted; on timeout the row stays `Submitted` and reconciliation
+/// retries instead of blocking forever.
+const CHANGE_OUTPUT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Reconcile a submitted withdrawal from the federation's final state.
 ///
@@ -135,26 +139,46 @@ pub async fn find_sent_operation(
 /// Wait for the primary module change outputs of a successful send before
 /// declaring Broadcast. Without this, a crash immediately after the send final
 /// state can leave the change notes uncredited.
+///
+/// Returns `false` if the bounded wait expires; the caller must leave the
+/// withdrawal `Submitted` so reconciliation can retry.
 pub async fn await_change_outputs(
     client: &Client,
     operation_id: OperationId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let Some(entry) = client.operation_log().get_operation(operation_id).await else {
-        return Ok(());
+        return Ok(true);
     };
     let Ok(WalletOperationMeta::Send(SendMeta {
         change_outpoint_range,
         ..
     })) = entry.try_meta::<WalletOperationMeta>()
     else {
-        return Ok(());
+        return Ok(true);
     };
-    for outpoint in change_outpoint_range {
-        client
-            .await_primary_bitcoin_module_output(operation_id, outpoint)
-            .await?;
+
+    let wait = async {
+        for outpoint in change_outpoint_range {
+            client
+                .await_primary_bitcoin_module_output(operation_id, outpoint)
+                .await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    match tokio::time::timeout(CHANGE_OUTPUT_TIMEOUT, wait).await {
+        Ok(result) => {
+            result?;
+            Ok(true)
+        }
+        Err(_) => {
+            tracing::warn!(
+                ?operation_id,
+                "timed out waiting for change outputs; leaving withdrawal Submitted"
+            );
+            Ok(false)
+        }
     }
-    Ok(())
 }
 
 async fn await_final_state(
@@ -166,9 +190,12 @@ async fn await_final_state(
     let module = client.get_first_module::<WalletClientModule>()?;
     match module.await_final_send_operation_state(operation_id).await {
         Ok(FinalSendOperationState::Success(txid)) => {
-            await_change_outputs(client, operation_id).await?;
-            crate::fault::crash_point("after_broadcast");
-            journal.set_broadcast(id, txid).await?;
+            if await_change_outputs(client, operation_id).await? {
+                crate::fault::crash_point("after_broadcast");
+                journal.set_broadcast(id, txid).await?;
+            }
+            // On timeout the row remains `Submitted`; `reconcile_submitted`
+            // retries the bounded change-output wait.
         }
         Ok(FinalSendOperationState::Aborted) => {
             journal.set_refunded(id).await?;
@@ -338,6 +365,14 @@ mod tests {
         ));
 
         assert!(validate_withdrawal_value(dust_limit, dust_limit).is_ok());
+    }
+
+    #[test]
+    fn change_wait_timeout_leaves_reconciliation_headroom() {
+        assert!(
+            CHANGE_OUTPUT_TIMEOUT < RECONCILE_TIMEOUT,
+            "the inner change wait must expire before the outer reconcile timeout"
+        );
     }
 
     #[test]

@@ -102,7 +102,7 @@ cargo check   # -> exit 0
 
 Compile-verified against the real crates; see VERIFY.md §1 for full signatures and source locations.
 
-**fedimint-client 0.12.0**: `Client::builder()`, `ClientBuilder::with_module()`, `ClientBuilder::preview()`, `ClientPreview::join()` (**returns `ClientHandle`, not `Client`**), `Client::get_balance_for_unit()`, `get_first_module::<M>()`, `get_first_module_arc::<M>()`, `finalize_and_submit_transaction()`, `transaction_updates()`, `await_primary_bitcoin_module_output()`, `subscribe_balance_changes()`, `spawn_federation_reconnect()`, `start_executor()` (**receiver is `self: &Arc<Self>`**), `db()`, `executor()`, `handle_events()`, `get_event_log_transient_receiver()`, `chain_id()`, `federation_id()`, `config()`.
+**fedimint-client 0.12.0**: `Client::builder()`, `ClientBuilder::with_module()`, `ClientBuilder::preview()`, `ClientPreview::join()` (**returns `ClientHandle`, not `Client`**), `Client::get_balance_for_unit()`, `get_operation_fees(operation_id)`, `get_first_module::<M>()`, `get_first_module_arc::<M>()`, `finalize_and_submit_transaction()`, `transaction_updates()`, `await_primary_bitcoin_module_output()`, `subscribe_balance_changes()`, `spawn_federation_reconnect()`, `start_executor()` (**receiver is `self: &Arc<Self>`**), `db()`, `executor()`, `handle_events()`, `get_event_log_transient_receiver()`, `chain_id()`, `federation_id()`, `config()`.
 - `OutPointRange` = `fedimint_core::OutPointRange` (crate root)
 - `TransactionBuilder` = `fedimint_client::module::transaction::TransactionBuilder`
 - `OperationId` = `fedimint_core::core::OperationId`

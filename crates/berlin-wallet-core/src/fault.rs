@@ -5,8 +5,12 @@
 
 pub(crate) fn crash_point(point: &str) {
     #[cfg(debug_assertions)]
-    if std::env::var("BERLIN_WALLET_CRASH_POINT").ok().as_deref() == Some(point) {
-        eprintln!("fault injection: aborting at {point}");
-        std::process::abort();
+    {
+        if std::env::var("BERLIN_WALLET_CRASH_POINT").ok().as_deref() == Some(point) {
+            eprintln!("fault injection: aborting at {point}");
+            std::process::abort();
+        }
     }
+    #[cfg(not(debug_assertions))]
+    let _ = point;
 }

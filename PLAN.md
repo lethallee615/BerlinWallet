@@ -232,8 +232,10 @@ the address to a third party) follows the same row/observation path minus the BD
 funding and persist it; show `net = amount − quoted_fee`. At claim time persist the actual
 `ReceiveMeta.fee` plus the operation-level fees from `Client::get_operation_fees(operation_id)` and
 compute `net_credit = gross_deposited − claim_fee − operation_fee` (fall back to the quoted
-`receive_fee()` if the claim has not recorded one). The Bitcoin network fee for the funding
-transaction is paid by the BDK wallet and is **not** part of `receive_fee()`.
+`receive_fee()` if the claim has not recorded one). If `get_operation_fees()` is still unavailable
+after bounded retries, leave `net_credit` unset and let the adoption-task reconciliation pass fill
+it once known; never persist zero as a guess. The Bitcoin network fee for the funding transaction
+is paid by the BDK wallet and is **not** part of `receive_fee()`.
 
 Steps:
 
@@ -906,10 +908,15 @@ adopted elsewhere.
   at each transition (`AwaitingAddress → AddressShown → Done`); kill between the claim commit and
   its event-log entry (#9338) and assert boot reconciliation credits exactly once; assert
   `net_credit = gross_deposited − claim_fee − operation_fee` and that `receive_fee()` was applied.
+  Force `get_operation_fees()` to return `None` and assert `net_credit` stays unset, then assert a
+  later reconciliation pass fills it.
+- **Crash hooks:** `BERLIN_WALLET_CRASH_POINT` is debug-only (`#[cfg(debug_assertions)]`); release
+  builds compile it to a no-op. Use it only for the crash/restart matrix.
 - **Withdrawal:** move the feerate between `send_fee_quote()` and `send()` to exercise quote drift
   (#9098) and assert the send is refused/re-quoted; crash after `send()` but before `operation_id`
   is persisted and assert boot reconciliation adopts the operation instead of re-sending; assert
-  `Aborted → Refunded` re-credits exactly once.
+  `Aborted → Refunded` re-credits exactly once; force the change-output wait to time out and assert
+  the row stays `Submitted` (never `Broadcast`) and the next reconciliation pass retries.
 - **Funding idempotency:** call `fund_deposit(id)` twice and assert only one BDK transaction exists
   and the same `funding_txid` is returned.
 - **Unbounded wait:** let a deposit go unpaid past `DEPOSIT_WATCH_TIMEOUT` and assert the row stays
@@ -1031,7 +1038,8 @@ address is shown only after the `AddressShown` write commits. BDK funding is a s
 **Units at the FFI boundary.** `balance_sat()` returns **sats**; `DepositView.net_credit_msat`
 returns **msat** (`fedimint_core::Amount`). 1 sat = 1000 msat. Convert exactly with
 `gross − claim_fee − operation_fee` in msat (`Client::get_operation_fees`) and read with `.msats()`;
-never round `net_credit` down to sats for accounting. `balance_sat()` is display-only:
+if the operation fee is still unknown, `net_credit` is `None`, never a zero/over-estimated value.
+Never round `net_credit` down to sats for accounting. `balance_sat()` is display-only:
 `balance_msat / 1000` (floor). The remainder (`balance_msat % 1000`) stays in the federation
 balance — it is not discarded, not rounded into the next send, and not sent anywhere. Expose
 `balance_msat()` if exact accounting is needed.

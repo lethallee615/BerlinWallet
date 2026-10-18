@@ -49,6 +49,14 @@ pub async fn adoption_task(
                 {
                     tracing::warn!(?err, "adoption pass failed; will retry next tick");
                 }
+                if let Err(err) =
+                    deposit::reconcile_missing_net_credits(client_ref, &journal).await
+                {
+                    tracing::warn!(
+                        ?err,
+                        "deposit net-credit reconciliation failed; will retry next tick"
+                    );
+                }
             }
         }
     }

@@ -651,10 +651,11 @@ impl JournalBackend for DbJournal {
     async fn finish_deposit(
         &self,
         id: &DepositId,
+        operation_id: OperationId,
         outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
-        operation_fee: fedimint_core::Amount,
+        operation_fee: Option<fedimint_core::Amount>,
     ) -> anyhow::Result<()> {
         let this = self;
         let id = id.clone();
@@ -663,10 +664,13 @@ impl JournalBackend for DbJournal {
             async move {
                 let mut dbtx = this.db.begin_transaction().await;
                 if let Some(mut row) = get_deposit(&mut dbtx, &id).await? {
+                    row.operation_id = Some(operation_id);
                     row.funding_outpoint = Some(outpoint);
                     row.gross_deposited = Some(gross);
                     row.claim_fee = Some(fee);
-                    row.net_credit = Some(net_credit_with_fees(gross, fee, operation_fee));
+                    if row.net_credit.is_none() || operation_fee.is_some() {
+                        row.net_credit = net_credit_with_fees(gross, fee, operation_fee);
+                    }
                     row.state = DepositState::Done;
                     row.updated_at = now_ms();
                     write_deposit(&mut dbtx, &row).await?;
@@ -736,11 +740,7 @@ impl JournalBackend for DbJournal {
                     quoted_fee: None,
                     claim_fee: Some(claim.fee),
                     gross_deposited: Some(claim.value),
-                    net_credit: Some(net_credit_with_fees(
-                        claim.value,
-                        claim.fee,
-                        claim.operation_fee,
-                    )),
+                    net_credit: net_credit_with_fees(claim.value, claim.fee, claim.operation_fee),
                     last_error: None,
                     created_at: now,
                     updated_at: now,
@@ -759,7 +759,7 @@ impl JournalBackend for DbJournal {
         id: &DepositId,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
-        operation_fee: fedimint_core::Amount,
+        operation_fee: Option<fedimint_core::Amount>,
     ) -> anyhow::Result<()> {
         let this = self;
         let id = id.clone();
@@ -772,12 +772,39 @@ impl JournalBackend for DbJournal {
                         if row.net_credit.is_none() {
                             row.gross_deposited = Some(gross);
                             row.claim_fee = Some(fee);
-                            row.net_credit = Some(net_credit_with_fees(gross, fee, operation_fee));
+                            row.net_credit = net_credit_with_fees(gross, fee, operation_fee);
                         }
                         row.state = DepositState::Done;
                         row.updated_at = now_ms();
                         write_deposit(&mut dbtx, &row).await?;
                         clear_open_deposit(&mut dbtx, &row.federation_id, &row.id).await?;
+                    }
+                }
+                dbtx.commit_tx_result().await?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    async fn set_deposit_net_credit_if_none(
+        &self,
+        id: &DepositId,
+        operation_fee: fedimint_core::Amount,
+    ) -> anyhow::Result<()> {
+        let this = self;
+        let id = id.clone();
+        retry_on_conflict(move || {
+            let id = id.clone();
+            async move {
+                let mut dbtx = this.db.begin_transaction().await;
+                if let Some(mut row) = get_deposit(&mut dbtx, &id).await? {
+                    if row.state == DepositState::Done && row.net_credit.is_none() {
+                        if let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee) {
+                            row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
+                            row.updated_at = now_ms();
+                            write_deposit(&mut dbtx, &row).await?;
+                        }
                     }
                 }
                 dbtx.commit_tx_result().await?;
@@ -1102,10 +1129,11 @@ mod tests {
         journal
             .finish_deposit(
                 &first.id,
+                OperationId::new_random(),
                 outpoint,
                 bitcoin::Amount::from_sat(10_000),
                 bitcoin::Amount::from_sat(100),
-                fedimint_core::Amount::ZERO,
+                Some(fedimint_core::Amount::ZERO),
             )
             .await
             .expect("finish");
@@ -1128,6 +1156,44 @@ mod tests {
             .insert_deposit(&third)
             .await
             .expect("a new open row is allowed after the prior row is terminal");
+    }
+
+    #[tokio::test]
+    async fn net_credit_reconciles_from_none() {
+        let journal = mem_journal(0x03);
+        let federation_id = FederationId::dummy();
+        let row = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(50_000),
+        );
+        journal.insert_deposit(&row).await.expect("insert");
+        let outpoint = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x55; 32]), 0);
+        journal
+            .finish_deposit(
+                &row.id,
+                OperationId::new_random(),
+                outpoint,
+                bitcoin::Amount::from_sat(50_000),
+                bitcoin::Amount::from_sat(324),
+                None,
+            )
+            .await
+            .expect("finish without fee");
+        let row = journal.deposit(&row.id).await.unwrap().unwrap();
+        assert_eq!(row.state, DepositState::Done);
+        assert_eq!(row.net_credit, None);
+
+        journal
+            .set_deposit_net_credit_if_none(&row.id, fedimint_core::Amount::from_msats(105_696))
+            .await
+            .expect("fill net credit");
+        let row = journal.deposit(&row.id).await.unwrap().unwrap();
+        assert_eq!(
+            row.net_credit,
+            Some(fedimint_core::Amount::from_msats(49_570_304))
+        );
     }
 
     #[tokio::test]

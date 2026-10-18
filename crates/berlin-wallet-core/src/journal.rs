@@ -162,8 +162,9 @@ pub struct AdoptedClaim {
     pub value: bitcoin::Amount,
     pub fee: bitcoin::Amount,
     /// Fees charged by the primary module for the claim operation
-    /// (`Client::get_operation_fees`), separate from `fee`.
-    pub operation_fee: fedimint_core::Amount,
+    /// (`Client::get_operation_fees`), separate from `fee`. `None` means the
+    /// fee was not available yet and `net_credit` must stay unset.
+    pub operation_fee: Option<fedimint_core::Amount>,
 }
 
 #[derive(Debug, Default)]
@@ -236,10 +237,11 @@ pub trait JournalBackend: Send + Sync {
     async fn finish_deposit(
         &self,
         id: &DepositId,
+        operation_id: OperationId,
         outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
-        operation_fee: fedimint_core::Amount,
+        operation_fee: Option<fedimint_core::Amount>,
     ) -> anyhow::Result<()>;
     async fn close_deposit_done(&self, id: &DepositId) -> anyhow::Result<()>;
     async fn claim_adopt_if_absent(
@@ -253,6 +255,13 @@ pub trait JournalBackend: Send + Sync {
         id: &DepositId,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
+        operation_fee: Option<fedimint_core::Amount>,
+    ) -> anyhow::Result<()>;
+    /// Fill `net_credit` for an already-`Done` deposit once the primary
+    /// module's operation fee becomes available. Never overwrites a value.
+    async fn set_deposit_net_credit_if_none(
+        &self,
+        id: &DepositId,
         operation_fee: fedimint_core::Amount,
     ) -> anyhow::Result<()>;
     async fn cancel_deposit(&self, id: &DepositId) -> anyhow::Result<ApplyResult>;
@@ -502,17 +511,21 @@ impl JournalBackend for MemoryJournal {
     async fn finish_deposit(
         &self,
         id: &DepositId,
+        operation_id: OperationId,
         outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
-        operation_fee: fedimint_core::Amount,
+        operation_fee: Option<fedimint_core::Amount>,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.deposits.get_mut(id) {
+            row.operation_id = Some(operation_id);
             row.funding_outpoint = Some(outpoint);
             row.gross_deposited = Some(gross);
             row.claim_fee = Some(fee);
-            row.net_credit = Some(net_credit_with_fees(gross, fee, operation_fee));
+            if row.net_credit.is_none() || operation_fee.is_some() {
+                row.net_credit = net_credit_with_fees(gross, fee, operation_fee);
+            }
             row.state = DepositState::Done;
             row.updated_at = now_ms();
         }
@@ -559,11 +572,7 @@ impl JournalBackend for MemoryJournal {
             quoted_fee: None,
             claim_fee: Some(claim.fee),
             gross_deposited: Some(claim.value),
-            net_credit: Some(net_credit_with_fees(
-                claim.value,
-                claim.fee,
-                claim.operation_fee,
-            )),
+            net_credit: net_credit_with_fees(claim.value, claim.fee, claim.operation_fee),
             last_error: None,
             created_at: now,
             updated_at: now,
@@ -578,7 +587,7 @@ impl JournalBackend for MemoryJournal {
         id: &DepositId,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
-        operation_fee: fedimint_core::Amount,
+        operation_fee: Option<fedimint_core::Amount>,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         let Some(row) = inner.deposits.get_mut(id) else {
@@ -593,10 +602,27 @@ impl JournalBackend for MemoryJournal {
         if row.net_credit.is_none() {
             row.gross_deposited = Some(gross);
             row.claim_fee = Some(fee);
-            row.net_credit = Some(net_credit_with_fees(gross, fee, operation_fee));
+            row.net_credit = net_credit_with_fees(gross, fee, operation_fee);
         }
         row.state = DepositState::Done;
         row.updated_at = now_ms();
+        Ok(())
+    }
+
+    async fn set_deposit_net_credit_if_none(
+        &self,
+        id: &DepositId,
+        operation_fee: fedimint_core::Amount,
+    ) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
+        if let Some(row) = inner.deposits.get_mut(id) {
+            if row.state == DepositState::Done && row.net_credit.is_none() {
+                if let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee) {
+                    row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
+                    row.updated_at = now_ms();
+                }
+            }
+        }
         Ok(())
     }
 
@@ -763,9 +789,9 @@ pub(crate) fn net_credit(gross: bitcoin::Amount, fee: bitcoin::Amount) -> fedimi
 pub(crate) fn net_credit_with_fees(
     gross: bitcoin::Amount,
     fee: bitcoin::Amount,
-    operation_fee: fedimint_core::Amount,
-) -> fedimint_core::Amount {
-    net_credit(gross, fee).saturating_sub(operation_fee)
+    operation_fee: Option<fedimint_core::Amount>,
+) -> Option<fedimint_core::Amount> {
+    operation_fee.map(|operation_fee| net_credit(gross, fee).saturating_sub(operation_fee))
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -912,9 +938,18 @@ mod tests {
             net_credit_with_fees(
                 bitcoin::Amount::from_sat(50_000),
                 bitcoin::Amount::from_sat(324),
-                fedimint_core::Amount::from_msats(105_696),
+                Some(fedimint_core::Amount::from_msats(105_696)),
             ),
-            fedimint_core::Amount::from_msats(49_570_304)
+            Some(fedimint_core::Amount::from_msats(49_570_304))
+        );
+        assert_eq!(
+            net_credit_with_fees(
+                bitcoin::Amount::from_sat(50_000),
+                bitcoin::Amount::from_sat(324),
+                None,
+            ),
+            None,
+            "an unknown operation fee must not become a zero-fee estimate"
         );
     }
 
@@ -933,10 +968,11 @@ mod tests {
         journal
             .finish_deposit(
                 &row.id,
+                OperationId::new_random(),
                 outpoint,
                 bitcoin::Amount::from_sat(50_000),
                 bitcoin::Amount::from_sat(324),
-                fedimint_core::Amount::from_msats(105_696),
+                Some(fedimint_core::Amount::from_msats(105_696)),
             )
             .await
             .expect("finish");
@@ -945,6 +981,47 @@ mod tests {
             row.net_credit,
             Some(fedimint_core::Amount::from_msats(49_570_304)),
             "row net_credit must equal the observed spendable balance delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn deposit_net_credit_stays_unset_until_fee_known() {
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+        let row = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(50_000),
+        );
+        journal.insert_deposit(&row).await.expect("insert");
+        let outpoint = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x44; 32]), 0);
+        journal
+            .finish_deposit(
+                &row.id,
+                OperationId::new_random(),
+                outpoint,
+                bitcoin::Amount::from_sat(50_000),
+                bitcoin::Amount::from_sat(324),
+                None,
+            )
+            .await
+            .expect("finish without fee");
+        let row = journal.deposit(&row.id).await.unwrap().unwrap();
+        assert_eq!(row.state, DepositState::Done);
+        assert_eq!(
+            row.net_credit, None,
+            "unknown operation fee must leave net_credit unset"
+        );
+
+        journal
+            .set_deposit_net_credit_if_none(&row.id, fedimint_core::Amount::from_msats(105_696))
+            .await
+            .expect("fill net credit");
+        let row = journal.deposit(&row.id).await.unwrap().unwrap();
+        assert_eq!(
+            row.net_credit,
+            Some(fedimint_core::Amount::from_msats(49_570_304))
         );
     }
 

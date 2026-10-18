@@ -373,7 +373,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/core/struct.ModuleKind
 
 ## 17. Watermark advances only on a terminal pass; adoption is scheduled
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (21 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (25 tests).
 
 ### 17.1 Terminal-only watermark advance
 
@@ -402,7 +402,7 @@ visible is bound by the next tick, which releases the single-flight slot.
 
 ## 18. Real persistence: `JournalBackend`, `DbJournal`, prefix layout, dbtx deviations
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (21 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (25 tests).
 
 ### 18.1 `Database` is a struct, not a trait
 
@@ -541,7 +541,7 @@ Docs: <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.htm
 
 ## 19. `WalletClientConfig`: construction path, defaults, and pre-send dust validation
 
-`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (21 tests).
+`cargo check` + `cargo test -p berlin-wallet-core --lib` → **EXIT 0** (25 tests).
 
 ### 19.1 How the config is constructed and passed
 
@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (21 core tests + CLI 0 tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (25 core tests + CLI 0 tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -1458,18 +1458,28 @@ issuance/output fee, not a `get_balance_for_unit` omission.
 ### 26.2 Fix
 
 `Journal::finish_deposit` / `close_deposit_done_if_open` / `claim_adopt_if_absent` now receive an
-`operation_fee: fedimint_core::Amount` and use:
+`operation_fee: Option<fedimint_core::Amount>` and use:
 
 ```rust
-net_credit(gross, fee).saturating_sub(operation_fee)
+operation_fee.map(|fee| net_credit(gross, fee).saturating_sub(fee))
 ```
 
 The deposit flow obtains it with `Client::get_operation_fees(claim.operation_id)` and passes the
 BTC amount to the journal (`deposit.rs::operation_fee`). `AdoptedClaim` carries the same field.
+`finish_deposit` also persists `operation_id` so a later reconciliation pass can find the fee.
+
+If the fee lookup returns `None`, the journal leaves `net_credit` unset instead of writing zero
+(which would over-report). `deposit::reconcile_missing_net_credits` runs from the adoption task and
+fills it once `get_operation_fees` returns a BTC amount. The lookup is bounded to 5 attempts with
+exponential backoff (500 ms … 2 s).
 
 Tests:
-`journal::tests::net_credit_includes_operation_fee` and
-`journal::tests::deposit_row_net_credit_matches_observed_balance_delta` pin the observed vector:
+`journal::tests::net_credit_includes_operation_fee`,
+`journal::tests::deposit_row_net_credit_matches_observed_balance_delta`,
+`journal::tests::deposit_net_credit_stays_unset_until_fee_known`,
+`deposit::tests::missing_operation_fee_is_not_treated_as_zero`, and
+`journal_db::tests::net_credit_reconciles_from_none` pin the observed vector and the None path
+(in-memory and DB-backed journals):
 
 ```text
 50000 sat − 324 sat − 105696 msat = 49570304 msat
@@ -1489,7 +1499,9 @@ The row now equals the real credited delta.
 ## 27. Crash/restart matrix (Mutinynet)
 
 Data dir `/tmp/opencode/berlin-join`; all rows/journal/client state in RocksDB. "Kill" means
-`SIGKILL`/`abort`, then a fresh process reopens the same DB.
+`SIGKILL`/`abort`, then a fresh process reopens the same DB. `BERLIN_WALLET_CRASH_POINT` is a
+debug-only fault injection: `fault.rs` is gated by `#[cfg(debug_assertions)]` and is a no-op in
+release builds.
 
 ### 27.1 After AddressShown, before funding
 
@@ -1539,7 +1551,11 @@ Data dir `/tmp/opencode/berlin-join`; all rows/journal/client state in RocksDB. 
   balance `41,941,504 msat`, 5,771,264 msat below the settled value. `await-change` for the send
   operation finalized the change and recovered it to `47,711,232 msat`.
 - Fix: `await_change_outputs` now waits for every primary-module change outpoint from
-  `SendMeta.change_outpoint_range` before the crash hook and `set_broadcast`.
+  `SendMeta.change_outpoint_range` before the crash hook and `set_broadcast`. The wait is bounded
+  (`CHANGE_OUTPUT_TIMEOUT = 20 s`, inside the 30 s reconcile timeout). On timeout the row remains
+  `Submitted`; the next reconciliation pass retries instead of blocking.
+  `withdrawal::tests::change_wait_timeout_leaves_reconciliation_headroom` pins the inner/outer
+  timeout ordering.
 - Post-fix repetition (`01a14c2f-2b9d-70d5-b1a0-41484bdb5500`):
   - crash at `after_broadcast`, restart row `Submitted`, balance `36,402,688 msat`;
   - `send-withdraw` set

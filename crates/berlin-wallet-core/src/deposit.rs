@@ -5,7 +5,7 @@ use fedimint_client::Client;
 use fedimint_client::db::ChronologicalOperationLogKey;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
-use fedimint_core::module::AmountUnit;
+use fedimint_core::module::{AmountUnit, Amounts};
 use fedimint_eventlog::EventLogId;
 use fedimint_walletv2_client::{
     FinalReceiveOperationState, ReceiveMeta, WalletClientModule, WalletOperationMeta,
@@ -24,18 +24,59 @@ const SCAN_STATE_WAIT_PER_OP: Duration = Duration::from_millis(500);
 const SCAN_TOTAL_STATE_WAIT: Duration = Duration::from_secs(2);
 const SCAN_RETRY_ATTEMPTS: u32 = 5;
 
+const FEE_LOOKUP_ATTEMPTS: u32 = 5;
+const FEE_LOOKUP_BACKOFF: Duration = Duration::from_millis(500);
+const FEE_LOOKUP_MAX_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Extract the BTC operation fee when the lookup is available.
+///
+/// `None` means the fee data is not available yet; callers must not treat it
+/// as a zero fee. A present `Amounts` without a BTC entry means the operation
+/// genuinely has no BTC-denominated fee.
+fn btc_operation_fee(fees: Option<Amounts>) -> Option<fedimint_core::Amount> {
+    fees.map(|amounts| {
+        amounts
+            .get(&AmountUnit::BITCOIN)
+            .copied()
+            .unwrap_or(fedimint_core::Amount::ZERO)
+    })
+}
+
 /// Fees charged by the primary module for an operation, in BTC msat.
 ///
 /// For a walletv2 deposit claim this is the mintv2 issuance/output fee and is
-/// separate from `ReceiveMeta.fee` (the on-chain claim fee).
+/// separate from `ReceiveMeta.fee` (the on-chain claim fee). The lookup is
+/// bounded; if it is still unavailable, return `None` so the journal leaves
+/// `net_credit` unset rather than persisting an over-estimate.
 async fn operation_fee(
     client: &Client,
     operation_id: OperationId,
-) -> anyhow::Result<fedimint_core::Amount> {
-    let fees = client.get_operation_fees(operation_id).await?;
-    Ok(fees
-        .and_then(|amounts| amounts.get(&AmountUnit::BITCOIN).copied())
-        .unwrap_or(fedimint_core::Amount::ZERO))
+) -> anyhow::Result<Option<fedimint_core::Amount>> {
+    let mut backoff = FEE_LOOKUP_BACKOFF;
+    for attempt in 0..FEE_LOOKUP_ATTEMPTS {
+        match client.get_operation_fees(operation_id).await {
+            Ok(fees) => {
+                if let Some(fee) = btc_operation_fee(fees) {
+                    return Ok(Some(fee));
+                }
+                tracing::debug!(?operation_id, attempt, "operation fees not available yet");
+            }
+            Err(err) => {
+                tracing::debug!(?operation_id, attempt, %err, "operation fee lookup failed");
+            }
+        }
+
+        if attempt + 1 < FEE_LOOKUP_ATTEMPTS {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(FEE_LOOKUP_MAX_BACKOFF);
+        }
+    }
+
+    tracing::warn!(
+        ?operation_id,
+        "operation fees unavailable after bounded retries; leaving net_credit unset"
+    );
+    Ok(None)
 }
 
 /// Create (or return) the single open deposit request for a federation.
@@ -206,7 +247,14 @@ pub async fn watch_deposit(
         BindResult::Bound => {
             let operation_fee = operation_fee(client, claim.operation_id).await?;
             journal
-                .finish_deposit(id, outpoint, claim.value, claim.fee, operation_fee)
+                .finish_deposit(
+                    id,
+                    claim.operation_id,
+                    outpoint,
+                    claim.value,
+                    claim.fee,
+                    operation_fee,
+                )
                 .await?;
         }
         BindResult::TakenBy(_other) => {
@@ -488,10 +536,49 @@ pub async fn scan_receive_claims(
     }))
 }
 
+/// Fill `net_credit` for `Done` deposits whose operation fee was unavailable
+/// when the claim was first recorded. Runs from the adoption task.
+pub async fn reconcile_missing_net_credits(
+    client: &Client,
+    journal: &Journal,
+) -> anyhow::Result<()> {
+    for row in journal.deposits_in(&[DepositState::Done]).await? {
+        if row.net_credit.is_some() {
+            continue;
+        }
+        let Some(operation_id) = row.operation_id else {
+            tracing::warn!(
+                deposit_id = %row.id.0,
+                "done deposit has no operation id; cannot reconcile net_credit"
+            );
+            continue;
+        };
+        if let Some(operation_fee) = operation_fee(client, operation_id).await? {
+            journal
+                .set_deposit_net_credit_if_none(&row.id, operation_fee)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bitcoin::hashes::Hash as _;
+
+    #[test]
+    fn missing_operation_fee_is_not_treated_as_zero() {
+        assert_eq!(btc_operation_fee(None), None);
+        assert_eq!(
+            btc_operation_fee(Some(Amounts::ZERO)),
+            Some(fedimint_core::Amount::ZERO)
+        );
+        assert_eq!(
+            btc_operation_fee(Some(Amounts::new_bitcoin_msats(105_696))),
+            Some(fedimint_core::Amount::from_msats(105_696))
+        );
+    }
 
     fn outpoint(vout: u32) -> bitcoin::OutPoint {
         bitcoin::OutPoint {

@@ -316,8 +316,11 @@ async fn run(
                     .next()
                     .ok_or_else(|| anyhow!("usage: await-change <operation-id>"))?;
                 let id = OperationId::from_str(id).context("invalid operation id")?;
-                await_change_outputs(&client, id).await?;
-                println!("change outputs finalized");
+                if await_change_outputs(&client, id).await? {
+                    println!("change outputs finalized");
+                } else {
+                    println!("timed out; withdrawal remains Submitted and will be retried");
+                }
                 Ok(())
             }
             "list-withdrawals" => {
