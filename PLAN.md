@@ -963,6 +963,9 @@ adopted elsewhere.
   gap larger than 20 and miss older funds. Consider 25–50 or make the gap configurable per
   restore/network before shipping. Do not expect the local application journal to be restored —
   it is not federation state.
+- **Directory backup:** run `backup` with the app stopped, import with `restore-backup` into an
+  empty dir, and assert the imported tree opens with the same identity and client state (normal
+  `run`, never `restore`). Do not treat a journal-only export as a backup.
 - **Crash hooks:** `BERLIN_WALLET_CRASH_POINT` is debug-only (`#[cfg(debug_assertions)]`); release
   builds compile it to a no-op. Use it only for the crash/restart matrix.
 - **Withdrawal:** move the feerate between `send_fee_quote()` and `send()` to exercise quote drift
@@ -1057,6 +1060,27 @@ can stop the task cleanly without aborting a journal write mid-transaction.
 - `FederationInfo` registry row (`invite`, `db_prefix`, `joined_at`) persisted so restart can reopen existing partitions.
 - Recovery: `ClientPreview::recover(self, db_no_decoders: Database, pre_root_secret: RootSecret, backup: Option<ClientBackup>) -> Result<ClientHandle>` then `Client::wait_for_all_recoveries().await`; modules held back during recovery become usable only after `ClientHandle::shutdown(self).await` and `ClientBuilder::open(...)`. The implementation (`client::recover_client`) performs shutdown+reopen on a fresh DB and asserts `all_modules_usable()`. The local application journal is not part of federation recovery.
 - **Fresh 0.12.0 recovery restores balances, not local history.** The recovered client's operation log is **empty**, and the fresh journal has no rows. Therefore deposit and withdrawal lists are empty **by design**, adoption only covers the retained-client-DB case (where Send/Receive ops still exist but the app journal was lost), and in-flight operations are not resumed. See COMPILE.md §30 for the live deposit/withdrawal kill test.
+
+**Recovery policy (0.12.0): the recovery artifact is "mnemonic + client data directory", not the mnemonic alone.**
+A mnemonic-only restore recovers settled balances but:
+- loses all local history (the operation log is empty, so deposit/withdrawal lists are empty);
+- can strand an in-flight deposit (the funded UTXO remains at the federation deposit address and is not re-claimed);
+- does not resume an in-flight withdrawal.
+
+**App-level backup (decision: documented full-directory copy).**
+Fedimint's backup APIs are deprecated. The supported app-level artifact is the **entire data
+directory**: `mnemonic`, `fedimint.rocksdb` (client DB + operation log + walletv2 scanner/index
+state), and `bdk.sqlite`. The CLI provides:
+
+```text
+berlin-wallet backup <destination-dir>        # app must be stopped
+berlin-wallet restore-backup <source-dir>     # import into an empty data dir
+```
+
+Encryption is left to the operator (for example `age -p` or `gpg`) around the directory/archive.
+After import, run the wallet normally (`run`), **not** `restore`: the retained client DB is what
+preserves the scanner/index state. Exporting only the journal is **not** a recovery backup and does
+**not** fix stranded deposits; only the client DB carries the address-index/scanner state.
 - A `join_lock` (`Mutex<()>`) + `active_recoveries` reservation serialize prefix allocation.
 - `open_all` is best-effort: one un-openable federation is warn-logged and skipped.
 
@@ -1084,6 +1108,7 @@ can stop the task cleanly without aborting a journal write mid-transaction.
 - Streams: expose a polling `list_deposits()` / `list_withdrawals()` plus a callback subscription; map `anyhow::Error` to a `thiserror`-based `berlin_wallet_ffi::Error` (uniffi cannot expose `anyhow::Error`).
 - **Post-restore UI contract:** after a fresh restore, both lists are empty **by design**, not because the wallet is broken or has no activity. Show balances and a banner such as **"History unavailable after restore — balances recovered"**, not a generic "No transactions" empty state. `deposit_status(old_id)` / `withdrawal_status(old_id)` return not-found; the UI cannot recover old row ids from federation state. Adoption does not change this for a fresh 0.12.0 restore because the operation log is empty.
 - **Stranded in-flight deposit warning:** a deposit funded before restore may remain unclaimed at a federation deposit address. In testing, requesting a new deposit did **not** re-derive the old address or re-claim the UTXO. The UI must say: **"A previous deposit may still need to be claimed; do not discard the original client data. A new deposit request does not automatically recover it."** Do not present the restored balance as necessarily complete, and do not promise a re-claim flow.
+- **Recovery artifact banner:** make the policy prominent: **"Recovery requires your mnemonic plus the original client data backup. A mnemonic alone recovers settled balances only."** Show the backup command (`backup`) and warn that restoring the mnemonic alone loses history and may strand in-flight deposits.
 - **`ClientHandle::inner_arc()` is `#[cfg(feature = "uniffi")]` only.** The FFI crate must enable `fedimint-client`'s `uniffi` feature (or reach the executor through `ClientHandle::start_executor(&self)` / `Deref<Target = Client>` instead). `ClientHandleArc` is `Arc<ClientHandle>`; `ClientHandle` derefs to `Client`.
 
 `DepositView` carries the nullable credit explicitly:
@@ -1193,12 +1218,16 @@ methods + polling, then add async streams once bindings are verified.
 Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 **Questions for the fedimint dev (0.12.0 recovery):**
+
+**Bug report first:** walletv2 0.12.0 has no public "rescan deposits from index 0" path. After a mnemonic-only restore the scanner's tracked index set starts empty, so a previously funded deposit at an older tweak index is unreachable and remains stranded. Is a public re-scan/re-claim API planned?
+
 1. Does `ClientPreview::recover` + `wait_for_all_recoveries` restore/resume **in-flight** operations, or only settled module state? Our live test says a funded-but-unclaimed deposit and a sent-but-incomplete withdrawal are **not resumed**.
 2. Is the local operation log supposed to survive recovery? It is empty after a fresh restore, which removes all local history and makes orphan adoption impossible except when the client DB is retained.
 3. Is there any supported way to recover history after device loss now that `create_backup` / `download_backup_from_federation` are deprecated (and slated for removal in 0.13.0)? If not, what is the recommended app-level strategy for retaining the operation log / journal?
 4. Is there a supported deposit **re-claim/scan** path after mnemonic-only restore, or must an app re-derive tweak indices itself? Our test shows a new `receive()` does not find a stranded older UTXO.
 5. Is the deposit-address **derivation index** recoverable from federation state (or the client operation log), or is it only local client DB state?
 6. Given backups are deprecated, should an app export/import its own journal (and operation log) as the supported history-recovery strategy? What format/lifetime is recommended?
+7. Is a public "rescan deposits from index 0" planned? This is arguably a bug report, not only a feature request: mnemonic-only restore cannot reclaim a stranded older deposit with today's API.
 
 1. **Wallet-module flow** — **RESOLVED** (VERIFY.md §8): walletv2 uses `receive()` + `await_receive(position)` for deposits and `send()` + `await_final_send_operation_state(id)` for withdrawals. There is no `peg_in`/`allocate_deposit_address_pooled`/`withdraw` in the v2 module.
 2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — **RESOLVED by the live join**: the federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`; `mintv2` is the primary BTC module (`primary_module_for_unit(BITCOIN) = Some(2)`). The client registers only the v2 mint client (`Mintv2ClientInit`); without it, sends fail with `No module to balance a partial transaction (affected unit: AmountUnit(0)`. The v1 mint client is not registered.
@@ -1208,7 +1237,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 6. **UniFFI async** — uniffi 0.32 async export support and per-language binding generation **unverified**.
 7. **Depending on douglaz's `wallet_core`/`wallet-fedimint`** — AGPL-3.0, not on crates.io (git dep at a pinned commit). Either re-implement a small journal inline or take the git dep with the license consequence.
 8. **`tx_builder` construction for fedimint transactions** — **RESOLVED** for walletv2: `send()` is the high-level wrapper that builds/submits internally and returns an `OperationId`; no manual `TransactionBuilder` is needed for peg-out.
-9. **Recovery path (§5)** — **RESOLVED live (COMPILE.md §28)**. Exact 0.12.0 signatures:
+9. **Recovery path (§5)** — **RESOLVED live (COMPILE.md §28)**. **Policy: the recovery artifact is mnemonic + client data directory, not mnemonic alone.** Mnemonic-only restore is balances-only: empty operation log/local history, no in-flight resumption, and possible stranded deposits. Exact 0.12.0 signatures:
    - `ClientPreview::recover(self, db_no_decoders: Database, pre_root_secret: RootSecret, backup: Option<ClientBackup>) -> Result<ClientHandle>` (`builder.rs:1519`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientPreview.html#method.recover>).
    - `Client::wait_for_all_recoveries(&self) -> Result<()>` (`client.rs:1966`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.wait_for_all_recoveries>). It reports success only when every module recovery completed, and returns early on a terminal module failure.
    - `ClientHandle::shutdown(self)` (`client/handle.rs:57`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientHandle.html#method.shutdown>) stops the executor and joins the client task group with a 30 s bound.
@@ -1217,7 +1246,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
    - Live proof: fresh dir + original mnemonic recovered federation `05d83c30…`, identity `f306ff2e…`, ecash `36,402,688 msat`, BDK full scan found `0.00059473 BTC`.
    - **Observed deviation:** a truly fresh recover in 0.12.0 restores module state/balances but leaves the local **operation log empty** (`operations` printed nothing). There is **no local history** to adopt after that restore. Deposit/withdrawal lists are empty by design; the UI must show a restored-wallet banner rather than "no activity". Withdrawal adoption is scoped to the **retained-client-DB** case where Send ops still exist but the journal was lost; it runs on the same adoption tick and is unit-tested.
    - **In-flight operations are not resumed:** live test in COMPILE.md §30 started a deposit (funded, killed before claim) and a withdrawal (killed after `send()` before completion), then restored fresh. Neither was resumed: the deposit stayed an unspent 10,000 sat UTXO at the federation deposit address and was not credited; the withdrawal produced no on-chain tx and the ecash balance was unchanged. In-flight funds are **not safe across device loss** with a fresh restore in 0.12.0.
-   - **Re-claim test failed:** after that restore, `request-deposit 10000` returned `tb1qen7…`, not the stranded `tb1q44…` address, and the scanner did not credit the stranded 10,000 sat UTXO after >100 s. The walletv2 public API exposes only `receive()`/`await_receive()`; `derive_address`, `derive_tweak`, `valid_index`, `next_valid_index`, `receive_output`, and the output scanner are private. There is no public way to request a specific tweak index, force a rescan, or claim a specific outpoint. Re-deriving indices externally and submitting a claim would require reimplementing walletv2 internals (or patching it), not a supported 0.12.0 path.
+   - **Re-claim test failed:** after that restore, `request-deposit 10000` returned `tb1qen7…`, not the stranded `tb1q44…` address, and the scanner did not credit the stranded 10,000 sat UTXO after >100 s. `receive()` returns only the **highest scanner-tracked index**; after a fresh restore the scanner's tracked set starts empty and it derives a new first valid index, so the stranded index is unreachable through the public API. `derive_address`, `derive_tweak`, `valid_index`, `next_valid_index`, `receive_output`, and the output scanner are private. No public method exists to request a specific tweak index, force a rescan from 0, or claim a specific outpoint. A manual re-derivation plus claim would require the private receive state machine (or patching walletv2). **Candidate upstream fix:** expose a public rescan/claim path.
 10. **`WalletClientConfig` construction/defaults** — **RESOLVED** (COMPILE.md §19). `WalletClientInit` is a unit struct with `Default`; the config is per-federation module config delivered via `ClientModuleInitArgs::cfg()`. After join, read it with `Client::config().await` + `ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`. Defaults live in `WalletConfigConsensus::new`: `dust_limit = 10_000 sats`, `fee_consensus.base = 100 sats` plus a federation-chosen `parts_per_million` (capped at 10_000 = 1%), and `send_tx_vbytes`/`receive_tx_vbytes` derived from the guardian count (4 guardians: 228/316). `send_withdrawal` rejects `value < dust_limit` before quoting.
 11. **`ReceiveMeta` full field set** — **UNVERIFIED** beyond `outpoint` and `fee` (VERIFY §8.3/§8.5 exercise those two): the adopted-row path also reads `address`, `value`, and `change_outpoint_range`. Confirm the exact `ReceiveMeta` fields on the pinned 0.12.0 before relying on them; orphan adoption depends on `outpoint` (dedup key), `value` (gross), `fee` (claim fee), and `address` (display).
 12. **Deposit detection without a local bitcoind RPC** — **UNVERIFIED**: `WalletClientInit::default()` is assumed to carry no `DynBitcoindRpc`. The `receive`/`await_receive` path is expected to read **federation-reported chain state** (the federation's wallet module watches the chain), not a local RPC; confirm this before assuming deposits are detected without `ClientBuilder::with_bitcoind_rpc`.

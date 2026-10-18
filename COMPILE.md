@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 1 CLI test).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 2 CLI tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -923,6 +923,8 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
 
 - `init` — create/open the BIP39 mnemonic and SQLite BDK wallet, print a regtest address/balance.
 - `join <invite>` — build a client, print federation id, client identity, wallet network, and minimum withdrawal.
+- `backup <destination-dir>` / `restore-backup <source-dir>` — full data-directory copy
+  (`mnemonic`, `fedimint.rocksdb`, `bdk.sqlite`); app must be stopped, encryption is external.
 - `restore <invite> [esplora-url] [expected-fed-id] [expected-client-identity]` — recover on a fresh
   data dir, assert identity/federation, then full-scan BDK.
 - `run <invite> [esplora-url]` — interactive session with `balance`, `ecash-balance`, `address`,
@@ -1595,6 +1597,10 @@ implemented here.
 
 ## 28. Restore from mnemonic on a fresh data dir (live)
 
+**Policy: the supported recovery artifact is "mnemonic + client data directory", not the mnemonic
+alone.** A mnemonic-only restore is balances-only: no operation log/local history, no in-flight
+resumption, and possible stranded deposits. See §31 for the app-level backup path.
+
 ### 28.1 Exact APIs (fedimint-client 0.12.0)
 
 ```rust
@@ -1950,9 +1956,83 @@ deposit will recover it.
 
 ### 30.9 Additional fedimint-dev questions
 
-1. Is there a supported deposit re-claim/scan path after mnemonic-only restore, or must an app
+**Bug report first:** 0.12.0 has no public "rescan deposits from index 0"; after mnemonic-only
+restore the scanner's tracked set starts empty, so older funded deposit indices are unreachable.
+
+1. Is a public rescan/re-claim path planned?
+2. Is there a supported deposit re-claim/scan path after mnemonic-only restore, or must an app
    re-derive tweak indices itself?
-2. Is the deposit-address derivation index recoverable from federation state (or only from local
+3. Is the deposit-address derivation index recoverable from federation state (or only from local
    client DB state)?
-3. Given backups are deprecated, what is the recommended app-level strategy for retaining the
+4. Given backups are deprecated, what is the recommended app-level strategy for retaining the
    operation log/journal? Should the app export/import its own journal?
+
+---
+
+## 31. Recovery policy and app-level backup (0.12.0)
+
+### 31.1 Policy
+
+**The recovery artifact is "mnemonic + client data directory", not the mnemonic alone.**
+
+A mnemonic-only restore:
+
+- recovers settled module balances;
+- leaves the local operation log empty, so deposit/withdrawal history is empty by design;
+- does not resume in-flight operations;
+- can strand an in-flight deposit at a federation deposit address (it is not re-claimed by a new
+  `receive()`);
+- is not sufficient for an in-flight withdrawal.
+
+The UI must make this prominent, not a footnote.
+
+### 31.2 App-level backup decision
+
+Decision: **documented full-directory copy** (not an in-app encrypted archive yet). Fedimint backup
+APIs are deprecated; the app owns the artifact. The CLI implements:
+
+```text
+berlin-wallet backup <destination-dir>
+berlin-wallet restore-backup <source-dir>
+```
+
+- `backup` requires `mnemonic`, `fedimint.rocksdb`, and `bdk.sqlite`; copies them recursively and
+  refuses a non-empty destination. It must be run with the app stopped.
+- `restore-backup` requires an empty data dir and copies all three back.
+- Encryption is external: e.g. `age -p -o backup.tar.gz.age backup.tar.gz` or `gpg`.
+- After import, start normally with `run`; **do not call `restore`**. The retained client DB is what
+  preserves the walletv2 scanner/index state and the operation log.
+- **A journal-only export is not a recovery backup** and does not fix stranded deposits. The
+  scanner/address-index state lives in the client DB.
+
+Verified manually: backup/import of the live data dir reopened with the same federation id,
+client identity, primary module, and minimum withdrawal. CLI unit test
+`data_dir_backup_round_trips_the_full_artifact` covers file copying; the live import was also opened
+with `join`.
+
+### 31.3 Re-claim limitation (precise)
+
+`WalletClientModule::receive()` returns only the **highest scanner-tracked valid index**. After a
+fresh restore the scanner's tracked set starts empty; it derives a new first valid index rather than
+the previous set. A previously funded UTXO at an older tweak index is therefore unreachable via the
+public API. A manual re-derivation plus claim would need the private `derive_tweak`,
+`receive_output`, and receive state machine (or a walletv2 patch). There is no public "rescan
+deposits from index 0" in 0.12.0.
+
+**Candidate upstream fix / bug report:** expose a supported rescan/re-claim path that walks tweak
+indices from 0 (or a known checkpoint), bounded by the federation's output history, so
+mnemonic-only restore can reclaim stranded deposits.
+
+### 31.4 Fedimint-dev questions
+
+Lead with the bug report: **walletv2 0.12.0 has no public rescan-deposits-from-index-0; a
+mnemonic-only restore leaves older funded deposit indices unreachable.**
+
+1. Is a public rescan/re-claim path planned? If not, is the intended recovery artifact always the
+   client data directory?
+2. Is there a supported deposit re-claim/scan path after mnemonic-only restore, or must an app
+   re-derive tweak indices itself?
+3. Is the deposit-address derivation index recoverable from federation state, or only local client
+   DB state?
+4. Given backups are deprecated, what is the recommended app-level strategy for retaining the
+   operation log/journal? Should the app export/import its own full data directory?

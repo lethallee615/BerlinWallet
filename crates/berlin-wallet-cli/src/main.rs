@@ -33,9 +33,23 @@ const DEFAULT_ESPLORA_URL: &str = "http://127.0.0.1:3002";
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let data_dir = data_dir();
-    std::fs::create_dir_all(&data_dir)?;
-
     let command = args.get(1).map(String::as_str);
+
+    // Directory backup/restore must not open the client DB or create a mnemonic.
+    if command == Some("backup") {
+        let destination = args
+            .get(2)
+            .ok_or_else(|| anyhow!("usage: berlin-wallet backup <destination-dir>"))?;
+        return backup_data_dir(&data_dir, Path::new(destination));
+    }
+    if command == Some("restore-backup") {
+        let source = args
+            .get(2)
+            .ok_or_else(|| anyhow!("usage: berlin-wallet restore-backup <source-dir>"))?;
+        return import_data_dir(&data_dir, Path::new(source));
+    }
+
+    std::fs::create_dir_all(&data_dir)?;
     let mnemonic_path = data_dir.join("mnemonic");
     if command == Some("restore") && !mnemonic_path.exists() {
         anyhow::bail!(
@@ -111,6 +125,121 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Copy the complete recovery artifact: mnemonic, fedimint RocksDB, and BDK SQLite.
+///
+/// Encryption is deliberately left to the caller (for example `age` or `gpg`);
+/// this command only guarantees a consistent directory copy while the app is
+/// stopped. The journal alone is not sufficient: the client DB contains the
+/// walletv2 scanner/index state needed to reclaim deposits.
+fn backup_data_dir(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        source.join("mnemonic").exists(),
+        "backup source has no mnemonic: {}",
+        source.display()
+    );
+    anyhow::ensure!(
+        source.join("fedimint.rocksdb").is_dir(),
+        "backup source has no fedimint.rocksdb: {}",
+        source.display()
+    );
+    anyhow::ensure!(
+        source.join(BDK_DB_FILE).is_file(),
+        "backup source has no {}: {}",
+        BDK_DB_FILE,
+        source.display()
+    );
+    anyhow::ensure!(
+        !destination.exists()
+            || std::fs::read_dir(destination)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false),
+        "backup destination must not exist or must be empty: {}",
+        destination.display()
+    );
+    std::fs::create_dir_all(destination)?;
+
+    copy_file(&source.join("mnemonic"), &destination.join("mnemonic"))?;
+    copy_file(&source.join(BDK_DB_FILE), &destination.join(BDK_DB_FILE))?;
+    copy_dir(
+        &source.join("fedimint.rocksdb"),
+        &destination.join("fedimint.rocksdb"),
+    )?;
+
+    println!("backup written: {}", destination.display());
+    println!("contents: mnemonic, {BDK_DB_FILE}, fedimint.rocksdb");
+    println!("stop the wallet before copying/archiving; encrypt the result with age/gpg.");
+    println!(
+        "restore by importing this directory with `restore-backup`, then run normally (never `restore`)."
+    );
+    Ok(())
+}
+
+/// Import a full directory backup into an empty data directory.
+fn import_data_dir(destination: &Path, source: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        source.join("mnemonic").is_file(),
+        "backup source has no mnemonic: {}",
+        source.display()
+    );
+    anyhow::ensure!(
+        source.join("fedimint.rocksdb").is_dir(),
+        "backup source has no fedimint.rocksdb: {}",
+        source.display()
+    );
+    anyhow::ensure!(
+        source.join(BDK_DB_FILE).is_file(),
+        "backup source has no {}: {}",
+        BDK_DB_FILE,
+        source.display()
+    );
+    anyhow::ensure!(
+        !destination.exists()
+            || std::fs::read_dir(destination)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false),
+        "restore target must not exist or must be empty: {}",
+        destination.display()
+    );
+    std::fs::create_dir_all(destination)?;
+
+    copy_file(&source.join("mnemonic"), &destination.join("mnemonic"))?;
+    copy_file(&source.join(BDK_DB_FILE), &destination.join(BDK_DB_FILE))?;
+    copy_dir(
+        &source.join("fedimint.rocksdb"),
+        &destination.join("fedimint.rocksdb"),
+    )?;
+
+    println!("backup imported: {}", destination.display());
+    println!(
+        "run the wallet normally (not `restore`) so the retained client DB/scanner state is used."
+    );
+    Ok(())
+}
+
+fn copy_file(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    std::fs::copy(source, destination)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn copy_dir(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            copy_file(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 async fn open_database(data_dir: &Path) -> anyhow::Result<Database> {
     open_rocksdb(&data_dir.join("fedimint.rocksdb")).await
 }
@@ -126,6 +255,12 @@ fn print_help() {
     println!("commands:");
     println!("  init                                create/open the local wallet");
     println!("  join <invite>                       join a federation and print its config");
+    println!(
+        "  backup <dest-dir>                   copy mnemonic + client DB + BDK DB (app stopped)"
+    );
+    println!(
+        "  restore-backup <src-dir>            import a full directory backup into an empty data dir"
+    );
     println!("  restore <invite> [esplora] [fed] [identity]");
     println!("                                      recover on a fresh data dir + full BDK scan");
     println!("  run <invite> [esplora-url]          interactive manual-run session");
@@ -626,6 +761,38 @@ fn parse_sat(value: Option<&str>) -> anyhow::Result<Amount> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_dir_backup_round_trips_the_full_artifact() {
+        let base = std::env::temp_dir().join(format!(
+            "berlin-wallet-backup-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = base.join("source");
+        let backup = base.join("backup");
+        let imported = base.join("imported");
+        std::fs::create_dir_all(source.join("fedimint.rocksdb")).unwrap();
+        std::fs::write(source.join("mnemonic"), b"test mnemonic").unwrap();
+        std::fs::write(source.join(BDK_DB_FILE), b"bdk").unwrap();
+        std::fs::write(source.join("fedimint.rocksdb/CURRENT"), b"rocks").unwrap();
+
+        backup_data_dir(&source, &backup).expect("backup");
+        import_data_dir(&imported, &backup).expect("import");
+
+        assert_eq!(
+            std::fs::read(imported.join("mnemonic")).unwrap(),
+            b"test mnemonic"
+        );
+        assert_eq!(std::fs::read(imported.join(BDK_DB_FILE)).unwrap(), b"bdk");
+        assert_eq!(
+            std::fs::read(imported.join("fedimint.rocksdb/CURRENT")).unwrap(),
+            b"rocks"
+        );
+        std::fs::remove_dir_all(base).ok();
+    }
 
     #[test]
     fn pending_net_credit_is_not_rendered_as_zero() {
