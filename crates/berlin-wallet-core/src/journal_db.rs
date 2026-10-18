@@ -1113,6 +1113,7 @@ impl JournalBackend for DbJournal {
     async fn set_withdrawal_quote(
         &self,
         id: &WithdrawalId,
+        fee: bitcoin::Amount,
         quote: FeeQuoteWire,
     ) -> anyhow::Result<()> {
         let this = self;
@@ -1124,6 +1125,7 @@ impl JournalBackend for DbJournal {
             async move {
                 let mut dbtx = this.db.begin_transaction().await;
                 if let Some(mut row) = get_withdrawal(&mut dbtx, &id).await? {
+                    row.fee = Some(fee);
                     row.quote = Some(quote);
                     row.updated_at = now_ms();
                     write_withdrawal(&mut dbtx, &row).await?;

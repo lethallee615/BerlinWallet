@@ -1140,11 +1140,13 @@ PegWallet::new(data_dir: String) -> Arc<PegWallet>
 
 // local / federation lifecycle
 init() -> Result<InitView>;                         // create/load mnemonic; local only
-join(invite_code: String, esplora_url: String) -> Result<WalletInfo>; // async
+open(esplora_url: String) -> Result<WalletInfo>;    // existing data dir, NO invite (ClientBuilder::open)
+join(invite_code: String, esplora_url: String) -> Result<WalletInfo>; // FRESH join only
 restore(invite_code: String, esplora_url: String) -> Result<RestoreView>; // async, fresh dir
 restore_backup(source_dir: String, invite_code: String, esplora_url: String)
     -> Result<WalletInfo>;                          // async, retained client DB
 backup(destination_dir: String) -> Result<()>;      // async, full-dir copy + DB lock
+shutdown() -> Result<()>;                           // stop tasks/client, release DB lock
 
 // deposits
 request_deposit(amount_sat: u64) -> Result<DepositView>; // async, returns before address
@@ -1154,8 +1156,8 @@ cancel_deposit(deposit_id: String) -> Result<DepositView>;
 list_deposits() -> Result<Vec<DepositView>>;
 
 // withdrawals
-request_withdrawal(address: String, amount_sat: u64) -> Result<WithdrawalView>;
-send_withdrawal(withdrawal_id: String) -> Result<WithdrawalView>; // async
+request_withdrawal(address: String, amount_sat: u64) -> Result<WithdrawalView>; // quoted, Quoting
+send_withdrawal(withdrawal_id: String) -> Result<WithdrawalView>; // async, re-quotes + drift-checks
 withdrawal_status(withdrawal_id: String) -> Result<WithdrawalView>;
 cancel_withdrawal(withdrawal_id: String) -> Result<WithdrawalView>;
 list_withdrawals() -> Result<Vec<WithdrawalView>>;
@@ -1192,10 +1194,54 @@ pub struct DepositView {
 }
 ```
 
-`WithdrawalView` carries `origin`, state (including `Broadcast`), value/fee, `operation_id`, `txid`,
-`custom_meta`, error, and timestamps.
+`WithdrawalView` carries `origin`, state (including `Broadcast`), value, `quoted_fee_sat`, the
+three quote components, `net_msat`, `operation_id`, `txid`, `custom_meta`, error, and timestamps.
 
-### 6.3 UI contract
+### 6.3 Open / join / restore contract
+
+- `init()` is local: it creates/loads the mnemonic only.
+- `open(esplora_url)` is for an **existing** data directory with no invite. It calls
+  `ClientBuilder::open`/`open_existing_client`, verifies the persisted config and root-secret hash,
+  and never joins. Use this on every app restart after the first join/restore.
+- `join(invite, esplora_url)` is **fresh-join only**. If the client DB already has a config it
+  returns an error telling the caller to use `open`.
+- `restore(invite, esplora_url)` is the mnemonic-only fresh recovery path.
+- `restore_backup(source_dir, invite, esplora_url)` imports the full data directory and opens the
+  retained client DB (it still verifies the federation id from the invite).
+
+### 6.4 Shutdown contract (mobile)
+
+`shutdown()` must be called when the app is backgrounded. It:
+
+1. removes the wallet state (no new commands),
+2. sends the shared watch shutdown signal to the BDK/fedimint/adoption tasks,
+3. waits (bounded) and aborts tasks that do not stop,
+4. consumes the `ClientHandle` via `ClientHandle::shutdown`, stopping the executor and task group,
+5. drops the BDK/Journals and releases the RocksDB/SQLite locks.
+
+If it is not called, the DB remains locked and `backup()` fails with `database is locked`; mobile
+platforms may also kill the process while RocksDB is live.
+
+### 6.5 Withdrawal quote UX
+
+`request_withdrawal` performs `send_fee()` + `send_fee_quote()` and persists the quote while the row
+is still `Quoting`. `WithdrawalView` exposes:
+
+```text
+quoted_fee_sat       on-chain send_fee at quote time
+quote_input_msat     FeeQuote.input BTC amount
+quote_output_msat    FeeQuote.output BTC amount
+quote_dust_msat      FeeQuote.dust BTC amount
+net_msat             value + quoted_fee + federation quote fees
+```
+
+The UI must show `quoted_fee_sat`, the quote components, and `net_msat`, and require **explicit user
+confirmation** before calling `send_withdrawal`. `send_withdrawal` re-quotes immediately before
+`send()` and drift-checks against the persisted quote. On drift it persists the new quote and
+returns an error (`QuoteChanged`); the UI must re-display the new quote and ask for confirmation
+again. No silent send on a changed quote.
+
+### 6.6 UI contract
 
 - After a fresh restore, `list_deposits()`/`list_withdrawals()` are empty **by design**; show
   **"History unavailable after restore — balances recovered"**, not "No transactions".

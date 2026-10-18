@@ -55,6 +55,31 @@ pub async fn build_client(
     Ok(Arc::new(client))
 }
 
+/// Open an existing client database without an invite code.
+///
+/// Used by mobile after `init()` on an already-initialized data directory.
+/// `ClientBuilder::open` verifies the stored root-secret hash; the federation
+/// id comes from the persisted `ClientConfig`.
+pub async fn open_existing_client(
+    db: Database,
+    connectors: ConnectorRegistry,
+    root_secret: RootSecret,
+) -> anyhow::Result<ClientHandleArc> {
+    let config = Client::get_config_from_db(&db)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("client database not initialized; use join()"))?;
+    let federation_id = config.calculate_federation_id();
+    let client = configured_builder()
+        .await?
+        .open(connectors, db, root_secret)
+        .await?;
+    anyhow::ensure!(
+        client.federation_id() == federation_id,
+        "opened client federation id mismatch"
+    );
+    Ok(Arc::new(client))
+}
+
 /// Restore a client from a mnemonic-derived root secret on a fresh database.
 ///
 /// `ClientPreview::recover` runs module recovery but holds recovering modules

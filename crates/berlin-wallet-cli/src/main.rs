@@ -527,7 +527,8 @@ async fn command_request_withdraw(
         amount.to_sat()
     );
     let row =
-        withdrawal::request_withdrawal(journal, federation_id, address.to_owned(), amount).await?;
+        withdrawal::request_withdrawal(client, journal, federation_id, address.to_owned(), amount)
+            .await?;
     println!("withdrawal {} state={:?}", row.id.0, row.state);
     Ok(())
 }
@@ -607,7 +608,8 @@ async fn command_withdraw(
     );
 
     let row =
-        withdrawal::request_withdrawal(journal, federation_id, address.to_owned(), amount).await?;
+        withdrawal::request_withdrawal(client, journal, federation_id, address.to_owned(), amount)
+            .await?;
     withdrawal::send_withdrawal(client, journal, &row.id).await?;
     println!("withdrawal {} -> {address}", row.id.0);
     println!("{:#?}", journal.withdrawal(&row.id).await?);

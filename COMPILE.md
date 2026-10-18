@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 3 CLI tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (30 core tests + 3 CLI tests + 3 FFI tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -2136,12 +2136,14 @@ read-only Esplora client.
 ```rust
 PegWallet::new(data_dir: String) -> Arc<PegWallet>;
 
-init() -> Result<InitView>;
-join(invite_code: String, esplora_url: String) -> Result<WalletInfo>;       // async
-restore(invite_code: String, esplora_url: String) -> Result<RestoreView>;   // async, fresh dir
+init() -> Result<InitView>;                                  // mnemonic only, local
+open(esplora_url: String) -> Result<WalletInfo>;              // existing DB, no invite
+join(invite_code: String, esplora_url: String) -> Result<WalletInfo>; // fresh join only
+restore(invite_code: String, esplora_url: String) -> Result<RestoreView>; // fresh dir
 restore_backup(source_dir: String, invite_code: String, esplora_url: String)
-    -> Result<WalletInfo>;                                                  // async, retained DB
-backup(destination_dir: String) -> Result<()>;                              // async
+    -> Result<WalletInfo>;                                    // retained client DB
+backup(destination_dir: String) -> Result<()>;                // async
+shutdown() -> Result<()>;                                     // stop tasks/client, release locks
 
 request_deposit(amount_sat: u64) -> Result<DepositView>;
 fund_deposit(deposit_id: String) -> Result<DepositView>;
@@ -2149,8 +2151,8 @@ deposit_status(deposit_id: String) -> Result<DepositView>;
 cancel_deposit(deposit_id: String) -> Result<DepositView>;
 list_deposits() -> Result<Vec<DepositView>>;
 
-request_withdrawal(address: String, amount_sat: u64) -> Result<WithdrawalView>;
-send_withdrawal(withdrawal_id: String) -> Result<WithdrawalView>;
+request_withdrawal(address: String, amount_sat: u64) -> Result<WithdrawalView>; // quoted, Quoting
+send_withdrawal(withdrawal_id: String) -> Result<WithdrawalView>; // re-quote + drift-check
 withdrawal_status(withdrawal_id: String) -> Result<WithdrawalView>;
 cancel_withdrawal(withdrawal_id: String) -> Result<WithdrawalView>;
 list_withdrawals() -> Result<Vec<WithdrawalView>>;
@@ -2173,6 +2175,34 @@ address, funding txid, operation id, and timestamps.
 `RestoreView` includes balances, min withdrawal, `operation_log_empty`,
 `history_unavailable`, journal counts, and BDK last-active external/internal indices.
 
+`WithdrawalView` quote fields:
+
+```text
+quoted_fee_sat       on-chain send_fee at quote time
+quote_input_msat     FeeQuote.input BTC amount
+quote_output_msat    FeeQuote.output BTC amount
+quote_dust_msat      FeeQuote.dust BTC amount
+net_msat             value + quoted_fee + federation quote fees
+```
+
+`request_withdrawal` quotes and persists while `Quoting`; the UI must display these and require
+explicit confirmation before `send_withdrawal`. `send_withdrawal` re-quotes immediately before
+send and compares to the persisted quote. On drift it persists the new quote and returns an error;
+the UI must re-display and re-confirm.
+
+### 33.2.1 Open/shutdown contract
+
+- `init()` only creates/loads the mnemonic.
+- `open(esplora_url)` is the no-invite path for an existing client DB (`ClientBuilder::open` via
+  `open_existing_client`); use it on app restart.
+- `join(invite, esplora_url)` is fresh-join only and errors if a client config already exists.
+- `restore` is mnemonic-only fresh recovery; `restore_backup` imports the full directory and opens
+  the retained client DB (verifying the invite's federation id).
+- `shutdown()` takes the state, sends the watch shutdown signal, waits up to 5 s per task and aborts
+  stragglers, then consumes `ClientHandle` via `ClientHandle::shutdown` to stop the executor/task
+  group. Mobile MUST call it on backgrounding; otherwise the DB stays locked and `backup` fails
+  with `database is locked`.
+
 ### 33.3 Smoke test
 
 `scripts/ffi-smoke.sh`:
@@ -2185,8 +2215,8 @@ address, funding txid, operation id, and timestamps.
 Verified: `ffi smoke ok: cdylib + kotlin bindings (PegWallet/DepositView surface present)`.
 Generated Kotlin methods exactly: `backup`, `balanceSat`, `cancelDeposit`, `cancelWithdrawal`,
 `depositStatus`, `ecashBalanceMsat`, `fundDeposit`, `init`, `join`, `listDeposits`,
-`listWithdrawals`, `minWithdrawalSat`, `requestDeposit`, `requestWithdrawal`, `restore`,
-`restoreBackup`, `sendWithdrawal`, `withdrawalStatus`.
+`listWithdrawals`, `minWithdrawalSat`, `open`, `requestDeposit`, `requestWithdrawal`, `restore`,
+`restoreBackup`, `sendWithdrawal`, `shutdown`, `withdrawalStatus`.
 
 `cargo tree -p berlin-wallet-ffi -e features` shows only the top-level `uniffi` crate/features; no
 fedimint-client `uniffi` feature is enabled.
@@ -2194,5 +2224,5 @@ fedimint-client `uniffi` feature is enabled.
 ### 33.4 Tests
 
 - `cargo check --workspace`: exit 0.
-- `cargo test --workspace`: 30 core + 3 CLI + 0 FFI unit tests, exit 0.
+- `cargo test --workspace`: 30 core + 3 CLI + 3 FFI unit tests, exit 0.
 - FFI smoke script: exit 0.

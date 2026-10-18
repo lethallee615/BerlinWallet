@@ -341,6 +341,7 @@ pub trait JournalBackend: Send + Sync {
     async fn set_withdrawal_quote(
         &self,
         id: &WithdrawalId,
+        fee: bitcoin::Amount,
         quote: FeeQuoteWire,
     ) -> anyhow::Result<()>;
     async fn set_withdrawal_failed(&self, id: &WithdrawalId, err: &str) -> anyhow::Result<()>;
@@ -888,10 +889,12 @@ impl JournalBackend for MemoryJournal {
     async fn set_withdrawal_quote(
         &self,
         id: &WithdrawalId,
+        fee: bitcoin::Amount,
         quote: FeeQuoteWire,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.withdrawals.get_mut(id) {
+            row.fee = Some(fee);
             row.quote = Some(quote);
             row.updated_at = now_ms();
         }

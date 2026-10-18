@@ -19,6 +19,7 @@ use crate::ops::WithdrawalId;
 /// wallet is the peg-in funding source, while a withdrawal pays out to an
 /// external on-chain address.
 pub async fn request_withdrawal(
+    client: &Client,
     journal: &Journal,
     federation_id: FederationId,
     address: String,
@@ -31,7 +32,19 @@ pub async fn request_withdrawal(
     let _: bitcoin::Address<bitcoin::address::NetworkUnchecked> = address.parse()?;
     let row = WithdrawalRow::new(WithdrawalId::new(), federation_id, address, value);
     journal.insert_withdrawal(&row).await?;
-    Ok(row)
+
+    // Quote while the row is still Quoting so the UI can show the on-chain fee
+    // and net debit and require explicit confirmation before send_withdrawal.
+    let module = client.get_first_module::<WalletClientModule>()?;
+    let chain_fee = module.send_fee().await?;
+    let quote = module.send_fee_quote(value).await?;
+    journal
+        .set_withdrawal_quote(&row.id, chain_fee, (&quote).into())
+        .await?;
+    journal
+        .withdrawal(&row.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("withdrawal row disappeared after quote"))
 }
 
 /// Reject a withdrawal that the federation would reject as dust before any
@@ -400,16 +413,29 @@ pub async fn send_withdrawal(
         return await_final_state(client, journal, id, operation_id).await;
     }
 
-    let chain_fee = module.send_fee().await?;
-    let quote: FeeQuote = module.send_fee_quote(value).await?;
-    journal.set_withdrawal_quote(id, (&quote).into()).await?;
-
-    // Re-quote immediately before send(); abort on drift (#9098).
+    // Use the quote persisted by request_withdrawal (the UI showed it), or
+    // establish one for a row created directly. Re-quote immediately before
+    // send() and abort on drift. On drift persist the new quote so the UI can
+    // display it and ask for confirmation again.
+    let (expected_fee, expected_quote) = match (row.fee, row.quote.clone()) {
+        (Some(fee), Some(quote)) => (fee, FeeQuote::from(quote)),
+        _ => {
+            let fee = module.send_fee().await?;
+            let quote = module.send_fee_quote(value).await?;
+            journal
+                .set_withdrawal_quote(id, fee, (&quote).into())
+                .await?;
+            (fee, quote)
+        }
+    };
     let fresh_fee = module.send_fee().await?;
-    let fresh_quote: FeeQuote = module.send_fee_quote(value).await?;
-    if fresh_fee != chain_fee || fresh_quote != quote {
+    let fresh_quote = module.send_fee_quote(value).await?;
+    if fresh_fee != expected_fee || fresh_quote != expected_quote {
+        journal
+            .set_withdrawal_quote(id, fresh_fee, (&fresh_quote).into())
+            .await?;
         return Err(PegError::QuoteChanged {
-            quoted: quote,
+            quoted: expected_quote,
             current: fresh_quote,
         }
         .into());
