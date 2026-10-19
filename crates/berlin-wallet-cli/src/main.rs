@@ -267,8 +267,8 @@ async fn run(
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     loop {
-        print!("berlin-wallet> ");
-        io::stdout().flush()?;
+        eprint!("berlin-wallet> ");
+        io::stderr().flush()?;
         let Some(line) = lines.next() else { break };
         let line = line?;
         let mut parts = line.split_whitespace();
