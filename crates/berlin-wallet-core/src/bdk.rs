@@ -319,7 +319,7 @@ impl BdkWallet {
         let local_tip = self.wallet().latest_checkpoint();
         let local_height = local_tip.height();
         let remote_height = client.get_height().await.map_err(SyncAttemptError::from)?;
-        let _remote_tip_hash = client
+        let remote_tip_hash = client
             .get_tip_hash()
             .await
             .map_err(SyncAttemptError::from)?;
@@ -341,6 +341,12 @@ impl BdkWallet {
             remote_at_local,
         ) == ReorgDecision::Orphaned
         {
+            tracing::info!(
+                local_height,
+                remote_height,
+                remote_tip = ?remote_tip_hash,
+                "BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan"
+            );
             // The incremental update cannot lower the local tip (merge_chains
             // returns an empty changeset when the update tip is lower and all
             // overlapping hashes agree). Rebuild from scratch and full-scan.

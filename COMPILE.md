@@ -707,7 +707,7 @@ recover (PLAN §4.2).
 
 ## 20. Real client, BDK wallet, sync tasks, and CLI harness
 
-`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (37 core tests + 3 CLI tests + 4 FFI tests).
+`cargo check --workspace` + `cargo test --workspace` → **EXIT 0** (37 core tests + 4 CLI tests + 4 FFI tests).
 The CLI was also run locally: `berlin-wallet init` created `<data-dir>/mnemonic`,
 `<data-dir>/bdk.sqlite`, loaded the persisted wallet on a second run, and printed a regtest
 `bcrt1...` address. The RocksDB test (below) reopens the database and verifies journal rows survive the drop;
@@ -2230,7 +2230,7 @@ fedimint-client `uniffi` feature is enabled.
 ### 33.4 Tests
 
 - `cargo check --workspace`: exit 0.
-- `cargo test --workspace`: 37 core + 3 CLI + 4 FFI unit tests, exit 0.
+- `cargo test --workspace`: 37 core + 4 CLI + 4 FFI unit tests, exit 0.
 - FFI smoke script: exit 0.
 
 ---
@@ -2313,4 +2313,71 @@ returns the error to the loop, which prints it and returns to the prompt. Backgr
   in a scanned temp DB, write on the same `BdkWallet`; asserts no SQLite 1032 and next index does
   not regress)
 
-`cargo check --workspace`: exit 0. `cargo test --workspace`: 37 core + 3 CLI + 4 FFI tests pass.
+`cargo check --workspace`: exit 0. `cargo test --workspace`: 37 core + 4 CLI + 4 FFI tests pass.
+
+---
+
+## 35. Logging and the reorg-rescan notice
+
+### 35.1 CLI subscriber
+
+`crates/berlin-wallet-cli/src/main.rs:init_tracing()` installs one stderr subscriber at the very
+start of `main()`:
+
+```rust
+let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+let _ = tracing_subscriber::fmt()
+    .with_env_filter(filter)
+    .with_writer(std::io::stderr)
+    .try_init();
+```
+
+- `RUST_LOG` controls filtering; unset/invalid falls back to `info`.
+- Output goes to **stderr**, leaving stdout for the REPL prompt and command output.
+- `try_init()` is idempotent; CLI test `tracing_init_is_idempotent` calls it twice and does not
+  panic.
+
+`tracing-subscriber = "=0.3.23"` with the `env-filter` feature is a CLI dependency.
+
+### 35.2 FFI subscriber ownership
+
+`crates/berlin-wallet-ffi` deliberately **does not install a tracing subscriber**. The embedding
+mobile app owns logging. If the host wants core logs it should install its own subscriber using
+`try_init()` (or a `Once` guard); there is no second initialization inside the FFI library, so
+double-init cannot panic. Core log calls do not force a subscriber.
+
+### 35.3 Reorg rescan log
+
+The orphaned path in `BdkWallet::sync` now emits (`bdk.rs:344-349`):
+
+```rust
+tracing::info!(
+    local_height,
+    remote_height,
+    remote_tip = ?remote_tip_hash,
+    "BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan"
+);
+```
+
+Level: **INFO** — a full DB rebuild/rescan is operationally significant.
+
+Exact invocations:
+
+```bash
+# all info from the wallet/core
+RUST_LOG=info ./target/debug/berlin-wallet run <invite-code> <esplora-url>
+
+# only the BDK sync module (the rescan line)
+RUST_LOG=berlin_wallet_core::bdk=info ./target/debug/berlin-wallet run <invite-code> <esplora-url>
+```
+
+Text rendered:
+
+```text
+INFO berlin_wallet_core::bdk: BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan local_height=... remote_height=... remote_tip=...
+```
+
+Verified with `RUST_LOG=info` against an invalid Esplora URL: core `tracing` lines (including
+`berlin_wallet_core::sync: BDK chain sync failed; will retry`) appeared on stderr while stdout stayed
+clean. The rescan line is in the `ReorgDecision::Orphaned` branch immediately before
+`reset_and_full_scan()`.

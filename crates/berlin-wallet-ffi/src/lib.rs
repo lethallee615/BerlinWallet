@@ -3,6 +3,10 @@
 //! One namespace: this crate's `PegWallet` object. Fedimint's own `uniffi`
 //! feature is deliberately not enabled; `ClientHandleArc` is kept directly and
 //! Deref/`get_first_module_arc` are used instead of `ClientHandle::inner_arc`.
+//!
+//! This library does **not** install a tracing subscriber: the embedding app
+//! owns logging. The CLI installs one with `try_init`, so a host and the CLI
+//! cannot double-panic; core logs flow to whichever subscriber the host set.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

@@ -659,6 +659,7 @@ dependencies = [
  "fedimint-walletv2-client",
  "fs-lock",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

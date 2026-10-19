@@ -32,6 +32,7 @@ const DEFAULT_ESPLORA_URL: &str = "http://127.0.0.1:3002";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_tracing();
     let args: Vec<String> = std::env::args().collect();
     let data_dir = data_dir();
     let command = args.get(1).map(String::as_str);
@@ -128,6 +129,18 @@ async fn main() -> anyhow::Result<()> {
 
 async fn open_database(data_dir: &Path) -> anyhow::Result<Database> {
     open_rocksdb(&data_dir.join("fedimint.rocksdb")).await
+}
+
+/// Install a stderr tracing subscriber. `RUST_LOG` controls filtering and
+/// defaults to `info`; `try_init` makes repeated calls harmless.
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 fn data_dir() -> PathBuf {
@@ -651,6 +664,12 @@ fn parse_sat(value: Option<&str>) -> anyhow::Result<Amount> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracing_init_is_idempotent() {
+        init_tracing();
+        init_tracing();
+    }
 
     #[test]
     fn data_dir_backup_round_trips_bdk_state_and_sidecars() {
