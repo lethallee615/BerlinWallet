@@ -2317,9 +2317,195 @@ returns the error to the loop, which prints it and returns to the prompt. Backgr
 
 ---
 
-## 35. Logging and the reorg-rescan notice
+## 35. Reorg safety — BDK does not reconcile a height-decreasing reorg
 
-### 35.1 CLI subscriber
+Status: upstream finding; worked around in this repo (b91ebca, 9eebd19).
+Verified live 2026-10-19.
+
+### Symptom
+After a reorg that *shortens* the chain, the wallet keeps anchors to orphaned
+blocks and reports the orphaned tx inside `confirmed`. The confirmed balance is
+inflated by the full orphaned amount and stays stale indefinitely.
+
+### Repro (devimint, regtest)
+
+```text
+address                      # note the address
+devimint
+
+btc sendtoaddress <addr> 0.001
+btc generatetoaddress 1 <mining_address>
+H=$(btc getblockcount)
+REPL
+
+sync ; balance              # confirmed +0.001
+
+devimint
+
+btc invalidateblock $(btc getblockhash $H)
+REPL
+
+sync ; balance              # STALE: still inside confirmed
+```
+
+### Evidence
+- `btc getrawmempool` — tx back in the mempool
+- `btc gettransaction <txid>` — `confirmations: 0`
+- esplora `GET /tx/<txid>` — `"status":{"confirmed":false}`
+- wallet `balance` — tx still counted in `confirmed`
+- Ruled out mempool fallback: RBF-replacing the tx so it is in neither the chain
+  nor the mempool leaves the balance unchanged.
+- Ruled out "just needs a nudge": mining one block at the *same* height as the
+  orphaned block leaves it stale; only when the tip advances past the stored
+  checkpoint height does it self-correct.
+
+### Mechanism (verified against pinned sources, not docs)
+- `bdk_wallet 3.2.0`, `bdk_chain 0.23.3`, `bdk_esplora 0.22.1`, `esplora-client 0.12.3`
+- `Wallet::latest_checkpoint()` -> `self.chain.tip()` — bdk_wallet/src/wallet/mod.rs:874
+- `Wallet::apply_update()` -> `LocalChain::apply_update` — wallet/mod.rs:2459,
+  bdk_chain/src/local_chain.rs:174
+- `bdk_esplora::chain_update` — bdk_esplora/src/async_ext.rs:227; `fetch_block`
+  returns `None` above the remote tip (:197, :206-216), so the update's
+  `CheckPoint` cannot contain a block at the local tip height when the remote tip
+  is lower.
+- `LocalChain::merge_chains` — local_chain.rs:560 — collects
+  `potentially_invalidated_heights` (:608) but purges them only in the
+  hash-mismatch branch (:650-657). With a lower remote tip and agreeing overlap
+  it reaches agreement and returns an empty changeset; local blocks above the
+  remote tip survive with their anchors.
+- Unit proof: `bdk::tests::lower_tip_update_is_a_noop_in_bdk` — local chain 0..5
+  plus an update for 0..2 with matching hashes yields an empty changeset and
+  leaves the local tip at 5.
+
+### Impact
+Any balance or funding decision in the window after a reorg uses coins that no
+longer exist. This contradicts the earlier PLAN/COMPILE claim that "reorg is
+handled by walletv2/BDK, no journal state needed".
+
+### Fix (ours, in the wallet)
+`BdkWallet::sync` verifies ancestry before trusting the incremental update: read
+the stored checkpoint tip, fetch `/blocks/tip/hash` and `/blocks/tip/height`, and
+if the stored tip is not an ancestor of the remote tip, rebuild the wallet DB and
+full-scan. Detects both a lower remote tip and a hash mismatch at equal height.
+`reorg_decision()` is unit-tested for all three cases.
+
+DB swap hand-off: the scanned temp DB is checkpointed, the old connection
+dropped, the file renamed, and a new connection opened against the final path —
+otherwise the first write fails with `SQLITE_READONLY_DBMOVED` (1032). Keychain
+next-index is raised to `max(rebuilt, previous)` so a revealed-but-unused address
+is never handed out twice.
+
+### Verification
+Live: fund, mine, `sync`, `invalidateblock`, `sync` -> balance corrects
+immediately with no tip advance and no 1032; `address` returns a fresh value.
+Rescan is announced at INFO.
+
+## 36. devimint's esplora panics on a live reorg
+
+Status: upstream finding; worked around by manual restart.
+
+`electrs-esplora 0.4.1`, `src/new_index/schema.rs:298`: thread 'main' panicked at src/new_index/schema.rs:298:9:
+assertion left == right failed
+left: 0x066563c1...
+right: 0x76baa724... It asserts the block hash at an already-indexed height instead of rolling back.
+Dies on every `btc invalidateblock` while running. Reconciles fine if it discovers
+the reorg at boot — the assert is only in the live update path.
+
+Impact: `invalidateblock` is the standard reorg-testing tool and devimint's own
+esplora cannot survive it, so every reorg test needs a manual restart.
+
+Restart recipe in §40: `--jsonrpc-import`; `--daemon-dir` and `--blocks-dir` must
+include the `regtest` component; `--cookie user:pass` (not `--daemon-auth`).
+
+## 37. walletv2 operation meta — change_outpoint_range is unverifiable
+
+Status: upstream finding, no workaround needed.
+
+`Receive`/`Send` operation meta carries `change_outpoint_range.txid` values that
+are never broadcast: not in the mempool, not in any block (scanned 240..265 via
+`getblock`). The index range also exceeds the real tx's output count — 1..12 on a
+2-output tx, 0..59 on a deposit.
+
+Evidence: `aa5f12f0…` and `3c7acb29…` absent from all blocks; the real change is
+confirmed but in a different tx (`4c107818…` vout 0).
+
+`await-change` still reports "change outputs finalized", so it is not verifying
+the outpoints it names. Since the wait exists to guarantee change is journaled
+before `set_broadcast`, a phantom txid is a correctness gap, not cosmetics.
+
+## 38. Withdrawal quote vs charged fee mismatch (224 msat)
+
+`send_fee_quote` reported `input: 1500msat` + `output: 100900msat` = 102,400;
+`operation-fees` reported 102,624 actually charged. The debit reconciles exactly
+as value + on-chain fee + 102,624, so accounting is internally consistent — the
+*quote* is what doesn't reconstruct the charge. The PLAN has a quote-drift
+re-check in `send()`; this says it isn't catching it.
+
+## 39. Observability gaps
+
+- `watch` polls silently for its whole duration. A hang is indistinguishable from
+  progress. Needs a heartbeat or an initial "awaiting claim, position N" line.
+- `sync` treated a connection refusal as fatal and killed the REPL. FIXED
+  (b91ebca): connect/timeout/request errors retry with bounded backoff (3 attempts,
+  250/500 ms), parse/4xx are permanent; the CLI returns to the prompt.
+- The CLI installed no tracing subscriber, so every `tracing::` line in core was
+  silently dropped — including the adoption-pass warnings. FIXED (890a24d):
+  subscriber on stderr, `RUST_LOG`-controlled, `try_init()` so it is idempotent;
+  FFI deliberately does not install one so the host owns logging.
+- Cosmetic: the REPL prompt was on stdout while logs go to stderr, so log records
+  landed mid-prompt and needed an Enter to recover. FIXED (eba79a6): prompt now on
+  stderr, so prompts and logs share one channel.
+- The mintv2 operation fee (~0.106% on top of the claim fee; ~0.42% round trip at
+  100k sat) is not previewed at `request-deposit`. It is accounted for in
+  `net_credit`, but a user should see it before committing.
+
+## 40. Build / environment notes (Fedora 44)
+
+- `BINDGEN_EXTRA_CLANG_ARGS` must include clang's own resource dir
+  (`-isystem /usr/lib64/clang/<MAJOR>/include`) plus the standard search paths
+  from `clang -E -v`. It pins a clang **major version** and goes stale on any
+  clang upgrade — re-derive it, don't copy it.
+- `LIBCLANG_PATH=/usr/lib64`. Both are baked into `.cargo/config.toml` `[env]`;
+  that file is machine-specific and a stale `/tmp` path must not be committed.
+- `aws-lc-sys` 0.41.0 and `librocksdb-sys` need a C++17 compiler; `gcc-c++` and
+  `clang` are required on Fedora.
+- `~/.local/bin/cmake` (4.4.4) shadows `/usr/bin/cmake`; both work, but note it.
+- devimint esplora restart (see §36):
+
+```text
+nohup esplora --network regtest
+--daemon-dir "$FM_BTC_DIR/regtest"
+--daemon-rpc-addr 127.0.0.1:10016
+--cookie bitcoin:bitcoin
+--jsonrpc-import
+--db-dir /tmp/esplora-rr
+--http-addr 127.0.0.1:10025
+--monitoring-addr 127.0.0.1:10026
+--timestamp -v \
+
+    /tmp/esplora-rr.log 2>&1 &
+```
+
+The `blk*.dat` path fails even with the correct `regtest` subdirectory;
+`--jsonrpc-import` works.
+
+## 41. Known limitation — restore strands in-flight operations
+
+Restore recovers client identity and balances exactly, but 0.12.0 does not resume
+in-flight operations and there is no public re-claim path: a fresh restore produces
+an empty operation log and an in-flight deposit is stranded. Hence the recovery
+story is "mnemonic + client data directory", and backup is unencrypted by design
+(age/gpg it).
+
+Still open: a reorg that orphans a *credited deposit* — whether the watermark or
+`net_credit` can double-count. The BDK side is now proven correct, so this test is
+no longer confounded by the §35 bug.
+
+---
+
+## 42. Logging and the reorg-rescan notice
+
+### 42.1 CLI subscriber
 
 `crates/berlin-wallet-cli/src/main.rs:init_tracing()` installs one stderr subscriber at the very
 start of `main()`:
@@ -2339,14 +2525,14 @@ let _ = tracing_subscriber::fmt()
 
 `tracing-subscriber = "=0.3.23"` with the `env-filter` feature is a CLI dependency.
 
-### 35.2 FFI subscriber ownership
+### 42.2 FFI subscriber ownership
 
 `crates/berlin-wallet-ffi` deliberately **does not install a tracing subscriber**. The embedding
 mobile app owns logging. If the host wants core logs it should install its own subscriber using
 `try_init()` (or a `Once` guard); there is no second initialization inside the FFI library, so
 double-init cannot panic. Core log calls do not force a subscriber.
 
-### 35.3 Reorg rescan log
+### 42.3 Reorg rescan log
 
 The orphaned path in `BdkWallet::sync` now emits (`bdk.rs:344-349`):
 
