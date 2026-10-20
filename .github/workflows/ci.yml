@@ -12,10 +12,10 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install native build dependencies
         run: |
@@ -31,9 +31,10 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
+          rustflags: "--cfg bdk_wallet_unstable -D warnings"
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v7
         with:
           path: |
             ~/.cargo/registry
