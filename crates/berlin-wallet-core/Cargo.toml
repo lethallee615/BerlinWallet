@@ -1,8 +1,14 @@
 [package]
 name = "berlin-wallet-core"
-version = "0.1.0"
-edition = "2024"
-description = "Berlin Wallet core: Fedimint walletv2 + BDK peg-in/peg-out orchestration."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
 
 [lib]
 name = "berlin_wallet_core"

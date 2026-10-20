@@ -2,6 +2,16 @@
 resolver = "3"
 members = ["crates/berlin-wallet-core", "crates/berlin-wallet-cli", "crates/berlin-wallet-ffi"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Berlin Wallet: Fedimint walletv2 + BDK peg-in/peg-out orchestration with a UniFFI surface."
+repository = "https://github.com/lethallee615/berlin-wallet"
+rust-version = "1.91"
+keywords = ["bitcoin", "fedimint", "bdk", "wallet", "uniffi"]
+categories = ["cryptography::cryptocurrencies", "finance"]
+
 [patch.crates-io]
 fedimint-aead = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }
 fedimint-api-client = { git = "https://github.com/fedimint/fedimint", tag = "v0.12.0" }

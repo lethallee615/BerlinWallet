@@ -1,8 +1,14 @@
 [package]
 name = "berlin-wallet-cli"
-version = "0.1.0"
-edition = "2024"
-description = "Manual-run harness for Berlin Wallet core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
 
 [[bin]]
 name = "berlin-wallet"
