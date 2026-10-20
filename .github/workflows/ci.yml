@@ -33,16 +33,6 @@ jobs:
           components: rustfmt, clippy
           rustflags: "--cfg bdk_wallet_unstable -D warnings"
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v7
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
       - name: Check formatting
         run: cargo fmt --check
 
