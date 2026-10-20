@@ -1,7 +1,9 @@
-# VERIFY.md — verification of AGENTS.md / PLAN.md against real crates
+# API Verification — first pass
+
+Verification of `../AGENTS.md` / `PLAN.md` against real crates
 
 **Deliverable:** a compiling crate (`berlin-wallet`, single binary at repo root) whose
-`src/main.rs` references every API name claimed in AGENTS.md / PLAN.md, plus this report.
+`src/main.rs` references every API name claimed in `../AGENTS.md` / `PLAN.md`, plus this report.
 
 - `cargo check` → **exit 0** (763-package lockfile).
 - Nothing was executed; all references are in dead `#[allow(...)]` functions and `main`
@@ -11,7 +13,7 @@
 
 > Section-numbering note: the task referred to "PLAN.md §6" for dependencies and "§7" for API
 > names, but in the actual `PLAN.md` the dependency table is **§2** and the API map is **§8**.
-> This report covers the actual dependency table (§2) and the full API surface (§8 + AGENTS.md
+> This report covers the actual dependency table (§2) and the full API surface (§8 + ../AGENTS.md
 > "Confirmed API names").
 
 ---
@@ -148,7 +150,7 @@ location (`fedimint *-0.12.0`, `bdk_*` as pinned). "✓ compiled" means `cargo c
 
 ## 2. Wrong names (claimed → actual)
 
-| Claimed (AGENTS.md / PLAN.md) | Reality | Actual name / path | Source link |
+| Claimed (../AGENTS.md / PLAN.md) | Reality | Actual name / path | Source link |
 |---|---|---|---|
 | `EsploraClient` | **does not exist** anywhere | `bdk_esplora::EsploraAsyncExt` (async) / `EsploraExt` (blocking) traits, impl'd for `esplora_client::AsyncClient` / `BlockingClient` | https://docs.rs/bdk_esplora/0.22.1/bdk_esplora/trait.EsploraAsyncExt.html |
 | `EsploraClient::scan` | **no `scan` method exists** | full sync = `EsploraAsyncExt::full_scan`; partial sync = `EsploraAsyncExt::sync` | https://docs.rs/bdk_esplora/0.22.1/bdk_esplora/trait.EsploraAsyncExt.html |

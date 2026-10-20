@@ -1,4 +1,4 @@
-# Berlin Wallet
+# API Verification
 
 Compile-verified deviations for the `berlin-wallet-core` scaffold.
 
@@ -2462,11 +2462,11 @@ re-check in `send()`; this says it isn't catching it.
 ## 40. Build / environment notes (Fedora 44)
 
 - `BINDGEN_EXTRA_CLANG_ARGS` must include clang's own resource dir
-  (`-isystem /usr/lib64/clang/<MAJOR>/include`) plus the standard search paths
-  from `clang -E -v`. It pins a clang **major version** and goes stale on any
-  clang upgrade — re-derive it, don't copy it.
-- `LIBCLANG_PATH=/usr/lib64`. Both are baked into `.cargo/config.toml` `[env]`;
-  that file is machine-specific and a stale `/tmp` path must not be committed.
+  (`-isystem /usr/lib64/clang/22/include` on the current Fedora 44 toolchain) plus
+  the standard search paths from `clang -E -v`. `22` is the current clang major
+  version; re-derive it on any clang upgrade — don't copy it.
+- `LIBCLANG_PATH=/usr/lib64`. Set both variables in the shell; they are
+  intentionally not in `.cargo/config.toml`, because they are machine-specific.
 - `aws-lc-sys` 0.41.0 and `librocksdb-sys` need a C++17 compiler; `gcc-c++` and
   `clang` are required on Fedora.
 - `~/.local/bin/cmake` (4.4.4) shadows `/usr/bin/cmake`; both work, but note it.

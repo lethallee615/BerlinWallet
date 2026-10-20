@@ -28,7 +28,7 @@ berlin_wallet/                  # workspace root
 ## Pinned dependencies
 
 Versions below are verified against the crates.io sparse index + the committed `Cargo.lock`
-(see VERIFY.md §3).
+(see `docs/API-VERIFICATION-FIRST-PASS.md` §3).
 
 | Crate | Version | Role |
 |---|---|---|
@@ -75,13 +75,13 @@ declare `rust-version = 1.91`. Edition: 2024.
   (`[build] rustflags = ["--cfg", "bdk_wallet_unstable"]`) plus `bdk_wallet` features
   `["bdk-tx", "file_store", "rusqlite"]`.
 
-Working setup in this sandbox (see VERIFY.md §0 for the alternatives that failed):
+Working setup (see `docs/API-VERIFICATION-FIRST-PASS.md` §0 for the alternatives that failed):
 
 ```bash
-rustup toolchain install 1.91 --profile minimal
-uv tool install cmake
-uv pip install --target /tmp/opencode/lc libclang   # glibc-compatible libclang (PyPI)
-# LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS are set in .cargo/config.toml [env]
+rustup toolchain install 1.91 --profile minimal --component rustfmt --component clippy
+# Install cmake + a C++17 compiler + libclang for your platform.
+# LIBCLANG_PATH and BINDGEN_EXTRA_CLANG_ARGS come from the shell; re-derive them
+# per machine (see docs/API-VERIFICATION.md §40).
 cargo check   # -> exit 0
 ```
 
@@ -103,7 +103,7 @@ cargo check   # -> exit 0
 
 ## Confirmed API names (cite these, do not invent)
 
-Compile-verified against the real crates; see VERIFY.md §1 for full signatures and source locations.
+Compile-verified against the real crates; see `docs/API-VERIFICATION-FIRST-PASS.md` §1 for full signatures and source locations.
 
 **fedimint-client 0.12.0**: `Client::builder()`, `ClientBuilder::with_module()`, `ClientBuilder::preview()`, `ClientPreview::join()` / `ClientPreview::recover(...)` (**both return `ClientHandle`, not `Client`**), `Client::wait_for_all_recoveries()`, `Client::all_modules_usable()`, `ClientHandle::shutdown(self)`, `Client::get_balance_for_unit()`, `get_operation_fees(operation_id)`, `get_first_module::<M>()`, `get_first_module_arc::<M>()`, `finalize_and_submit_transaction()`, `transaction_updates()`, `await_primary_bitcoin_module_output()`, `subscribe_balance_changes()`, `spawn_federation_reconnect()`, `start_executor()` (**receiver is `self: &Arc<Self>`**), `db()`, `executor()`, `handle_events()`, `get_event_log_transient_receiver()`, `chain_id()`, `federation_id()`, `config()`.
 - `OutPointRange` = `fedimint_core::OutPointRange` (crate root)
@@ -128,7 +128,7 @@ Compile-verified against the real crates; see VERIFY.md §1 for full signatures 
 
 ## Not verified (reference only — not compile-verified)
 
-**fedimint-clientd (reference daemon)**: `AppState::new(db_path)`, `multimint.register_new(invite_code)`, `multimint.all()`; REST endpoints `/v2/onchain/deposit-address`, `/v2/onchain/await-deposit`, `/v2/onchain/withdraw`. Read from the `fedimint/fedimint-clientd` `main.rs` GitHub source; `multimint` is a path crate, not a crates.io dependency, so VERIFY.md did **not** compile-verify these.
+**fedimint-clientd (reference daemon)**: `AppState::new(db_path)`, `multimint.register_new(invite_code)`, `multimint.all()`; REST endpoints `/v2/onchain/deposit-address`, `/v2/onchain/await-deposit`, `/v2/onchain/withdraw`. Read from the `fedimint/fedimint-clientd` `main.rs` GitHub source; `multimint` is a path crate, not a crates.io dependency, so `docs/API-VERIFICATION-FIRST-PASS.md` did **not** compile-verify these.
 
 ## Mandatory rule for all future work
 

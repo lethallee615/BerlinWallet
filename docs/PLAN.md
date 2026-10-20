@@ -13,9 +13,9 @@ Fedimint ↔ BDK peg wallet crate (UniFFI-exposable).
 | https://docs.rs/bdk-wallet/3.2.0 | `Wallet` API (create/load, addresses, `build_tx`, `apply_update`/`take_staged`/`persist`, chain sync) |
 | https://github.com/douglaz/fedimint-wallets | `wallet-fedimint`: `MultiClient`, `FedimintJournal` (app prefix `[0x00]`, raw-byte + serde_json rows, atomic intent+index transitions), `executor`/`runtime` |
 | https://github.com/fedimint/fedimint-sdk | `onchain.rs` / `onchain/v2.rs` usage patterns (`find_claim`, 120 s address wait) |
-| `VERIFY.md` §8 (this repo) | **Ground truth** for the wallet module: published versions, exact signatures, observation paths, hazards |
+| `API-VERIFICATION-FIRST-PASS.md` §8 (this repo) | **Ground truth** for the wallet module: published versions, exact signatures, observation paths, hazards |
 
-All three fedimint crates are at **0.12.0** (released 27 Aug 2026) and **bdk_wallet 3.2.0** (released 20 Sep 2026). The wallet module is **`fedimint-walletv2-client`**, not the v1 `fedimint-wallet-client` (see VERIFY.md §8; the v1 names are SUPERSEDED).
+All three fedimint crates are at **0.12.0** (released 27 Aug 2026) and **bdk_wallet 3.2.0** (released 20 Sep 2026). The wallet module is **`fedimint-walletv2-client`**, not the v1 `fedimint-wallet-client` (see API-VERIFICATION-FIRST-PASS.md §8; the v1 names are SUPERSEDED).
 
 ---
 
@@ -76,7 +76,7 @@ Do **not** enable `bdk_wallet`'s `keys-bip39` feature: it requires `bip39 ^2.2.2
 published (crates.io index max is `2.2.0`). `bdk_wallet`'s `bdk-tx` feature requires
 `--cfg bdk_wallet_unstable` (see Build requirements).
 
-The v1 `fedimint-wallet-client` crate is **superseded** by the two walletv2 crates above (VERIFY.md §8).
+The v1 `fedimint-wallet-client` crate is **superseded** by the two walletv2 crates above (API-VERIFICATION-FIRST-PASS.md §8).
 
 **MSRV:** `1.91` (effective). `bdk_wallet` advertises `1.85`, but `fedimint-connectors 0.12.0` pulls
 `iroh 1.0.3` / `iroh-base 1.3.0` / `netwatch 0.19.3` / `portmapper 0.19.3` / `n0-*`, all of which
@@ -85,7 +85,7 @@ declare `rust-version = 1.91`. The default 1.89 toolchain cannot build the graph
 
 **bitcoin unification:** confirmed **YES** — a single `bitcoin 0.32.8` in `Cargo.toml`/`Cargo.lock`.
 
-### Build requirements (verified — see VERIFY.md §0/§5)
+### Build requirements (verified — see API-VERIFICATION-FIRST-PASS.md §0/§5)
 
 - **Toolchain 1.91.1** — commit `rust-toolchain.toml` (`channel = "1.91.1"`).
 - **`cmake`** — required by `aws-lc-sys`, a hard (non-optional) dependency of **both** `fedimint-core` and `fedimint-connectors`, which force its `bindgen` feature via the `ssl` feature.
@@ -112,9 +112,9 @@ cargo check   # -> exit 0
 ```rust
 // berlin-wallet-core/src/client.rs
 use fedimint_client::{Client, ClientBuilder, ClientHandle, ClientHandleArc, RootSecret};
-use fedimint_client::module::module::init::ClientModuleInit; // real path (VERIFY.md §2)
+use fedimint_client::module::module::init::ClientModuleInit; // real path (API-VERIFICATION-FIRST-PASS.md §2)
 use fedimint_mintv2_client::MintClientInit as Mintv2ClientInit;
-use fedimint_walletv2_client::WalletClientInit;               // walletv2 (VERIFY.md §8)
+use fedimint_walletv2_client::WalletClientInit;               // walletv2 (API-VERIFICATION-FIRST-PASS.md §8)
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
 
@@ -135,7 +135,7 @@ pub async fn build_client(
 }
 ```
 
-Confirmed (VERIFY.md §1): `Client::builder() -> Result<ClientBuilder>`,
+Confirmed (API-VERIFICATION-FIRST-PASS.md §1): `Client::builder() -> Result<ClientBuilder>`,
 `ClientBuilder::with_module<M: ClientModuleInit>(&mut self, module_init: M)`,
 `ClientBuilder::preview(self, ConnectorRegistry, &InviteCode) -> Result<ClientPreview>`,
 `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`,
@@ -161,16 +161,16 @@ must distinguish them. BDK descriptors use this derived network, not a hard-code
 Storage layout (douglaz `MultiClient`): one `Database`; fedimint client `i` lives at
 `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under `[0x00]`. The core
 accepts any `Database`; the CLI uses the persistent SQLite backend
-(`<data-dir>/fedimint.rocksdb`; the SQLite backend remains available for mobile, see COMPILE.md §20.7).
+(`<data-dir>/fedimint.rocksdb`; the SQLite backend remains available for mobile, see API-VERIFICATION.md §20.7).
 
 ---
 
 ## 4. Peg flows (walletv2 — deposit + withdrawal)
 
-All API names/signatures below are exactly those in **VERIFY.md §8.2/§8.3** (ground truth). The
+All API names/signatures below are exactly those in **API-VERIFICATION-FIRST-PASS.md §8.2/§8.3** (ground truth). The
 wallet module is `fedimint_walletv2_client::WalletClientModule`.
 
-### 4.0 Exact signatures (verbatim from VERIFY.md §8.2)
+### 4.0 Exact signatures (verbatim from API-VERIFICATION-FIRST-PASS.md §8.2)
 
 ```rust
 pub async fn receive(&self) -> Address;                 // no Result, no OperationId
@@ -200,7 +200,7 @@ pub async fn tx_chain(&self) -> FederationResult<Vec<TxInfo>>;
 pub async fn pending_tx_chain(&self) -> FederationResult<Vec<TxInfo>>;
 ```
 
-And the position anchor (`fedimint-client 0.12.0`, VERIFY.md §1):
+And the position anchor (`fedimint-client 0.12.0`, API-VERIFICATION-FIRST-PASS.md §1):
 
 ```rust
 pub async fn get_next_event_log_id(&self) -> EventLogId;
@@ -613,7 +613,7 @@ match module.await_final_send_operation_state(operation_id).await {
 }
 ```
 
-Related walletv2 methods (VERIFY.md §8.2): `receive_fee() -> Result<bitcoin::Amount, ReceiveError>`,
+Related walletv2 methods (API-VERIFICATION-FIRST-PASS.md §8.2): `receive_fee() -> Result<bitcoin::Amount, ReceiveError>`,
 `send_fee() -> Result<bitcoin::Amount, SendError>`,
 `send_fee_quote(amount: bitcoin::Amount) -> anyhow::Result<FeeQuote>`,
 `max_sendable_amount(balance, fee) -> anyhow::Result<bitcoin::Amount>`,
@@ -737,7 +737,7 @@ douglaz `FedimintJournal`). The partial-unique invariants (`deposit_requests_one
 `withdrawal_requests_one_open`) are enforced **in code, inside the same `dbtx`** as the insert and
 the close — not by a database engine. The SQL is shown only to make the constraints explicit.
 
-The KV layout uses exact-key open indexes (`COMPILE.md §18.3`):
+The KV layout uses exact-key open indexes (`API-VERIFICATION.md §18.3`):
 `0x05 ++ federation_id(32) -> Envelope<DepositId>` and
 `0x06 ++ federation_id(32) -> Envelope<WithdrawalId>`. `insert_deposit`/`insert_withdrawal` read
 the index with `raw_get_bytes` in the same `dbtx`, then write row + index atomically; every
@@ -844,7 +844,7 @@ the existing open row, or `Applied`/`Skipped` — instead of a spurious error.
 
 **`FeeQuoteWire` (typed quote encoding).** `FeeQuote` is `Debug + Clone + PartialEq + Eq` but
 **not** `Serialize`, so the `quote` column carries a typed wire struct, not the `Option<String>`
-placeholder from COMPILE.md:
+placeholder from API-VERIFICATION.md:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1098,7 +1098,7 @@ can stop the task cleanly without aborting a journal write mid-transaction.
 - Every money intent gets an **idempotency key** and a **deterministic correlation id** (deposit: `position`; withdrawal: client ULID).
 - `FederationInfo` registry row (`invite`, `db_prefix`, `joined_at`) persisted so restart can reopen existing partitions.
 - Recovery: `ClientPreview::recover(self, db_no_decoders: Database, pre_root_secret: RootSecret, backup: Option<ClientBackup>) -> Result<ClientHandle>` then `Client::wait_for_all_recoveries().await`; modules held back during recovery become usable only after `ClientHandle::shutdown(self).await` and `ClientBuilder::open(...)`. The implementation (`client::recover_client`) performs shutdown+reopen on a fresh DB and asserts `all_modules_usable()`. The local application journal is not part of federation recovery.
-- **Fresh 0.12.0 recovery restores balances, not local history.** The recovered client's operation log is **empty**, and the fresh journal has no rows. Therefore deposit and withdrawal lists are empty **by design**, adoption only covers the retained-client-DB case (where Send/Receive ops still exist but the app journal was lost), and in-flight operations are not resumed. See COMPILE.md §30 for the live deposit/withdrawal kill test.
+- **Fresh 0.12.0 recovery restores balances, not local history.** The recovered client's operation log is **empty**, and the fresh journal has no rows. Therefore deposit and withdrawal lists are empty **by design**, adoption only covers the retained-client-DB case (where Send/Receive ops still exist but the app journal was lost), and in-flight operations are not resumed. See API-VERIFICATION.md §30 for the live deposit/withdrawal kill test.
 
 **Recovery policy (0.12.0): the recovery artifact is "mnemonic + client data directory", not the mnemonic alone.**
 A mnemonic-only restore recovers settled balances but:
@@ -1334,7 +1334,7 @@ again. No silent send on a changed quote.
 
 ## 8. What I'm guessing at (needs verification against source code)
 
-Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
+Items API-VERIFICATION-FIRST-PASS.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 **Questions for the fedimint dev (0.12.0 recovery):**
 
@@ -1348,15 +1348,15 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 6. Given backups are deprecated, should an app export/import its own journal (and operation log) as the supported history-recovery strategy? What format/lifetime is recommended?
 7. Is a public "rescan deposits from index 0" planned? This is arguably a bug report, not only a feature request: mnemonic-only restore cannot reclaim a stranded older deposit with today's API.
 
-1. **Wallet-module flow** — **RESOLVED** (VERIFY.md §8): walletv2 uses `receive()` + `await_receive(position)` for deposits and `send()` + `await_final_send_operation_state(id)` for withdrawals. There is no `peg_in`/`allocate_deposit_address_pooled`/`withdraw` in the v2 module.
+1. **Wallet-module flow** — **RESOLVED** (API-VERIFICATION-FIRST-PASS.md §8): walletv2 uses `receive()` + `await_receive(position)` for deposits and `send()` + `await_final_send_operation_state(id)` for withdrawals. There is no `peg_in`/`allocate_deposit_address_pooled`/`withdraw` in the v2 module.
 2. **Whether `WalletClientModule` or `MintClientModule` is the primary module for BTC** — **RESOLVED by the live join**: the federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`; `mintv2` is the primary BTC module (`primary_module_for_unit(BITCOIN) = Some(2)`). The client registers only the v2 mint client (`Mintv2ClientInit`); without it, sends fail with `No module to balance a partial transaction (affected unit: AmountUnit(0)`. The v1 mint client is not registered.
 3. **`ClientBuilder::open` vs `join` signatures** — **RESOLVED**: `join` is `ClientPreview::join(self, db_no_decoders: Database, pre_root_secret: RootSecret) -> Result<ClientHandle>`; `ClientBuilder::open(self, connectors, db_no_decoders, pre_root_secret) -> Result<ClientHandle>` (`builder.rs:483`) opens an existing DB and verifies the stored secret hash. `Client::get_config_from_db(&db) -> Option<ClientConfig>` (`client.rs:459`) detects it; `build_client` uses `open` when present.
-4. **BDK persistence call shape** — **RESOLVED** (VERIFY.md §1): `PersistedWallet::create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` and `PersistedWallet::load(&mut P, LoadParams) -> Result<Option<Self>, LoadWithPersistError<P::Error>>`.
+4. **BDK persistence call shape** — **RESOLVED** (API-VERIFICATION-FIRST-PASS.md §1): `PersistedWallet::create(&mut P, CreateParams) -> Result<Self, CreateWithPersistError<P::Error>>` and `PersistedWallet::load(&mut P, LoadParams) -> Result<Option<Self>, LoadWithPersistError<P::Error>>`.
 5. **Chain source choice** — esplora/electrum/bitcoind-rpc; a product decision. `bdk_esplora::EsploraAsyncExt::sync`/`full_scan` is the verified esplora path.
 6. **UniFFI async** — uniffi 0.32 async export support and per-language binding generation **unverified**.
 7. **Depending on douglaz's `wallet_core`/`wallet-fedimint`** — AGPL-3.0, not on crates.io (git dep at a pinned commit). Either re-implement a small journal inline or take the git dep with the license consequence.
 8. **`tx_builder` construction for fedimint transactions** — **RESOLVED** for walletv2: `send()` is the high-level wrapper that builds/submits internally and returns an `OperationId`; no manual `TransactionBuilder` is needed for peg-out.
-9. **Recovery path (§5)** — **RESOLVED live (COMPILE.md §28)**. **Policy: the recovery artifact is mnemonic + client data directory, not mnemonic alone.** Mnemonic-only restore is balances-only: empty operation log/local history, no in-flight resumption, and possible stranded deposits. Exact 0.12.0 signatures:
+9. **Recovery path (§5)** — **RESOLVED live (API-VERIFICATION.md §28)**. **Policy: the recovery artifact is mnemonic + client data directory, not mnemonic alone.** Mnemonic-only restore is balances-only: empty operation log/local history, no in-flight resumption, and possible stranded deposits. Exact 0.12.0 signatures:
    - `ClientPreview::recover(self, db_no_decoders: Database, pre_root_secret: RootSecret, backup: Option<ClientBackup>) -> Result<ClientHandle>` (`builder.rs:1519`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientPreview.html#method.recover>).
    - `Client::wait_for_all_recoveries(&self) -> Result<()>` (`client.rs:1966`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.Client.html#method.wait_for_all_recoveries>). It reports success only when every module recovery completed, and returns early on a terminal module failure.
    - `ClientHandle::shutdown(self)` (`client/handle.rs:57`; <https://docs.rs/fedimint-client/0.12.0/fedimint_client/struct.ClientHandle.html#method.shutdown>) stops the executor and joins the client task group with a 30 s bound.
@@ -1364,9 +1364,9 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
    - Backups: `Option<ClientBackup>` is `None`; `create_backup`/`download_backup_from_federation` are deprecated in 0.12.0 and slated for removal in 0.13.0.
    - Live proof: fresh dir + original mnemonic recovered federation `05d83c30…`, identity `f306ff2e…`, ecash `36,402,688 msat`, BDK full scan found `0.00059473 BTC`.
    - **Observed deviation:** a truly fresh recover in 0.12.0 restores module state/balances but leaves the local **operation log empty** (`operations` printed nothing). There is **no local history** to adopt after that restore. Deposit/withdrawal lists are empty by design; the UI must show a restored-wallet banner rather than "no activity". Withdrawal adoption is scoped to the **retained-client-DB** case where Send ops still exist but the journal was lost; it runs on the same adoption tick and is unit-tested.
-   - **In-flight operations are not resumed:** live test in COMPILE.md §30 started a deposit (funded, killed before claim) and a withdrawal (killed after `send()` before completion), then restored fresh. Neither was resumed: the deposit stayed an unspent 10,000 sat UTXO at the federation deposit address and was not credited; the withdrawal produced no on-chain tx and the ecash balance was unchanged. In-flight funds are **not safe across device loss** with a fresh restore in 0.12.0.
+   - **In-flight operations are not resumed:** live test in API-VERIFICATION.md §30 started a deposit (funded, killed before claim) and a withdrawal (killed after `send()` before completion), then restored fresh. Neither was resumed: the deposit stayed an unspent 10,000 sat UTXO at the federation deposit address and was not credited; the withdrawal produced no on-chain tx and the ecash balance was unchanged. In-flight funds are **not safe across device loss** with a fresh restore in 0.12.0.
    - **Re-claim test failed:** after that restore, `request-deposit 10000` returned `tb1qen7…`, not the stranded `tb1q44…` address, and the scanner did not credit the stranded 10,000 sat UTXO after >100 s. `receive()` returns only the **highest scanner-tracked index**; after a fresh restore the scanner's tracked set starts empty and it derives a new first valid index, so the stranded index is unreachable through the public API. `derive_address`, `derive_tweak`, `valid_index`, `next_valid_index`, `receive_output`, and the output scanner are private. No public method exists to request a specific tweak index, force a rescan from 0, or claim a specific outpoint. A manual re-derivation plus claim would require the private receive state machine (or patching walletv2). **Candidate upstream fix:** expose a public rescan/claim path.
-10. **`WalletClientConfig` construction/defaults** — **RESOLVED** (COMPILE.md §19). `WalletClientInit` is a unit struct with `Default`; the config is per-federation module config delivered via `ClientModuleInitArgs::cfg()`. After join, read it with `Client::config().await` + `ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`. Defaults live in `WalletConfigConsensus::new`: `dust_limit = 10_000 sats`, `fee_consensus.base = 100 sats` plus a federation-chosen `parts_per_million` (capped at 10_000 = 1%), and `send_tx_vbytes`/`receive_tx_vbytes` derived from the guardian count (4 guardians: 228/316). `send_withdrawal` rejects `value < dust_limit` before quoting.
+10. **`WalletClientConfig` construction/defaults** — **RESOLVED** (API-VERIFICATION.md §19). `WalletClientInit` is a unit struct with `Default`; the config is per-federation module config delivered via `ClientModuleInitArgs::cfg()`. After join, read it with `Client::config().await` + `ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`. Defaults live in `WalletConfigConsensus::new`: `dust_limit = 10_000 sats`, `fee_consensus.base = 100 sats` plus a federation-chosen `parts_per_million` (capped at 10_000 = 1%), and `send_tx_vbytes`/`receive_tx_vbytes` derived from the guardian count (4 guardians: 228/316). `send_withdrawal` rejects `value < dust_limit` before quoting.
 11. **`ReceiveMeta` full field set** — **UNVERIFIED** beyond `outpoint` and `fee` (VERIFY §8.3/§8.5 exercise those two): the adopted-row path also reads `address`, `value`, and `change_outpoint_range`. Confirm the exact `ReceiveMeta` fields on the pinned 0.12.0 before relying on them; orphan adoption depends on `outpoint` (dedup key), `value` (gross), `fee` (claim fee), and `address` (display).
 12. **Deposit detection without a local bitcoind RPC** — **UNVERIFIED**: `WalletClientInit::default()` is assumed to carry no `DynBitcoindRpc`. The `receive`/`await_receive` path is expected to read **federation-reported chain state** (the federation's wallet module watches the chain), not a local RPC; confirm this before assuming deposits are detected without `ClientBuilder::with_bitcoind_rpc`.
 13. **`await_receive` has no operation id/meta** — **RESOLVED in design**: the Success arm reuses `scan_receive_claims(client)` (the same scan as adoption), takes the unbound claim, and reads `ReceivePaymentEvent.operation_id` + `ReceiveMeta { outpoint, value, fee }`; `claim_figures` is gone (§4.1 step 7).
@@ -1388,7 +1388,7 @@ Items VERIFY.md resolved are marked **RESOLVED**; the rest remain unverified.
 
 ---
 
-## 10. Compile-verified deviations (folded from COMPILE.md)
+## 10. Compile-verified deviations (folded from API-VERIFICATION.md)
 
 The scaffold `crates/berlin-wallet-core` compiles with `cargo check` (**EXIT 0**). This section records
 every place the plan's sketches were reconciled with the real APIs. `file:line` refers to the
@@ -1430,10 +1430,10 @@ scaffold; docs.rs links are for the pinned versions.
    `journal_db::DbJournal`, while `Journal::in_memory()` keeps the unit-test backend. Every
    transition is a read-check-write inside one `DatabaseTransaction`, and the single-open /
    unique-claim invariants are enforced in that transaction. `Database` is a concrete struct (not
-   a trait), so the constructor takes `Database`, not `Arc<dyn Database>` (COMPILE.md §18). docs:
+   a trait), so the constructor takes `Database`, not `Arc<dyn Database>` (API-VERIFICATION.md §18). docs:
    <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.Database.html>,
    <https://docs.rs/fedimint-core/0.12.0/fedimint_core/db/struct.DatabaseTransaction.html>.
-10. **`WalletClientConfig`** — resolved (§8.10, COMPILE.md §19). `WalletClientInit` is a unit
+10. **`WalletClientConfig`** — resolved (§8.10, API-VERIFICATION.md §19). `WalletClientInit` is a unit
     struct with `Default`; the per-federation config arrives via
     `ClientModuleInitArgs::cfg()` and is read with
     `Client::config().await` + `ClientConfig::get_first_module_by_kind::<WalletClientConfig>(KIND)`.
@@ -1454,10 +1454,10 @@ scaffold; docs.rs links are for the pinned versions.
 
 ---
 
-**Bottom line:** the wallet module is `fedimint-walletv2-client` (VERIFY.md §8). Deposits are
+**Bottom line:** the wallet module is `fedimint-walletv2-client` (API-VERIFICATION-FIRST-PASS.md §8). Deposits are
 position-attributed, BDK-funded and discovered (`get_next_event_log_id()` before `receive()`, one
 open deposit per federation, then `await_receive(position)` with real `Success`/`Aborted` handling;
 the claim is resolved by the reused `scan_receive_claims` pass); withdrawals are op-id-attributed and
 initiated (`send()` then `await_final_send_operation_state`). The v1 `fedimint-wallet-client` names
 are superseded and must not be used. The `crates/berlin-wallet-core` scaffold compiles (`cargo check`,
-EXIT 0); §10 folds every compile-verified deviation from `COMPILE.md`.
+EXIT 0); §10 folds every compile-verified deviation from `API-VERIFICATION.md`.
