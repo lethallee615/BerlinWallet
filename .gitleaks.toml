@@ -1,0 +1,11 @@
+# gitleaks config.
+# [extend] useDefault keeps the built-in rule set — providing a config would
+# otherwise replace it.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "curve25519-dalek in Cargo.lock trips the generic-api-key heuristic (entropy 3.75 on a dependency name, not a secret)"
+paths = ["Cargo.lock"]
+regexes = ["curve25519-dalek"]
