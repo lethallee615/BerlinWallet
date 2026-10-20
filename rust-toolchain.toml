@@ -3,3 +3,4 @@
 # declare `rust-version = 1.91`, so the effective MSRV of this workspace is 1.91, not the
 # 1.85 that bdk_wallet advertises.
 channel = "1.91.1"
+components = ["rustfmt", "clippy"]

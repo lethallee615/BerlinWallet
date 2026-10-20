@@ -1,0 +1,46 @@
+# cargo-deny configuration for Berlin Wallet.
+#
+# Licenses: the requested permissive set plus the licenses already present in
+# the dependency graph (MPL-2.0 for uniffi/webpki, CC0-1.0 for the bitcoin
+# crates, Unicode-3.0 for ICU, and a few compatible one-offs).
+
+[advisories]
+version = 2
+# cargo-deny v2 hard-fails vulnerability advisories and has no "warn" mode for
+# them. CI runs this check with continue-on-error so advisories stay visible
+# as warnings without blocking the build; yanked crates warn here as well.
+yanked = "warn"
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MITNFA",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.8
+# Several crates in the graph are dual/tri-licensed; this keeps the allow list
+# stable when one arm of an OR expression is checked independently.
+unused-allowed-license = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "tag"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# [patch.crates-io] points the fedimint crates at tag v0.12.0.
+allow-git = ["https://github.com/fedimint/fedimint"]
