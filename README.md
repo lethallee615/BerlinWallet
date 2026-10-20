@@ -1,0 +1,156 @@
+# Berlin Wallet
+
+Berlin Wallet is a Rust wallet core for a self-custodial Bitcoin wallet that can
+peg funds into and out of a Fedimint federation:
+
+- On-chain funds are held by a BDK wallet (`bdk_wallet 3.2.0`) using BIP84
+  descriptors derived from a 12-word BIP39 mnemonic.
+- Ecash is held in a Fedimint federation through the `walletv2` and `mintv2`
+  modules (`fedimint-walletv2-client` and `fedimint-mintv2-client` 0.12.0).
+- Deposit (peg-in) is: request a federation deposit address, fund it from the
+  BDK wallet, wait for the walletv2 receive operation, claim it, and credit the
+  mintv2 ecash balance.
+- Withdrawal (peg-out) is: quote the federation send, send to a caller-supplied
+  Bitcoin address, wait for the federation's final send state, and record the
+  broadcast txid.
+- The same core is exposed through a UniFFI crate and a development CLI. A
+  desktop GUI is the next planned consumer; mobile may follow.
+
+This is **pre-alpha software**.
+
+## Status
+
+- **Pre-alpha. Not audited.**
+- Deposit and withdrawal have been exercised end to end on devimint and
+  Mutinynet. The live Mutinynet round trip and crash/restart matrix are recorded
+  in `docs/API-VERIFICATION.md` §25 and §27.
+- The crash matrix covers: address shown before funding, funding broadcast before
+  claim, crash during confirmation, crash after `Done`, crash after
+  `send()` before the operation id is persisted, and crash after the final send
+  state before `Broadcast` is written.
+- Restore, backup/import, reorg recovery, and the UniFFI surface have dedicated
+  tests and live checks; see `docs/API-VERIFICATION.md` §28–§35 and §33.
+- The current test suite is 37 core tests, 4 CLI tests, and 4 FFI tests.
+- There is **no mainnet operational testing** recorded in this repository, no
+  desktop GUI, no mobile app, and no independent security audit.
+- `lnv2` (Lightning) is live in the test federation but is not registered or used
+  by this wallet. See `ROADMAP.md`.
+
+### Do not use this yet for
+
+- **Large amounts.** The code is unaudited, the dependency graph is pinned to a
+  pre-release Fedimint generation, and several upstream edge cases are still
+  open.
+- **Your only copy of a seed.** The mnemonic is stored in plaintext at
+  `<data-dir>/mnemonic` with mode `0600`. Backups are full-directory copies and
+  are unencrypted. A mnemonic alone does not recover a fresh client's operation
+  log or an in-flight deposit; the recovery artifact is the mnemonic **plus the
+  client data directory**.
+- **An untrusted device.** Anyone who can read the data directory or the mnemonic
+  can spend the on-chain funds and the ecash. LUKS protects the disk only while
+  the device is off or the volume is locked; it does not protect a compromised
+  running OS.
+- **A production custody or payments service.** The federation is custodial by
+  construction, the Esplora server is trusted for chain observations, and the
+  FFI/GUI/operational layer is not complete.
+
+## Build prerequisites
+
+The workspace builds Rust only; native C/C++ dependencies come from the
+Fedimint/BDK graph.
+
+| Requirement | Why |
+|---|---|
+| Rust **1.91.1** | `rust-toolchain.toml` pins it. The default 1.89 toolchain cannot build the graph: `fedimint-connectors 0.12.0` pulls `iroh` crates that declare `rust-version = 1.91`. Edition is 2024. |
+| C++17 compiler (`g++` or `clang++`) | `librocksdb-sys` and `aws-lc-sys` compile C/C++. `cc` alone is not sufficient. |
+| `cmake` | Required by `aws-lc-sys`, a hard dependency of both `fedimint-core` and `fedimint-connectors`. |
+| `clang` / `libclang` | `aws-lc-sys` enables bindgen. `LIBCLANG_PATH` must point at the directory containing `libclang.so`. |
+| `pkg-config` | Used by parts of the native dependency graph. |
+| Nix (optional, devimint only) | Local federation integration and reorg testing use Fedimint's devimint environment. Nix is not needed to compile the wallet, and this repository does not contain a Nix flake or devimint harness. |
+
+### Shell environment for bindgen
+
+`.cargo/config.toml` deliberately does **not** set `LIBCLANG_PATH` or
+`BINDGEN_EXTRA_CLANG_ARGS`. They depend on the machine and must come from the
+shell. A Fedora 44 example is:
+
+```bash
+export LIBCLANG_PATH=/usr/lib64
+export BINDGEN_EXTRA_CLANG_ARGS="-isystem /usr/lib64/clang/22/include -isystem /usr/include"
+```
+
+Do not copy the clang path blindly: derive it from `clang -E -v` and re-derive it
+after every clang major upgrade. The host-specific details and the exact failure
+mode of a missing `libclang` are in
+[`docs/API-VERIFICATION.md`](docs/API-VERIFICATION.md), §40 and
+[`docs/API-VERIFICATION-FIRST-PASS.md`](docs/API-VERIFICATION-FIRST-PASS.md), §0.
+
+### Build and test
+
+```bash
+rustup toolchain install 1.91.1 --profile minimal --component rustfmt --component clippy
+# Export LIBCLANG_PATH and BINDGEN_EXTRA_CLANG_ARGS as above.
+cargo build --workspace
+cargo test --workspace
+```
+
+The CLI binary is a development harness, not a production UI:
+
+```bash
+cargo run -p berlin-wallet-cli -- init
+```
+
+It creates or opens `<data-dir>/bdk.sqlite` and related state. `init` opens the
+BDK database with `Network::Regtest`; do not run it before joining a non-regtest
+federation. `run` opens the BDK wallet with the federation's actual chain
+network. `BERLIN_WALLET_DATA_DIR` overrides the default `.berlin-wallet`
+directory.
+
+## Crate layout
+
+```text
+crates/
+  berlin-wallet-core/          pure Rust orchestration; no UniFFI types
+    src/client.rs              Fedimint client builder, recover/open, RocksDB/SQLite
+    src/bdk.rs                 BDK wallet, BIP84, Esplora sync, reorg recovery
+    src/deposit.rs             deposit request/address/funding/watch/adoption
+    src/withdrawal.rs          quote/send/reconcile/adoption
+    src/journal.rs             row types, state enums, Journal trait
+    src/journal_db.rs          versioned DB journal, tags, atomic transitions
+    src/sync.rs                BDK, fedimint, and adoption tasks
+    src/backup.rs              full data-directory backup/import
+    src/seed.rs                BIP39, canonical root secret, client identity
+    src/network.rs             chain-id -> `bitcoin::Network`
+    src/sqlite.rs              hand-written SQLite `Database` backend (mobile)
+    src/wire.rs                serde wire form of `FeeQuote`
+    src/error.rs               `PegError`, transient/permanent classification
+    src/fault.rs               debug-only crash injection points
+  berlin-wallet-ffi/          UniFFI object `PegWallet`; one namespace, one error enum
+  berlin-wallet-cli/          REPL dev harness (`berlin-wallet`)
+```
+
+The core does not depend on the FFI crate. The intended direction is
+`berlin-wallet-core` → a binding layer (`berlin-wallet-ffi`) → GUI. The GUI does
+not exist yet.
+
+## Documentation
+
+- [`docs/README.md`](docs/README.md) — documentation index.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — crate boundaries, journal,
+  state machines, crash safety, reorg handling, GUI gaps.
+- [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — trusted parties and failure
+  modes.
+- [`SECURITY.md`](SECURITY.md) — reporting, scope, known weaknesses.
+- [`docs/AUDIT.md`](docs/AUDIT.md) — audit brief and invariants to attack.
+- [`ROADMAP.md`](ROADMAP.md) — staged, honest plan.
+- [`docs/API-VERIFICATION.md`](docs/API-VERIFICATION.md) — compile/live
+  verification notes, crash matrix, restore experiments, reorg findings.
+- [`docs/API-VERIFICATION-FIRST-PASS.md`](docs/API-VERIFICATION-FIRST-PASS.md) —
+  first-pass source verification; superseded where later docs say so.
+- [`docs/PLAN.md`](docs/PLAN.md) — original implementation plan and API map.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
+
+Copyright (c) 2026 lethallee615.
