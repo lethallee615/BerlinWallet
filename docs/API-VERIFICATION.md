@@ -2461,6 +2461,13 @@ re-check in `send()`; this says it isn't catching it.
 
 ## 40. Build / environment notes (Fedora 44)
 
+- **Preferred path:** run `nix develop` from the repository root. The checked-in
+  `flake.nix` devShell supplies Rust 1.91.1 via rust-overlay (with `rustfmt` and
+  `clippy`), the native dependencies, `LIBCLANG_PATH`, and a
+  `BINDGEN_EXTRA_CLANG_ARGS` derived with `clang -print-resource-dir`. It is a
+  devShell only, not a package build. Run cargo and the resulting binary inside
+  that shell.
+- The manual derivation below is for non-Nix users.
 - The toolchain is pinned to `1.91.1` in `rust-toolchain.toml`; the default
   1.89 stable cannot build the dependency graph (`fedimint-connectors` → iroh
   requires Rust 1.91).

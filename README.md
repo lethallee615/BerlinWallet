@@ -73,6 +73,28 @@ This is **pre-alpha software**.
 The workspace builds Rust only; native C/C++ dependencies come from the
 Fedimint/BDK graph.
 
+### With Nix
+
+The repository includes a `flake.nix` devShell. It supplies Rust 1.91.1 through
+`oxalica/rust-overlay` with `rustfmt` and `clippy`, plus the native build
+dependencies and derived bindgen environment. It is a **devShell only**, not a
+package build.
+
+```bash
+nix develop
+cargo fmt --check
+cargo build --workspace
+cargo test --workspace
+```
+
+For Nix users, the §40 bindgen caveat does not apply: the shell derives
+`LIBCLANG_PATH` from the Nix `libclang` and
+`BINDGEN_EXTRA_CLANG_ARGS` from `clang -print-resource-dir`. The build and the
+`berlin-wallet` binary must be run **inside** the `nix develop` shell. The shell
+does not install rustup; rust-overlay provides the toolchain directly.
+
+### Manual prerequisites
+
 | Requirement | Why |
 |---|---|
 | Rust **1.91.1** | `rust-toolchain.toml` pins it. The default 1.89 toolchain cannot build the graph: `fedimint-connectors 0.12.0` pulls `iroh` crates that declare `rust-version = 1.91`. Edition is 2024. |
@@ -80,7 +102,7 @@ Fedimint/BDK graph.
 | `cmake` | Required by `aws-lc-sys`, a hard dependency of both `fedimint-core` and `fedimint-connectors`. |
 | `clang` / `libclang` | `aws-lc-sys` enables bindgen. `LIBCLANG_PATH` must point at the directory containing `libclang.so`. |
 | `pkg-config` | Used by parts of the native dependency graph. |
-| Nix (optional, devimint only) | Local federation integration and reorg testing use Fedimint's devimint environment. Nix is not needed to compile the wallet, and this repository does not contain a Nix flake or devimint harness. |
+| Nix (optional) | Provides the checked-in devShell and is also used for Fedimint devimint local-federation testing. Not required if the manual prerequisites are installed. |
 
 ### Shell environment for bindgen
 
