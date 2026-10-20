@@ -38,10 +38,10 @@ withdrawal moves it back out, subject to the federation's send and the chain.
 | Network / TLS terminator | Not trusted to be honest; may observe or alter traffic if the endpoint is not authenticated. | Esplora and federation traffic metadata/content depending on transport. |
 | FFI host / GUI | Trusted application process for the wallet instance. It owns logging and the data-directory path. | The FFI calls and returned records. |
 
-The current CLI defaults to `http://127.0.0.1:3002` for Esplora. For anything
-other than a local dev chain, use an authenticated HTTPS endpoint (or another
-authenticated transport) and understand that the endpoint still sees the
-addresses it serves.
+The CLI's `DEFAULT_ESPLORA_URL` is `http://127.0.0.1:3002`
+(`crates/berlin-wallet-cli/src/main.rs`). For anything other than a local dev
+chain, use an authenticated HTTPS endpoint (or another authenticated transport)
+and understand that the endpoint still sees the addresses it serves.
 
 ## 3. What breaks if each party lies
 
@@ -216,28 +216,19 @@ is outside the wallet core's defense.
 
 ## 5. Security-relevant limitations in the current code
 
-These are not hypothetical; they are recorded in the repository:
+The verification record owns the details; this section only links to it so the
+two cannot drift.
 
-- The 0.12.0 walletv2 API has no public re-claim/rescan path. A fresh restore can
-  strand a funded, unclaimed deposit and does not resume an in-flight withdrawal
-  (`docs/API-VERIFICATION.md` §30/§31).
-- A reorg that orphans an already-credited deposit has not been tested; only the
-  BDK-side reorg behavior is proven (`docs/API-VERIFICATION.md` §41).
-- The `change_outpoint_range` metadata from walletv2 names txids that were not
-  observed on chain in testing; `await-change` cannot verify them
-  (`docs/API-VERIFICATION.md` §37).
-- The withdrawal fee quote and the later operation fee differed by 224 msat in
-  one test; the quote-drift check did not catch that
-  (`docs/API-VERIFICATION.md` §38).
-- `watch` is silent while polling; a hang looks like progress
-  (`docs/API-VERIFICATION.md` §39).
-- The mintv2 operation fee is not previewed at deposit request time. It is
-  accounted for in `net_credit`, but the user sees it only after the fact
-  (`docs/API-VERIFICATION.md` §39).
-- CI's advisory check is non-blocking, and the current known advisories are
-  explicitly ignored in `deny.toml`. Licenses, sources, and bans are strict.
-- The devimint esplora server panics on a live `invalidateblock`; reorg testing
-  requires a manual restart (`docs/API-VERIFICATION.md` §36).
+- [§30/§31: fresh restore, in-flight operations, and backup policy](API-VERIFICATION.md#30-in-flight-operations-across-a-fresh-restore-live-experiment) ([§31](API-VERIFICATION.md#31-recovery-policy-and-app-level-backup-0120)).
+- [§41: reorg of an already-credited deposit is untested](API-VERIFICATION.md#41-known-limitation--restore-strands-in-flight-operations).
+- [§37: walletv2 change outpoints are unverifiable](API-VERIFICATION.md#37-walletv2-operation-meta--change_outpoint_range-is-unverifiable).
+- [§38: withdrawal quote and charged fee mismatch](API-VERIFICATION.md#38-withdrawal-quote-vs-charged-fee-mismatch-224-msat).
+- [§39: silent `watch` polling](API-VERIFICATION.md#39-observability-gaps).
+- [§39: mintv2 operation fee is not previewed at deposit request](API-VERIFICATION.md#39-observability-gaps).
+- [§36: devimint Esplora panics on a live reorg](API-VERIFICATION.md#36-devimints-esplora-panics-on-a-live-reorg).
+
+The dependency advisory-check policy is separate from these code findings and is
+documented in [`SECURITY.md`](../SECURITY.md#dependency-advisory-policy).
 
 ## 6. Review questions
 

@@ -195,7 +195,7 @@ Docs: <https://docs.rs/fedimint-walletv2-client/0.12.0/fedimint_walletv2_client/
 
 `cargo check` was run with `PATH="$HOME/.local/bin:$PATH"` only so a clean rebuild can find
 `cmake`; the cached `aws-lc-sys` build did not need it. `LIBCLANG_PATH` and
-`BINDGEN_EXTRA_CLANG_ARGS` are already in `.cargo/config.toml [env]`.
+`BINDGEN_EXTRA_CLANG_ARGS` are supplied by the shell, not `.cargo/config.toml`; see §40.
 
 ---
 
@@ -2465,7 +2465,7 @@ re-check in `send()`; this says it isn't catching it.
   1.89 stable cannot build the dependency graph (`fedimint-connectors` → iroh
   requires Rust 1.91).
 - `BINDGEN_EXTRA_CLANG_ARGS` must include clang's own resource dir
-  (`-isystem /usr/lib64/clang/22/include` on the current Fedora 44 toolchain) plus
+  (`-isystem /usr/lib/clang/22/include` on the current Fedora 44 toolchain) plus
   the standard search paths from `clang -E -v`. `22` is the current clang major
   version; re-derive it on any clang upgrade — don't copy it.
 - `LIBCLANG_PATH=/usr/lib64`. Set both variables in the shell; they are

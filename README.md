@@ -1,12 +1,15 @@
 # Berlin Wallet
 
-Berlin Wallet is a Rust wallet core for a self-custodial Bitcoin wallet that can
-peg funds into and out of a Fedimint federation:
+Berlin Wallet is a Rust wallet core for an on-chain **self-custodial** BDK
+wallet and a **custodial** Fedimint ecash balance while funds are pegged. The
+custody split is explicit:
 
 - On-chain funds are held by a BDK wallet (`bdk_wallet 3.2.0`) using BIP84
-  descriptors derived from a 12-word BIP39 mnemonic.
+  `wpkh(master/84'/coin_type'/0'/0/*)` and `.../1/*` descriptors derived from a
+  12-word BIP39 mnemonic.
 - Ecash is held in a Fedimint federation through the `walletv2` and `mintv2`
   modules (`fedimint-walletv2-client` and `fedimint-mintv2-client` 0.12.0).
+  While pegged, that ecash is custodial at the federation, not self-custodial.
 - Deposit (peg-in) is: request a federation deposit address, fund it from the
   BDK wallet, wait for the walletv2 receive operation, claim it, and credit the
   mintv2 ecash balance.
@@ -28,8 +31,9 @@ This is **pre-alpha software**.
   claim, crash during confirmation, crash after `Done`, crash after
   `send()` before the operation id is persisted, and crash after the final send
   state before `Broadcast` is written.
-- Restore, backup/import, reorg recovery, and the UniFFI surface have dedicated
-  tests and live checks; see `docs/API-VERIFICATION.md` §28–§35 and §33.
+- Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
+  tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
+  adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
 - The current test suite is 37 core tests, 4 CLI tests, and 4 FFI tests.
 - There is **no mainnet operational testing** recorded in this repository, no
   desktop GUI, no mobile app, and no independent security audit.
@@ -76,7 +80,7 @@ shell. A Fedora 44 example is:
 
 ```bash
 export LIBCLANG_PATH=/usr/lib64
-export BINDGEN_EXTRA_CLANG_ARGS="-isystem /usr/lib64/clang/22/include -isystem /usr/include"
+export BINDGEN_EXTRA_CLANG_ARGS="-isystem /usr/lib/clang/22/include -isystem /usr/local/include -isystem /usr/include"
 ```
 
 Do not copy the clang path blindly: derive it from `clang -E -v` and re-derive it
@@ -96,15 +100,16 @@ cargo test --workspace
 
 The CLI binary is a development harness, not a production UI:
 
+> **Warning:** `init` opens the BDK database with `Network::Regtest`. Do not run
+> it before joining a non-regtest federation. `run` opens the BDK wallet with
+> the federation's actual chain network.
+
 ```bash
 cargo run -p berlin-wallet-cli -- init
 ```
 
-It creates or opens `<data-dir>/bdk.sqlite` and related state. `init` opens the
-BDK database with `Network::Regtest`; do not run it before joining a non-regtest
-federation. `run` opens the BDK wallet with the federation's actual chain
-network. `BERLIN_WALLET_DATA_DIR` overrides the default `.berlin-wallet`
-directory.
+It creates or opens `<data-dir>/bdk.sqlite` and related state.
+`BERLIN_WALLET_DATA_DIR` overrides the default `.berlin-wallet` directory.
 
 ## Crate layout
 
