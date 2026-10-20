@@ -1,3 +1,13 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Berlin Wallet" width="180">
+</p>
+
+<p align="center">
+  <a href="https://github.com/lethallee615/BerlinWallet/actions/workflows/ci.yml">
+    <img src="https://github.com/lethallee615/BerlinWallet/actions/workflows/ci.yml/badge.svg" alt="CI status">
+  </a>
+</p>
+
 # Berlin Wallet
 
 Berlin Wallet is a Rust wallet core for an on-chain **self-custodial** BDK
