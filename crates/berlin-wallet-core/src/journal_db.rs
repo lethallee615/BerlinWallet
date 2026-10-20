@@ -830,19 +830,19 @@ impl JournalBackend for DbJournal {
             let id = id.clone();
             async move {
                 let mut dbtx = this.db.begin_transaction().await;
-                if let Some(mut row) = get_deposit(&mut dbtx, &id).await? {
-                    if is_open_deposit(row.state) {
-                        if row.net_credit.is_none() {
-                            row.gross_deposited = Some(gross);
-                            row.claim_fee = Some(fee);
-                            row.net_credit = net_credit_with_fees(gross, fee, operation_fee);
-                        }
-                        row.state = DepositState::Done;
-                        row.updated_at = now_ms();
-                        write_deposit(&mut dbtx, &row).await?;
-                        refresh_pending_net_credit(&mut dbtx, &row).await?;
-                        clear_open_deposit(&mut dbtx, &row.federation_id, &row.id).await?;
+                if let Some(mut row) = get_deposit(&mut dbtx, &id).await?
+                    && is_open_deposit(row.state)
+                {
+                    if row.net_credit.is_none() {
+                        row.gross_deposited = Some(gross);
+                        row.claim_fee = Some(fee);
+                        row.net_credit = net_credit_with_fees(gross, fee, operation_fee);
                     }
+                    row.state = DepositState::Done;
+                    row.updated_at = now_ms();
+                    write_deposit(&mut dbtx, &row).await?;
+                    refresh_pending_net_credit(&mut dbtx, &row).await?;
+                    clear_open_deposit(&mut dbtx, &row.federation_id, &row.id).await?;
                 }
                 dbtx.commit_tx_result().await?;
                 Ok(())
@@ -862,15 +862,15 @@ impl JournalBackend for DbJournal {
             let id = id.clone();
             async move {
                 let mut dbtx = this.db.begin_transaction().await;
-                if let Some(mut row) = get_deposit(&mut dbtx, &id).await? {
-                    if row.state == DepositState::Done && row.net_credit.is_none() {
-                        if let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee) {
-                            row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
-                            row.updated_at = now_ms();
-                            write_deposit(&mut dbtx, &row).await?;
-                            refresh_pending_net_credit(&mut dbtx, &row).await?;
-                        }
-                    }
+                if let Some(mut row) = get_deposit(&mut dbtx, &id).await?
+                    && row.state == DepositState::Done
+                    && row.net_credit.is_none()
+                    && let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee)
+                {
+                    row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
+                    row.updated_at = now_ms();
+                    write_deposit(&mut dbtx, &row).await?;
+                    refresh_pending_net_credit(&mut dbtx, &row).await?;
                 }
                 dbtx.commit_tx_result().await?;
                 Ok(())
@@ -892,13 +892,12 @@ impl JournalBackend for DbJournal {
 
         let mut rows = Vec::new();
         for id in ids {
-            if let Some(row) = self.deposit(&id).await? {
-                if row.state == DepositState::Done
-                    && row.net_credit.is_none()
-                    && row.operation_id.is_some()
-                {
-                    rows.push(row);
-                }
+            if let Some(row) = self.deposit(&id).await?
+                && row.state == DepositState::Done
+                && row.net_credit.is_none()
+                && row.operation_id.is_some()
+            {
+                rows.push(row);
             }
         }
         Ok(rows)
@@ -1086,15 +1085,15 @@ impl JournalBackend for DbJournal {
             let id = id.clone();
             async move {
                 let mut dbtx = this.db.begin_transaction().await;
-                if let Some(owner) = read_withdrawal_op(&mut dbtx, operation_id).await? {
-                    if owner != id {
-                        dbtx.commit_tx_result().await?;
-                        anyhow::bail!(
-                            "send operation {} is already represented by withdrawal {}",
-                            operation_id.fmt_full(),
-                            owner.0
-                        );
-                    }
+                if let Some(owner) = read_withdrawal_op(&mut dbtx, operation_id).await?
+                    && owner != id
+                {
+                    dbtx.commit_tx_result().await?;
+                    anyhow::bail!(
+                        "send operation {} is already represented by withdrawal {}",
+                        operation_id.fmt_full(),
+                        owner.0
+                    );
                 }
                 if let Some(mut row) = get_withdrawal(&mut dbtx, &id).await? {
                     row.operation_id = Some(operation_id);

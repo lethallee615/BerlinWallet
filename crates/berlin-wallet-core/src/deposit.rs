@@ -180,18 +180,13 @@ pub async fn watch_deposit(
     let next_position;
 
     loop {
-        match tokio::time::timeout(
-            DEPOSIT_WATCH_TIMEOUT,
-            module.await_receive(position.clone()),
-        )
-        .await
-        {
+        match tokio::time::timeout(DEPOSIT_WATCH_TIMEOUT, module.await_receive(position)).await {
             Ok(Ok((FinalReceiveOperationState::Success, next))) => {
                 next_position = next;
                 break;
             }
             Ok(Ok((FinalReceiveOperationState::Aborted, next))) => {
-                journal.set_deposit_aborted(id, next.clone()).await?;
+                journal.set_deposit_aborted(id, next).await?;
                 position = next;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -437,16 +432,16 @@ pub async fn scan_receive_claims(
                 newest_key = Some(*key);
             }
 
-            if let Some(watermark) = watermark {
-                if is_older_than(key, &watermark) {
-                    match overlap_budget {
-                        Some(0) => {
-                            reached_terminal = true;
-                            break 'scan;
-                        }
-                        Some(n) => overlap_budget = Some(n - 1),
-                        None => {}
+            if let Some(watermark) = watermark
+                && is_older_than(key, &watermark)
+            {
+                match overlap_budget {
+                    Some(0) => {
+                        reached_terminal = true;
+                        break 'scan;
                     }
+                    Some(n) => overlap_budget = Some(n - 1),
+                    None => {}
                 }
             }
 
@@ -526,10 +521,10 @@ pub async fn scan_receive_claims(
         }
     }
 
-    if should_advance_watermark(reached_terminal, state_wait_exhausted) {
-        if let Some(newest) = newest_key {
-            journal.set_scan_watermark(&federation_id, newest).await?;
-        }
+    if should_advance_watermark(reached_terminal, state_wait_exhausted)
+        && let Some(newest) = newest_key
+    {
+        journal.set_scan_watermark(&federation_id, newest).await?;
     }
 
     let bound = journal.bound_outpoints(&federation_id).await?;

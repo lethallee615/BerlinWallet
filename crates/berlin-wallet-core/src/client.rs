@@ -20,7 +20,7 @@ async fn configured_builder() -> anyhow::Result<ClientBuilder> {
     // `WalletClientInit` is a unit struct (`#[derive(Default)]`). The real
     // `WalletClientConfig` is per-federation module config delivered through
     // `ClientModuleInitArgs::cfg()`, not a client-builder argument.
-    builder.with_module(WalletClientInit::default());
+    builder.with_module(WalletClientInit);
     Ok(builder)
 }
 
@@ -147,11 +147,10 @@ pub async fn recover_client(
 }
 
 /// Read the per-federation walletv2 client config from the joined client.
-/// Read the per-federation walletv2 client config from the joined client.
 ///
-/// `WalletClientInit` is a unit struct, so `WalletClientInit::default()` is
-/// correct; the `WalletClientConfig` travels inside the federation's
-/// `ClientConfig` and is exposed by `Client::config()`.
+/// `WalletClientInit` is a unit struct, so it can be registered directly; the
+/// `WalletClientConfig` travels inside the federation's `ClientConfig` and is
+/// exposed by `Client::config()`.
 pub async fn wallet_client_config(client: &Client) -> anyhow::Result<WalletClientConfig> {
     let config = client.config().await;
     let (_, wallet_config) =

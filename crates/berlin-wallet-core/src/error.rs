@@ -60,10 +60,7 @@ pub fn classify_error<E: Classify + ?Sized>(err: &E) -> ErrorClass {
 #[derive(Debug, Error)]
 pub enum PegError {
     #[error("quote changed (quoted {quoted:?}, current {current:?})")]
-    QuoteChanged {
-        quoted: FeeQuote,
-        current: FeeQuote,
-    },
+    QuoteChanged { quoted: FeeQuote, current: FeeQuote },
 
     #[error("reconciliation scan inconclusive; refusing to re-send")]
     InconclusiveScan,

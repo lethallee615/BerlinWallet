@@ -2461,6 +2461,9 @@ re-check in `send()`; this says it isn't catching it.
 
 ## 40. Build / environment notes (Fedora 44)
 
+- The toolchain is pinned to `1.91.1` in `rust-toolchain.toml`; the default
+  1.89 stable cannot build the dependency graph (`fedimint-connectors` → iroh
+  requires Rust 1.91).
 - `BINDGEN_EXTRA_CLANG_ARGS` must include clang's own resource dir
   (`-isystem /usr/lib64/clang/22/include` on the current Fedora 44 toolchain) plus
   the standard search paths from `clang -E -v`. `22` is the current clang major

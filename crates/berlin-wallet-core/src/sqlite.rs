@@ -21,6 +21,8 @@ use fedimint_core::db::{
 use futures::stream;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+type SnapshotMap = BTreeMap<Vec<u8>, (Vec<u8>, i64)>;
+
 #[derive(Debug, Clone)]
 pub struct SqliteDb {
     path: PathBuf,
@@ -64,7 +66,7 @@ impl SqliteDb {
         Ok(())
     }
 
-    fn snapshot(&self) -> DatabaseResult<BTreeMap<Vec<u8>, (Vec<u8>, i64)>> {
+    fn snapshot(&self) -> DatabaseResult<SnapshotMap> {
         let conn = self.connect()?;
         let mut stmt = conn
             .prepare("SELECT key, value, version FROM kv")
@@ -127,7 +129,7 @@ impl IRawDatabase for SqliteDb {
 #[derive(Debug)]
 pub struct SqliteTransaction<'a> {
     db: &'a SqliteDb,
-    snapshot: BTreeMap<Vec<u8>, (Vec<u8>, i64)>,
+    snapshot: SnapshotMap,
     reads: BTreeSet<Vec<u8>>,
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     error: Option<DatabaseError>,

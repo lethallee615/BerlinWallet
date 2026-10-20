@@ -161,10 +161,11 @@ pub(crate) async fn adopt_send_claims(
             .map(|id| WithdrawalId(id.to_owned()))
             .unwrap_or_else(WithdrawalId::new);
         // A custom_meta id must not clobber a different local withdrawal.
-        if let Some(existing) = journal.withdrawal(&id).await? {
-            if existing.operation_id.is_some() && existing.operation_id != Some(send.operation_id) {
-                id = WithdrawalId::new();
-            }
+        if let Some(existing) = journal.withdrawal(&id).await?
+            && existing.operation_id.is_some()
+            && existing.operation_id != Some(send.operation_id)
+        {
+            id = WithdrawalId::new();
         }
         let row = WithdrawalRow::adopted(
             id,
@@ -261,10 +262,10 @@ pub async fn find_sent_operation(
             let Ok(meta) = entry.try_meta::<WalletOperationMeta>() else {
                 continue;
             };
-            if let WalletOperationMeta::Send(SendMeta { custom_meta, .. }) = meta {
-                if custom_meta.get("id").and_then(|value| value.as_str()) == Some(id.0.as_str()) {
-                    return Ok(Some(key.operation_id));
-                }
+            if let WalletOperationMeta::Send(SendMeta { custom_meta, .. }) = meta
+                && custom_meta.get("id").and_then(|value| value.as_str()) == Some(id.0.as_str())
+            {
+                return Ok(Some(key.operation_id));
             }
         }
         last_seen = page.last().map(|(key, _)| *key);

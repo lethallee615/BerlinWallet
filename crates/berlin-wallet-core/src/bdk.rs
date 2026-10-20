@@ -274,7 +274,7 @@ impl BdkWallet {
         let last_active = response
             .last_active_indices
             .iter()
-            .map(|(keychain, index)| (keychain.clone(), *index))
+            .map(|(keychain, index)| (*keychain, *index))
             .collect();
         self.wallet_mut().apply_update(response)?;
         self.persist()?;
@@ -285,7 +285,7 @@ impl BdkWallet {
     ///
     /// `bdk_esplora` builds its chain update from the wallet's local tip. If the
     /// remote tip is at or below that tip, the update can be a no-op and leave
-    /// anchors to orphaned blocks (see COMPILE.md §34). We verify ancestry
+    /// anchors to orphaned blocks (see `docs/API-VERIFICATION.md` §34). We verify ancestry
     /// first and, when orphaned, rebuild the wallet DB and full-scan instead of
     /// trusting the incremental update.
     pub async fn sync(&mut self) -> anyhow::Result<()> {

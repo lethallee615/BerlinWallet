@@ -717,10 +717,10 @@ impl PegWallet {
         let client =
             open_existing_client(client_db(&db, 0), connectors, root_secret.clone()).await?;
         let federation_id = client.federation_id();
-        if let Some(expected) = expected_federation {
-            if federation_id != expected {
-                return Err(err("backup federation id mismatch"));
-            }
+        if let Some(expected) = expected_federation
+            && federation_id != expected
+        {
+            return Err(err("backup federation id mismatch"));
         }
         let client_identity = seed::client_identity(&root_secret, federation_id)?;
         let network = client_network(&client).await?;

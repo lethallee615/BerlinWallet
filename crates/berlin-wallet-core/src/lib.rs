@@ -1,9 +1,9 @@
 //! Berlin Wallet core — type-checking scaffold of the walletv2 + BDK peg flows.
 //!
 //! Real types and state transitions live in [`journal`]; the flow functions
-//! in [`deposit`]/[`withdrawal`] use the exact API sequences from PLAN.md §4.
-//! Operation-log lookups that the plan glosses over are explicit stubs (see
-//! COMPILE.md).
+//! in [`deposit`]/[`withdrawal`] use the exact API sequences from
+//! `docs/PLAN.md` §4. Operation-log lookups that the plan glosses over are
+//! explicit stubs (see `docs/API-VERIFICATION.md`).
 
 pub mod backup;
 pub mod bdk;

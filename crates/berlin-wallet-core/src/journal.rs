@@ -381,12 +381,12 @@ impl JournalBackend for MemoryJournal {
 
     async fn insert_deposit(&self, row: &DepositRow) -> anyhow::Result<DepositRow> {
         let mut inner = self.inner.lock().await;
-        if is_open_deposit(row.state) {
-            if let Some(existing) = inner.deposits.values().find(|existing| {
+        if is_open_deposit(row.state)
+            && let Some(existing) = inner.deposits.values().find(|existing| {
                 existing.federation_id == row.federation_id && is_open_deposit(existing.state)
-            }) {
-                return Ok(existing.clone());
-            }
+            })
+        {
+            return Ok(existing.clone());
         }
         inner.deposits.insert(row.id.clone(), row.clone());
         Ok(row.clone())
@@ -704,11 +704,12 @@ impl JournalBackend for MemoryJournal {
             ..
         } = &mut *inner;
         if let Some(row) = deposits.get_mut(id) {
-            if row.state == DepositState::Done && row.net_credit.is_none() {
-                if let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee) {
-                    row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
-                    row.updated_at = now_ms();
-                }
+            if row.state == DepositState::Done
+                && row.net_credit.is_none()
+                && let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee)
+            {
+                row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
+                row.updated_at = now_ms();
             }
             refresh_pending_net_credit(pending_net_credit, row);
         }
@@ -868,14 +869,14 @@ impl JournalBackend for MemoryJournal {
             withdrawal_ops,
             ..
         } = &mut *inner;
-        if let Some(owner) = withdrawal_ops.get(&operation_id) {
-            if owner != id {
-                anyhow::bail!(
-                    "send operation {} is already represented by withdrawal {}",
-                    operation_id.fmt_full(),
-                    owner.0
-                );
-            }
+        if let Some(owner) = withdrawal_ops.get(&operation_id)
+            && owner != id
+        {
+            anyhow::bail!(
+                "send operation {} is already represented by withdrawal {}",
+                operation_id.fmt_full(),
+                owner.0
+            );
         }
         if let Some(row) = withdrawals.get_mut(id) {
             row.operation_id = Some(operation_id);

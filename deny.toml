@@ -9,6 +9,18 @@ version = 2
 # cargo-deny v2 hard-fails vulnerability advisories and has no "warn" mode for
 # them. CI runs this check with continue-on-error so advisories stay visible
 # as warnings without blocking the build; yanked crates warn here as well.
+ignore = [
+  { id = "RUSTSEC-2026-0190", reason = "anyhow 1.0.98 is pinned; wallet code never calls downcast_mut after adding context" },
+  { id = "RUSTSEC-2026-0118", reason = "hickory-proto 0.25.2 via iroh; the wallet does not enable DNSSEC validation" },
+  { id = "RUSTSEC-2026-0119", reason = "hickory-proto 0.25.2 via iroh; resolver input is limited to configured federation endpoints" },
+  { id = "RUSTSEC-2026-0292", reason = "imbl-sized-chunks 0.1.3 via fedimint-core; the affected Drop-panic path is not reachable from wallet data" },
+  { id = "RUSTSEC-2026-0346", reason = "rustls 0.21.12 via minreq; the wallet does not use a custom ClientSessionStore or log sessions" },
+  { id = "RUSTSEC-2026-0349", reason = "rustls 0.21.12 via minreq; no post-quantum guarantee is claimed for Esplora HTTP" },
+  { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101.7/0.102.8; the wallet does not use URI name constraints" },
+  { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101.7/0.102.8; wildcard name constraints are not used" },
+  { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101.7/0.102.8; the wallet does not parse CRLs" },
+  { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8 via iroh; the wallet does not use CRLs" },
+]
 yanked = "warn"
 unmaintained = "workspace"
 

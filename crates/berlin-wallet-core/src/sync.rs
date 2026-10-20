@@ -1,4 +1,4 @@
-//! Concurrent sync tasks (PLAN.md §5).
+//! Concurrent sync tasks (`docs/PLAN.md` §5).
 //!
 //! All long-running tasks take the same `watch::Receiver<bool>` shutdown
 //! signal. The BDK task performs a partial Esplora sync over revealed script
@@ -43,7 +43,7 @@ pub async fn adoption_task(
                 }
             }
             _ = ticker.tick() => {
-                let client_ref: &Client = &**client;
+                let client_ref: &Client = &client;
                 if let Err(err) =
                     deposit::adopt_orphan_claims(client_ref, &journal, federation_id).await
                 {

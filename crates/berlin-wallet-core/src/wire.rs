@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use fedimint_client::module::transaction::FeeQuote;
-use fedimint_core::module::{Amounts, AmountUnit};
+use fedimint_core::module::{AmountUnit, Amounts};
 
 /// Serde-serializable wire form of [`FeeQuote`], which is `Debug + Clone +
 /// PartialEq + Eq` but not `Serialize`/`Deserialize` in 0.12.0.
