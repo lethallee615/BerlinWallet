@@ -47,6 +47,21 @@ fn is_transient_esplora(err: &bdk_esplora::esplora_client::Error) -> bool {
     }
 }
 
+/// Esplora reports a re-broadcast as an HTTP error whose body says the
+/// transaction is already in the mempool or already in the chain.
+///
+/// This is a success for our purposes: `fund_deposit` can re-run after a crash
+/// and rebuild the same transaction, and a duplicate broadcast must not look
+/// like a funding failure.
+fn is_already_known_esplora(err: &bdk_esplora::esplora_client::Error) -> bool {
+    match err {
+        bdk_esplora::esplora_client::Error::HttpResponse { message, .. } => {
+            message.to_ascii_lowercase().contains("already")
+        }
+        _ => false,
+    }
+}
+
 impl From<bdk_esplora::esplora_client::Error> for SyncAttemptError {
     fn from(err: bdk_esplora::esplora_client::Error) -> Self {
         if is_transient_esplora(&err) {
@@ -451,10 +466,21 @@ impl BdkWallet {
 
     async fn broadcast_url(esplora_url: &str, tx: &bitcoin::Transaction) -> anyhow::Result<()> {
         let client = bdk_esplora::esplora_client::Builder::new(esplora_url).build_async()?;
-        tokio::time::timeout(ESPLORA_TIMEOUT, client.broadcast(tx))
-            .await
-            .map_err(|_| anyhow::anyhow!("Esplora broadcast timed out"))??;
-        Ok(())
+        match tokio::time::timeout(ESPLORA_TIMEOUT, client.broadcast(tx)).await {
+            Ok(Ok(_txid)) => Ok(()),
+            // A crash-retry can re-broadcast a transaction that already reached
+            // the network. Esplora reports that as an HTTP error, which must not
+            // abort the funding flow.
+            Ok(Err(err)) if is_already_known_esplora(&err) => {
+                tracing::info!(
+                    %err,
+                    "esplora reports the transaction is already known; treating broadcast as success"
+                );
+                Ok(())
+            }
+            Ok(Err(err)) => Err(err.into()),
+            Err(_) => Err(anyhow::anyhow!("Esplora broadcast timed out")),
+        }
     }
 
     fn checkpoint(&self) -> anyhow::Result<()> {
@@ -548,6 +574,21 @@ mod tests {
         let error =
             bdk_esplora::esplora_client::Error::Parsing("not-a-number".parse::<u32>().unwrap_err());
         assert!(!is_transient_esplora(&error));
+    }
+
+    #[test]
+    fn already_known_broadcast_is_not_a_failure() {
+        let error = bdk_esplora::esplora_client::Error::HttpResponse {
+            status: 400,
+            message: "Transaction already in mempool".to_owned(),
+        };
+        assert!(is_already_known_esplora(&error));
+
+        let error = bdk_esplora::esplora_client::Error::HttpResponse {
+            status: 400,
+            message: "bad-txns-inputs-missingorspent".to_owned(),
+        };
+        assert!(!is_already_known_esplora(&error));
     }
 
     #[test]
