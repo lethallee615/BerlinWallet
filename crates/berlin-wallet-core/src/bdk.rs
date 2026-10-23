@@ -247,8 +247,16 @@ impl BdkWallet {
     /// transient failure during a reorg-triggered rebuild is still retried by
     /// [`Self::sync`].
     async fn full_scan_inner(&mut self) -> Result<Vec<(KeychainKind, u32)>, ChainError> {
+        let options = self.chain.full_scan_options();
+        self.full_scan_with(options).await
+    }
+
+    /// Full scan with explicit options.
+    async fn full_scan_with(
+        &mut self,
+        options: crate::chain::FullScanOptions,
+    ) -> Result<Vec<(KeychainKind, u32)>, ChainError> {
         let chain = self.chain.clone();
-        let options = chain.full_scan_options();
         let last_active = {
             let wallet: &mut Wallet = self.wallet_mut();
             chain.full_scan(wallet, options).await?
@@ -332,7 +340,30 @@ impl BdkWallet {
     /// Used only when the stored checkpoint is orphaned and the incremental
     /// update cannot force the tip down. The old DB is replaced only after the
     /// fresh wallet has successfully full-scanned.
+    ///
+    /// This is the only place a scan birthday is clamped. A rebuild knows the
+    /// height it is replacing; `restore` does not, so a birthday that is too
+    /// high during restore is still the caller's mistake and cannot be detected
+    /// here.
     async fn reset_and_full_scan(&mut self) -> Result<(), ChainError> {
+        let orphaned_height = self.wallet().latest_checkpoint().height();
+        let chain_kind = self.chain.kind();
+        let mut options = self.chain.full_scan_options();
+        // A block-walk backend scans forward from the birthday; starting above
+        // the orphaned checkpoint would silently drop every confirmation below
+        // it. Never scan above the height we are replacing.
+        if let Some(configured) = options.birthday_height
+            && configured > orphaned_height
+        {
+            tracing::warn!(
+                backend = %chain_kind,
+                configured_birthday = configured,
+                orphaned_height,
+                "configured scan birthday is above the orphaned checkpoint; rebuilding with birthday = orphaned height"
+            );
+            options.birthday_height = Some(orphaned_height);
+        }
+
         let temp_path = self.path.with_file_name(format!(
             "{}.reorg-{}",
             self.path
@@ -343,14 +374,14 @@ impl BdkWallet {
         ));
         let mut fresh =
             Self::open_with_backend(&temp_path, &self.seed, self.network, self.chain.clone())
-                .map_err(|err| ChainError::permanent(self.chain.kind(), err))?;
-        if let Err(err) = fresh.full_scan_inner().await {
+                .map_err(|err| ChainError::permanent(chain_kind, err))?;
+        if let Err(err) = fresh.full_scan_with(options).await {
             remove_sqlite_files(&temp_path);
             return Err(err);
         }
 
         self.swap_in_scanned_db(fresh)
-            .map_err(|err| ChainError::permanent(self.chain.kind(), err))
+            .map_err(|err| ChainError::permanent(chain_kind, err))
     }
 
     /// Replace this wallet's DB with an already-scanned temp DB.
@@ -451,7 +482,7 @@ fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
 mod tests {
     use super::*;
     use crate::chain::mock::{MockBackend, MockFailure};
-    use crate::chain::{ChainKind, ChainTip};
+    use crate::chain::{ChainKind, ChainTip, FullScanOptions};
     use bdk_chain::{BlockId, CheckPoint};
     use bdk_wallet::Update;
     use bitcoin::BlockHash;
@@ -647,6 +678,59 @@ mod tests {
         let err = fixture.wallet.sync().await.expect_err("permanent failure");
         assert!(err.to_string().contains("permanent"), "unexpected: {err:#}");
         assert_eq!(fixture.backend.tip_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_clamps_a_birthday_above_the_orphaned_height() {
+        let mut fixture = wallet_at(
+            ChainKind::Bitcoind,
+            100,
+            hash(1),
+            ChainTip {
+                height: 99,
+                hash: hash(9),
+            },
+            None,
+        );
+        fixture.backend.set_full_scan_options(FullScanOptions {
+            stop_gap: 20,
+            birthday_height: Some(500),
+        });
+        fixture.wallet.sync().await.expect("sync");
+
+        assert_eq!(fixture.backend.full_scan_calls(), 1);
+        let options = fixture.backend.last_scan_options().expect("scan ran");
+        assert_eq!(
+            options.birthday_height,
+            Some(100),
+            "the rebuild must not scan above the orphaned checkpoint height"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_keeps_a_birthday_below_the_orphaned_height() {
+        let mut fixture = wallet_at(
+            ChainKind::Bitcoind,
+            100,
+            hash(1),
+            ChainTip {
+                height: 99,
+                hash: hash(9),
+            },
+            None,
+        );
+        fixture.backend.set_full_scan_options(FullScanOptions {
+            stop_gap: 20,
+            birthday_height: Some(50),
+        });
+        fixture.wallet.sync().await.expect("sync");
+
+        let options = fixture.backend.last_scan_options().expect("scan ran");
+        assert_eq!(
+            options.birthday_height,
+            Some(50),
+            "a birthday at or below the orphaned height is used unchanged"
+        );
     }
 
     #[test]

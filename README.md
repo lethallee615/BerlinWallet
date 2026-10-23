@@ -45,7 +45,7 @@ This is **pre-alpha software**.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 72 core tests, 4 CLI tests, and 4 FFI tests.
+- The current test suite is 74 core tests, 4 CLI tests, and 4 FFI tests.
 - There is **no mainnet operational testing** recorded in this repository and no
   independent security audit. The desktop GUI and mobile app are deferred until
   after the CLI-first MVP.

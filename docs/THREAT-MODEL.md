@@ -96,9 +96,11 @@ The trust boundary differs by backend:
   plaintext mnemonic.
 
 A single chain source creates a single linkability point: using one endpoint for
-the wallet's whole history lets that operator correlate the wallet's addresses.
-The code does not use independent chain sources or privacy-preserving queries,
-and switching backends does not unlink past history.
+the wallet's whole history lets that operator correlate the wallet's addresses —
+unless you operate the node yourself, in which case the linkability point is the
+node operator, who is you. The code does not use independent chain sources or
+privacy-preserving queries, and switching backends does not unlink past
+history.
 
 `BdkWallet::sync` verifies ancestry and rebuilds/full-scans when the stored
 checkpoint is orphaned. That is a correctness guard against the BDK
