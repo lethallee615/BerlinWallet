@@ -45,14 +45,14 @@ This is **pre-alpha software**.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 37 core tests, 4 CLI tests, and 4 FFI tests.
+- The current test suite is 72 core tests, 4 CLI tests, and 4 FFI tests.
 - There is **no mainnet operational testing** recorded in this repository and no
   independent security audit. The desktop GUI and mobile app are deferred until
   after the CLI-first MVP.
 - The CLI-first MVP scope now includes Lightning send/receive via `lnv2` and
-  alternate BDK chain backends (Electrum and bitcoind RPC, alongside Esplora).
-  None of those is implemented yet; `lnv2` is not registered. See `ROADMAP.md`
-  for the MVP checklist.
+  three BDK chain backends. Esplora, Electrum, and bitcoind RPC are all wired
+  behind one trait; only Esplora has a live run so far, and `lnv2` is not
+  registered. See `ROADMAP.md` for the MVP checklist.
 
 ### Do not use this yet for
 
@@ -154,7 +154,7 @@ crates/
   berlin-wallet-core/          pure Rust orchestration; no UniFFI types
     src/client.rs              Fedimint client builder, recover/open, RocksDB/SQLite
     src/bdk.rs                 BDK wallet, BIP84, sync, reorg anchor check, DB swap
-    src/chain/                 chain-backend trait, Esplora + Electrum, chain.json
+    src/chain/                 chain-backend trait, Esplora/Electrum/bitcoind, chain.json
     src/deposit.rs             deposit request/address/funding/watch/adoption
     src/withdrawal.rs          quote/send/reconcile/adoption
     src/journal.rs             row types, state enums, Journal trait

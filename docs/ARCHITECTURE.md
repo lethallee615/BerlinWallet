@@ -46,6 +46,7 @@ UI.
 | `chain/mod.rs` | `ChainBackend` trait, `ChainBackendConfig` parsing, `ChainError` kinds, `ChainTip`/`FullScanOptions`. |
 | `chain/esplora.rs` | Esplora (`bdk_esplora` async) sync, full scan, tip lookup, broadcast. |
 | `chain/electrum.rs` | Electrum (`bdk_electrum`, blocking behind `spawn_blocking`) sync, full scan, tip lookup, broadcast. |
+| `chain/bitcoind.rs` | bitcoind JSON-RPC (`bdk_bitcoind_rpc::Emitter`) block-walk sync, bounded full scan, mempool/eviction updates. |
 | `chain/persist.rs` | `chain.json` load/store/resolve and the never-silent backend-switch rule. |
 | `deposit.rs` | Deposit request, address task, funding, `await_receive` watcher, operation-log claim scan, orphan adoption, net-credit reconciliation. |
 | `withdrawal.rs` | Quote persistence, dust validation, send, final send state, change-output wait, external-address reconciliation, Send adoption. |
@@ -507,6 +508,41 @@ upstream crates differ.
 The detailed source evidence for the BDK lower-tip no-op is in
 `docs/API-VERIFICATION.md` §34 and §35. The retry loop retries transient
 failures 3 times with capped backoff and returns on the first permanent one.
+
+### 8.2 Backend differences
+
+The trait is uniform; the backends are not.
+
+| | Esplora | Electrum | bitcoind RPC |
+|---|---|---|---|
+| Shape | async spk query | blocking spk query | block emitter |
+| Sync | `EsploraAsyncExt::sync` | `BdkElectrumClient::sync` | `Emitter::next_block` + `apply_block_connected_to` |
+| Full scan | gap limit from 0 | gap limit from 0 | birthday height + bounded script range |
+| Mempool | in update | in update | `Emitter::mempool` (+ evictions) |
+| Execution | native async | `spawn_blocking` | `spawn_blocking` |
+
+Consequences worth knowing:
+
+- **Restore is not equivalent.** Esplora and Electrum discover history with a
+  stop gap. bitcoind cannot: a block walk only sees payments to scripts the
+  wallet already tracks, so the scan reveals `stop_gap × 5` scripts per keychain
+  and walks blocks from the configured birthday. `?birthday=` is required; a
+  genesis scan is refused outside regtest (where it is allowed, because the
+  devimint chain is short). BIP158 filters would be cheaper but need a
+  pre-materialized script list and a node with the block filter index, and have
+  not been verified here.
+- **The reorg rebuild costs differently.** Steps 1–5 above are identical, but on
+  bitcoind the rebuild re-scans from the birthday. A wrong birthday silently
+  drops pre-birthday history, which is why the value is persisted in
+  `chain.json`.
+- **Blocking backends need socket timeouts.** `tokio::time::timeout` cannot
+  cancel a blocking task. Electrum sets `Config::timeout(30)` and `retry(0)`
+  (its own reconnect loop sleeps up to 30 s); bitcoind is built through
+  `jsonrpc::simple_http::Builder::timeout(30)` because
+  `bitcoincore_rpc::Client::new` cannot set one.
+- **bitcoind makes the deterministic reorg test possible.** `invalidateblock`
+  against the devimint bitcoind is a supported operation, unlike against the
+  devimint Esplora binary (§36/§40).
 
 `ChainError::{Transient, Permanent}` is **one enum over three independent
 classifiers, not a shared upstream contract**. Each backend decides what a

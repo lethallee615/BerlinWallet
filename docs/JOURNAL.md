@@ -4,6 +4,50 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-22 — The chain source becomes a trait; Electrum and bitcoind RPC arrive
+
+Esplora was hard-wired into the BDK wallet through a URL field. That was fine
+while it was the only option, and wrong as soon as it was not. The chain source
+is now one trait, and the trait's shape was chosen by the least flexible
+backend.
+
+Esplora and Electrum are script-pubkey query clients: build a request from the
+wallet's descriptors, ask the server, apply the response. bitcoind RPC is not.
+`bdk_bitcoind_rpc` emits blocks and the wallet applies them one at a time, so
+there is no response object to return. Rather than special-case it, `sync` and
+`full_scan` take `&mut Wallet` and each backend does whatever its upstream
+library supports. The alternatives were a trait Esplora and Electrum could
+satisfy while bitcoind sat outside it, or three parallel code paths.
+
+Two rules keep that from becoming a mess:
+
+- The backend never persists and never owns the BDK database. `BdkWallet` stages
+  and persists; the backend only touches the `Wallet` it is handed. The reorg
+  rebuild has to checkpoint, rename, and reopen SQLite in a specific order, and
+  that ordering is the crash-safety argument.
+- The reorg anchor check stays above the backend. It compares the stored
+  checkpoint with the backend's tip and the hash at that height, using a pure
+  function, so all three backends are protected by the same code rather than by
+  three copies of it. `MockBackend` tests prove the decision path for every
+  backend kind without a network.
+
+What does not fit is restore. Esplora and Electrum discover history with a stop
+gap; bitcoind cannot, because a block walk only sees payments to scripts the
+wallet already tracks. On bitcoind a full scan needs a birthday height, reveals
+a bounded script range, and walks blocks from there. A genesis scan is refused
+outside regtest, and the birthday is persisted because a wrong one silently
+drops history. That asymmetry is documented rather than papered over.
+
+Configuration grew up with the second backend. The chain source lives in
+`chain.json`, a caller can still pass one explicitly, and a mismatch is logged
+instead of being applied silently: opening an Electrum wallet against the
+default Esplora URL used to be an easy, invisible mistake.
+
+Electrum and bitcoind RPC have unit coverage and no live run yet. devimint's
+esplora includes an electrs whose regtest Electrum RPC is on 127.0.0.1:60401,
+and the devimint bitcoind is the obvious place to finally run the
+`invalidateblock` reorg test that the Esplora binary cannot survive.
+
 ## 2026-10-22 — CLI-first MVP, with Lightning and alternate backends in scope
 
 The near-term goal is now a **CLI-first MVP**. A desktop GUI and a mobile app are

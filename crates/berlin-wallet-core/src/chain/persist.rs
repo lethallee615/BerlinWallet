@@ -143,6 +143,37 @@ mod tests {
     }
 
     #[test]
+    fn bitcoind_cookie_and_birthday_round_trip() {
+        use crate::chain::BitcoindAuth;
+        let dir = temp_dir();
+        let config = ChainBackendConfig::Bitcoind {
+            url: "http://127.0.0.1:8332".to_string(),
+            auth: BitcoindAuth::CookieFile(PathBuf::from("/home/me/.bitcoin/.cookie")),
+            birthday_height: Some(850_000),
+        };
+        store_chain_config(&dir, &config).expect("store");
+        assert_eq!(load_chain_config(&dir).expect("load"), Some(config));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn bitcoind_credentials_survive_a_round_trip() {
+        use crate::chain::BitcoindAuth;
+        let dir = temp_dir();
+        let config = ChainBackendConfig::Bitcoind {
+            url: "http://127.0.0.1:8332".to_string(),
+            auth: BitcoindAuth::UserPass {
+                user: "alice".to_string(),
+                password: "s3cret".to_string(),
+            },
+            birthday_height: None,
+        };
+        store_chain_config(&dir, &config).expect("store");
+        assert_eq!(load_chain_config(&dir).expect("load"), Some(config));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn missing_file_is_not_an_error() {
         let dir = temp_dir();
         assert_eq!(load_chain_config(&dir).expect("load"), None);

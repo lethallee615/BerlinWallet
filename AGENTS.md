@@ -20,11 +20,13 @@ In scope:
 - Three BDK chain backends: Esplora, Electrum, and bitcoind RPC.
 - Restore/backup, crash safety, deposit fee preview, and `watch` progress.
 
-Current reality: peg-in/peg-out and ecash balance are live-tested; Lightning and
-the alternate backends are **not implemented or registered yet**. Esplora is the
-only wired backend. The BDK path can reveal addresses and fund deposits, but a
-first-class arbitrary on-chain send is not built yet, and the crash matrix still
-has known uncovered windows. See `ROADMAP.md` for the MVP checklist.
+Current reality: peg-in/peg-out and ecash balance are live-tested. Lightning
+(`lnv2`) is **not implemented or registered**. All three BDK chain backends are
+wired behind `chain::ChainBackend`, but only Esplora has live coverage; Electrum
+and bitcoind RPC have unit coverage and no live run yet. The BDK path can reveal
+addresses and fund deposits, but a first-class arbitrary on-chain send is not
+built yet, and the crash matrix still has known uncovered windows. See
+`ROADMAP.md` for the MVP checklist.
 
 ## Crate layout
 
@@ -38,7 +40,8 @@ berlin_wallet/                  # workspace root
       src/bdk.rs                # BDK wallet, BIP84, sync, reorg anchor check, DB swap
       src/chain/mod.rs          # ChainBackend trait, config parsing, ChainError
       src/chain/esplora.rs      # Esplora backend
-      src/chain/electrum.rs     # Electrum backend (bitcoind RPC is next)
+      src/chain/electrum.rs     # Electrum backend
+      src/chain/bitcoind.rs     # bitcoind JSON-RPC backend (block-walk, birthday)
       src/chain/persist.rs      # chain.json resolution (never-silent backend switch)
       src/deposit.rs            # deposit request/address/funding/watch/adoption
       src/withdrawal.rs         # quote/send/reconcile/adoption

@@ -93,16 +93,24 @@ This is the work that must happen before “real use” is more than an aspirati
 
 ### Alternate chain backends
 
-- Implement Electrum (`bdk_electrum`) and bitcoind RPC (`bdk_bitcoind_rpc`) behind
-  the BDK wallet as selectable chain sources, alongside Esplora.
-- Keep one chain-source contract: sync, full scan, broadcast, tip/ancestry checks,
-  reorg detection, and persistence behavior.
-- Add configuration/CLI selection and clear errors for unreachable or misconfigured
-  backends.
-- Test each backend against reorgs, transient failures, restore full scans, and
-  wallet restart. Esplora is currently the only wired backend.
-- Document the privacy and operational differences: an Electrum server and an
-  Esplora server both see addresses; bitcoind RPC is a different trust boundary.
+- [x] Implement Electrum (`bdk_electrum`) and bitcoind RPC (`bdk_bitcoind_rpc`)
+      behind the BDK wallet as selectable chain sources, alongside Esplora.
+- [x] Keep one chain-source contract: sync, full scan, broadcast, tip/ancestry
+      checks, reorg detection, and persistence behavior. The contract is the
+      `ChainBackend` trait; the reorg anchor check is shared and pure, and
+      persistence stays in `BdkWallet`.
+- [x] Add configuration/CLI selection and clear errors for unreachable or
+      misconfigured backends. The choice is persisted in `chain.json` and a
+      backend change is never silent.
+- [ ] Test each backend against reorgs, transient failures, restore full scans,
+      and wallet restart. **Only Esplora has a live run.** Electrum needs
+      devimint's electrs (regtest Electrum RPC on 127.0.0.1:60401); bitcoind
+      needs the devimint node plus a birthday height. The deterministic
+      `invalidateblock` reorg test is expected to run on the bitcoind backend,
+      because the devimint Esplora binary panics on a live invalidate.
+- [x] Document the privacy and operational differences: an Electrum server and
+      an Esplora server both see addresses; bitcoind RPC is a different trust
+      boundary (`docs/THREAT-MODEL.md`).
 
 ### Encryption at rest and encrypted backups
 
