@@ -42,7 +42,9 @@ UI.
 |---|---|
 | `crates/berlin-wallet-core/src/lib.rs` | Public module exports and `Journal`/row type re-exports. |
 | `client.rs` | `ClientBuilder` setup, `mintv2` + `walletv2` registration, fresh join, existing open, mnemonic recovery, RocksDB/SQLite database constructors, wallet config/dust lookup. |
-| `bdk.rs` | BIP84 descriptors, `PersistedWallet<Connection>`, address reveal, funding transaction build/sign/broadcast, full scan, partial Esplora sync, ancestry/reorg recovery. |
+| `bdk.rs` | BIP84 descriptors, `PersistedWallet<Connection>`, address reveal, funding transaction build/sign/broadcast, full scan, partial sync, ancestry/reorg recovery and the DB swap. Persistence lives here and never in the chain backend. |
+| `chain/mod.rs` | `ChainBackend` trait, `ChainBackendConfig` parsing, `ChainError` kinds, `ChainTip`/`FullScanOptions`. |
+| `chain/esplora.rs` | Esplora (`bdk_esplora` async) sync, full scan, tip lookup, broadcast. |
 | `deposit.rs` | Deposit request, address task, funding, `await_receive` watcher, operation-log claim scan, orphan adoption, net-credit reconciliation. |
 | `withdrawal.rs` | Quote persistence, dust validation, send, final send state, change-output wait, external-address reconciliation, Send adoption. |
 | `journal.rs` | `DepositRow`, `WithdrawalRow`, state enums, `JournalBackend`, in-memory backend, net-credit math. |
@@ -467,15 +469,16 @@ does not resume an in-flight deposit or withdrawal.
 
 ### 8.1 Reorg handling
 
-`BdkWallet::sync` (`crates/berlin-wallet-core/src/bdk.rs`) does not trust the
-incremental Esplora update blindly:
+`BdkWallet::sync` (`crates/berlin-wallet-core/src/bdk.rs`) does not trust an
+incremental backend update blindly:
 
 1. Read `Wallet::latest_checkpoint()`.
-2. Fetch `/blocks/tip/height` and `/blocks/tip/hash`.
-3. If the remote height is at least the local height, fetch the remote hash at
-   the local height (`/block-height/{local_height}`).
-4. `reorg_decision` says `Orphaned` if the remote tip is lower or the hash at
-   the local height differs.
+2. Ask the chain backend for its tip: `/blocks/tip/height` and
+   `/blocks/tip/hash` on Esplora.
+3. If the remote height is at least the local height, ask the backend for the
+   remote hash at the local height (`/block-height/{local_height}` on Esplora).
+4. `reorg_decision` — a pure function — says `Orphaned` if the remote tip is
+   lower or the hash at the local height differs.
 5. If orphaned, build a fresh BDK SQLite database from the same seed/descriptors,
    full-scan it, checkpoint and close it, checkpoint/drop the old connection,
    atomically rename the scanned file over the live path, reopen a fresh
@@ -484,11 +487,23 @@ incremental Esplora update blindly:
 6. If ancestry is valid, run `start_sync_with_revealed_spks()` +
    `EsploraAsyncExt::sync(request, 4)` and persist.
 
+Steps 1–5 are backend-independent: they use only
+`ChainBackend::tip` and `ChainBackend::block_hash_at`, so the same anchor check
+runs for every backend. Step 6 is `ChainBackend::sync`, which is where the three
+upstream crates differ.
+
 The detailed source evidence for the BDK lower-tip no-op is in
-`docs/API-VERIFICATION.md` §34 and §35. Transient connection/timeout errors retry
-3 times; malformed bodies and 4xx are permanent. The devimint Esplora binary
-panics on a live `invalidateblock`; that upstream issue and the manual restart
-recipe are §36/§40.
+`docs/API-VERIFICATION.md` §34 and §35. The retry loop retries transient
+failures 3 times with capped backoff and returns on the first permanent one.
+
+`ChainError::{Transient, Permanent}` is **one enum over three independent
+classifiers, not a shared upstream contract**. Each backend decides what a
+dropped socket, a malformed body, or a server rejection looks like in its own
+error type; the `kind` field records which backend made the judgement. Today the
+Esplora classifier treats connect/timeout/request failures as transient and
+malformed bodies and HTTP status errors as permanent. The devimint Esplora
+binary panics on a live `invalidateblock`; that upstream issue and the manual
+restart recipe are §36/§40.
 
 ## 9. Sync tasks
 

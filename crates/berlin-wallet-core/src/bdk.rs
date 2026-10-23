@@ -1,7 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bdk_esplora::EsploraAsyncExt;
 pub use bdk_wallet::KeychainKind;
 use bdk_wallet::descriptor::IntoWalletDescriptor;
 use bdk_wallet::rusqlite::Connection;
@@ -10,81 +10,15 @@ use bdk_wallet::{PersistedWallet, Wallet};
 use bitcoin::Network;
 use bitcoin::bip32::Xpriv;
 
+use crate::chain::{ChainBackend, ChainBackendConfig, ChainError};
+
 /// SQLite file used by the BDK wallet. The CLI places it under its data dir.
 pub const BDK_DB_FILE: &str = "bdk.sqlite";
 
-/// Bound each Esplora HTTP operation so a hung endpoint cannot wedge a task.
-const ESPLORA_TIMEOUT: Duration = Duration::from_secs(30);
-/// A restore scan has to walk historical gap limits; give it a much larger
-/// bound than a normal incremental sync.
-const ESPLORA_FULL_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
-const FULL_SCAN_STOP_GAP: usize = 20;
-const FULL_SCAN_PARALLEL_REQUESTS: usize = 4;
 const SYNC_MAX_ATTEMPTS: u32 = 3;
 const SYNC_BACKOFF_BASE: Duration = Duration::from_millis(250);
-
-#[derive(Debug)]
-enum SyncAttemptError {
-    Transient(anyhow::Error),
-    Permanent(anyhow::Error),
-}
-
-impl SyncAttemptError {
-    fn into_anyhow(self) -> anyhow::Error {
-        match self {
-            Self::Transient(err) | Self::Permanent(err) => err,
-        }
-    }
-}
-
-fn is_transient_esplora(err: &bdk_esplora::esplora_client::Error) -> bool {
-    use bdk_esplora::esplora_client::Error;
-    match err {
-        // Connection refused, DNS failure, and request timeouts are retryable.
-        // Malformed bodies/parsing and HTTP status errors are surfaced normally.
-        Error::Reqwest(err) => err.is_connect() || err.is_timeout() || err.is_request(),
-        _ => false,
-    }
-}
-
-/// Esplora reports a re-broadcast as an HTTP error whose body says the
-/// transaction is already in the mempool or already in the chain.
-///
-/// This is a success for our purposes: `fund_deposit` can re-run after a crash
-/// and rebuild the same transaction, and a duplicate broadcast must not look
-/// like a funding failure.
-fn is_already_known_esplora(err: &bdk_esplora::esplora_client::Error) -> bool {
-    match err {
-        bdk_esplora::esplora_client::Error::HttpResponse { message, .. } => {
-            message.to_ascii_lowercase().contains("already")
-        }
-        _ => false,
-    }
-}
-
-impl From<bdk_esplora::esplora_client::Error> for SyncAttemptError {
-    fn from(err: bdk_esplora::esplora_client::Error) -> Self {
-        if is_transient_esplora(&err) {
-            Self::Transient(anyhow::anyhow!(err))
-        } else {
-            Self::Permanent(anyhow::anyhow!(err))
-        }
-    }
-}
-
-fn classify_anyhow(err: anyhow::Error) -> SyncAttemptError {
-    let transient = err
-        .downcast_ref::<bdk_esplora::esplora_client::Error>()
-        .is_some_and(is_transient_esplora)
-        || err
-            .downcast_ref::<Box<bdk_esplora::esplora_client::Error>>()
-            .is_some_and(|err| is_transient_esplora(err));
-    if transient {
-        SyncAttemptError::Transient(err)
-    } else {
-        SyncAttemptError::Permanent(err)
-    }
-}
+/// Cap the retry backoff so a long outage cannot hold a sync task for minutes.
+const SYNC_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReorgDecision {
@@ -94,9 +28,9 @@ enum ReorgDecision {
 
 /// Decide whether the wallet's stored checkpoint is still on the remote chain.
 ///
-/// `remote_at_local` is `/block-height/{local_height}` when the remote tip is at
-/// least that high; when the remote tip is lower, the stored tip cannot be an
-/// ancestor and the wallet must roll back/rescan.
+/// `remote_at_local` is the remote hash at the local height when the remote tip
+/// is at least that high; when the remote tip is lower, the stored tip cannot be
+/// an ancestor and the wallet must rebuild/rescan.
 fn reorg_decision(
     local_height: u32,
     local_hash: &bitcoin::BlockHash,
@@ -139,17 +73,20 @@ fn signers_from_descriptor(wallet: &Wallet, descriptor: &str) -> anyhow::Result<
     ))
 }
 
-/// BDK wallet plus its SQLite persister and software signers.
+/// BDK wallet plus its SQLite persister, software signers, and chain backend.
 ///
 /// The wrapper exists because `PersistedWallet<Connection>` needs the
 /// `Connection` alongside it for `persist`, and the caller should not have to
 /// duplicate descriptor/signer construction.
+///
+/// Persistence is owned here, never by the chain backend: the backend only
+/// stages changes on the wallet, and [`BdkWallet`] writes them in one place.
 pub struct BdkWallet {
     wallet: Option<PersistedWallet<Connection>>,
     persister: Option<Connection>,
     external_signers: SignersContainer,
     internal_signers: SignersContainer,
-    esplora_url: String,
+    chain: Arc<dyn ChainBackend>,
     path: std::path::PathBuf,
     seed: [u8; 64],
     network: Network,
@@ -157,11 +94,23 @@ pub struct BdkWallet {
 
 impl BdkWallet {
     /// Open `path` or create it with BIP84 descriptors derived from `seed`.
+    ///
+    /// The chain backend is built here but performs no network I/O, so this
+    /// works while the endpoint is unreachable.
     pub fn open_or_create(
         path: &Path,
         seed: &[u8; 64],
         network: Network,
-        esplora_url: impl Into<String>,
+        chain: ChainBackendConfig,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_backend(path, seed, network, chain.connect()?)
+    }
+
+    fn open_with_backend(
+        path: &Path,
+        seed: &[u8; 64],
+        network: Network,
+        chain: Arc<dyn ChainBackend>,
     ) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -195,7 +144,7 @@ impl BdkWallet {
             persister: Some(persister),
             external_signers,
             internal_signers,
-            esplora_url: esplora_url.into(),
+            chain,
             path: path.to_path_buf(),
             seed: *seed,
             network,
@@ -216,6 +165,16 @@ impl BdkWallet {
 
     pub fn balance(&self) -> bdk_wallet::Balance {
         self.wallet().balance()
+    }
+
+    /// The chain backend in use.
+    pub fn chain_kind(&self) -> crate::chain::ChainKind {
+        self.chain.kind()
+    }
+
+    /// Backend identity for logs and UI (no credentials).
+    pub fn chain_description(&self) -> String {
+        self.chain.describe()
     }
 
     /// True if `address` belongs to this BDK wallet. Only in that case could a
@@ -239,7 +198,7 @@ impl BdkWallet {
         Ok(address)
     }
 
-    /// Build, sign, finalize and record an unconfirmed payment.
+    /// Build, sign, finalize, broadcast, and record an unconfirmed payment.
     pub async fn build_and_finalize(
         &mut self,
         destination: &bitcoin::Address,
@@ -259,8 +218,10 @@ impl BdkWallet {
         anyhow::ensure!(finalized, "BDK could not finalize the PSBT");
 
         let tx = psbt.extract_tx()?;
-        let esplora_url = self.esplora_url.clone();
-        Self::broadcast_url(&esplora_url, &tx).await?;
+        self.chain
+            .broadcast(&tx)
+            .await
+            .map_err(ChainError::into_anyhow)?;
         let last_seen = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -271,80 +232,70 @@ impl BdkWallet {
         Ok(tx)
     }
 
-    /// Full script-pubkey scan from index 0 for a restored wallet.
+    /// Full script-pubkey scan for a restored wallet.
     ///
-    /// `start_full_scan()` uses the wallet's unbounded script iterators, so it
-    /// starts at derivation index 0 even on a fresh BDK database. A partial
-    /// `sync()` only covers already-revealed scripts and would miss historical
-    /// addresses.
+    /// The backend chooses its own scan strategy: script-pubkey backends start at
+    /// derivation index 0 and stop after `stop_gap` unused scripts; a block-walk
+    /// backend needs a birthday height instead.
     pub async fn full_scan(&mut self) -> anyhow::Result<Vec<(KeychainKind, u32)>> {
-        let request = self.wallet().start_full_scan();
-        let client = bdk_esplora::esplora_client::Builder::new(&self.esplora_url).build_async()?;
-        let response = tokio::time::timeout(
-            ESPLORA_FULL_SCAN_TIMEOUT,
-            client.full_scan(request, FULL_SCAN_STOP_GAP, FULL_SCAN_PARALLEL_REQUESTS),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Esplora full scan timed out"))??;
-        let last_active = response
-            .last_active_indices
-            .iter()
-            .map(|(keychain, index)| (*keychain, *index))
-            .collect();
-        self.wallet_mut().apply_update(response)?;
-        self.persist()?;
+        self.full_scan_inner()
+            .await
+            .map_err(ChainError::into_anyhow)
+    }
+
+    /// [`Self::full_scan`] that keeps the backend's error classification, so a
+    /// transient failure during a reorg-triggered rebuild is still retried by
+    /// [`Self::sync`].
+    async fn full_scan_inner(&mut self) -> Result<Vec<(KeychainKind, u32)>, ChainError> {
+        let chain = self.chain.clone();
+        let options = chain.full_scan_options();
+        let last_active = {
+            let wallet: &mut Wallet = self.wallet_mut();
+            chain.full_scan(wallet, options).await?
+        };
+        self.persist()
+            .map_err(|err| ChainError::permanent(chain.kind(), err))?;
         Ok(last_active)
     }
 
-    /// Reorg-safe partial Esplora sync.
+    /// Reorg-safe partial sync.
     ///
-    /// `bdk_esplora` builds its chain update from the wallet's local tip. If the
-    /// remote tip is at or below that tip, the update can be a no-op and leave
-    /// anchors to orphaned blocks (see `docs/API-VERIFICATION.md` §34). We verify ancestry
-    /// first and, when orphaned, rebuild the wallet DB and full-scan instead of
-    /// trusting the incremental update.
+    /// `bdk_esplora` builds its chain update from the wallet's local tip; a
+    /// lower or conflicting remote tip can be a no-op that leaves anchors to
+    /// orphaned blocks (`docs/API-VERIFICATION.md` §34). We verify ancestry
+    /// against the backend first and, when the checkpoint is orphaned, rebuild
+    /// the wallet DB and full-scan instead of trusting the incremental update.
+    /// The check is backend-independent.
     pub async fn sync(&mut self) -> anyhow::Result<()> {
-        let client = bdk_esplora::esplora_client::Builder::new(&self.esplora_url)
-            .build_async()
-            .map_err(|e| anyhow::anyhow!(e))?;
         let mut backoff = SYNC_BACKOFF_BASE;
         let mut last_error = None;
 
         for attempt in 1..=SYNC_MAX_ATTEMPTS {
-            match self.sync_attempt(&client).await {
+            match self.sync_attempt().await {
                 Ok(()) => return Ok(()),
-                Err(SyncAttemptError::Permanent(err)) => return Err(err),
-                Err(error @ SyncAttemptError::Transient(_)) => {
-                    last_error = Some(error.into_anyhow());
+                Err(err) if err.is_transient() => {
+                    last_error = Some(err);
                     if attempt < SYNC_MAX_ATTEMPTS {
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(ESPLORA_TIMEOUT);
+                        backoff = (backoff * 2).min(SYNC_BACKOFF_MAX);
                     }
                 }
+                Err(err) => return Err(err.into_anyhow()),
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Esplora sync failed")))
+        Err(last_error
+            .expect("a transient error was recorded")
+            .into_anyhow())
     }
 
-    async fn sync_attempt(
-        &mut self,
-        client: &bdk_esplora::esplora_client::AsyncClient,
-    ) -> std::result::Result<(), SyncAttemptError> {
+    async fn sync_attempt(&mut self) -> Result<(), ChainError> {
+        let chain = self.chain.clone();
         let local_tip = self.wallet().latest_checkpoint();
         let local_height = local_tip.height();
-        let remote_height = client.get_height().await.map_err(SyncAttemptError::from)?;
-        let remote_tip_hash = client
-            .get_tip_hash()
-            .await
-            .map_err(SyncAttemptError::from)?;
-        let remote_at_local = if remote_height >= local_height {
-            Some(
-                client
-                    .get_block_hash(local_height)
-                    .await
-                    .map_err(SyncAttemptError::from)?,
-            )
+        let remote = chain.tip().await?;
+        let remote_at_local = if remote.height >= local_height {
+            chain.block_hash_at(local_height).await?
         } else {
             None
         };
@@ -352,32 +303,27 @@ impl BdkWallet {
         if reorg_decision(
             local_height,
             &local_tip.hash(),
-            remote_height,
+            remote.height,
             remote_at_local,
         ) == ReorgDecision::Orphaned
         {
             tracing::info!(
+                backend = %chain.kind(),
                 local_height,
-                remote_height,
-                remote_tip = ?remote_tip_hash,
+                remote_height = remote.height,
+                remote_tip = %remote.hash,
                 "BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan"
             );
             // The incremental update cannot lower the local tip (merge_chains
             // returns an empty changeset when the update tip is lower and all
             // overlapping hashes agree). Rebuild from scratch and full-scan.
-            self.reset_and_full_scan().await.map_err(classify_anyhow)?;
+            self.reset_and_full_scan().await?;
             return Ok(());
         }
 
-        let request = self.wallet().start_sync_with_revealed_spks();
-        let update = tokio::time::timeout(ESPLORA_TIMEOUT, client.sync(request, 4))
-            .await
-            .map_err(|_| SyncAttemptError::Transient(anyhow::anyhow!("Esplora sync timed out")))?
-            .map_err(|err| SyncAttemptError::from(*err))?;
-        self.wallet_mut()
-            .apply_update(update)
-            .map_err(|err| SyncAttemptError::Permanent(anyhow::anyhow!(err)))?;
-        self.persist().map_err(SyncAttemptError::Permanent)?;
+        chain.sync(self.wallet_mut()).await?;
+        self.persist()
+            .map_err(|err| ChainError::permanent(chain.kind(), err))?;
         Ok(())
     }
 
@@ -386,7 +332,7 @@ impl BdkWallet {
     /// Used only when the stored checkpoint is orphaned and the incremental
     /// update cannot force the tip down. The old DB is replaced only after the
     /// fresh wallet has successfully full-scanned.
-    async fn reset_and_full_scan(&mut self) -> anyhow::Result<()> {
+    async fn reset_and_full_scan(&mut self) -> Result<(), ChainError> {
         let temp_path = self.path.with_file_name(format!(
             "{}.reorg-{}",
             self.path
@@ -395,18 +341,16 @@ impl BdkWallet {
                 .unwrap_or("bdk.sqlite"),
             uuid::Uuid::now_v7()
         ));
-        let mut fresh = Self::open_or_create(
-            &temp_path,
-            &self.seed,
-            self.network,
-            self.esplora_url.clone(),
-        )?;
-        if let Err(err) = fresh.full_scan().await {
+        let mut fresh =
+            Self::open_with_backend(&temp_path, &self.seed, self.network, self.chain.clone())
+                .map_err(|err| ChainError::permanent(self.chain.kind(), err))?;
+        if let Err(err) = fresh.full_scan_inner().await {
             remove_sqlite_files(&temp_path);
             return Err(err);
         }
 
         self.swap_in_scanned_db(fresh)
+            .map_err(|err| ChainError::permanent(self.chain.kind(), err))
     }
 
     /// Replace this wallet's DB with an already-scanned temp DB.
@@ -433,12 +377,8 @@ impl BdkWallet {
         rename_sqlite_sidecars(&temp_path, &self.path);
 
         // Rebuild the Wallet against the new inode/connection.
-        let mut reopened = Self::open_or_create(
-            &self.path,
-            &self.seed,
-            self.network,
-            self.esplora_url.clone(),
-        )?;
+        let mut reopened =
+            Self::open_with_backend(&self.path, &self.seed, self.network, self.chain.clone())?;
 
         // Never hand out a previously revealed-but-unused index again.
         let rebuilt_external = reopened
@@ -462,25 +402,6 @@ impl BdkWallet {
         reopened.persist()?;
         *self = reopened;
         Ok(())
-    }
-
-    async fn broadcast_url(esplora_url: &str, tx: &bitcoin::Transaction) -> anyhow::Result<()> {
-        let client = bdk_esplora::esplora_client::Builder::new(esplora_url).build_async()?;
-        match tokio::time::timeout(ESPLORA_TIMEOUT, client.broadcast(tx)).await {
-            Ok(Ok(_txid)) => Ok(()),
-            // A crash-retry can re-broadcast a transaction that already reached
-            // the network. Esplora reports that as an HTTP error, which must not
-            // abort the funding flow.
-            Ok(Err(err)) if is_already_known_esplora(&err) => {
-                tracing::info!(
-                    %err,
-                    "esplora reports the transaction is already known; treating broadcast as success"
-                );
-                Ok(())
-            }
-            Ok(Err(err)) => Err(err.into()),
-            Err(_) => Err(anyhow::anyhow!("Esplora broadcast timed out")),
-        }
     }
 
     fn checkpoint(&self) -> anyhow::Result<()> {
@@ -529,11 +450,72 @@ fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::mock::{MockBackend, MockFailure};
+    use crate::chain::{ChainKind, ChainTip};
+    use bdk_chain::{BlockId, CheckPoint};
+    use bdk_wallet::Update;
     use bitcoin::BlockHash;
     use bitcoin::hashes::Hash as _;
+    use std::collections::BTreeMap;
 
     fn hash(byte: u8) -> BlockHash {
         BlockHash::from_byte_array([byte; 32])
+    }
+
+    struct TempWallet {
+        dir: std::path::PathBuf,
+        wallet: BdkWallet,
+        backend: Arc<MockBackend>,
+    }
+
+    impl Drop for TempWallet {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    /// A wallet whose stored checkpoint is `(height, hash)` on regtest, plus a
+    /// mock backend that we can point anywhere.
+    fn wallet_at(
+        kind: ChainKind,
+        height: u32,
+        local_hash: BlockHash,
+        tip: ChainTip,
+        remote_at_local: Option<BlockHash>,
+    ) -> TempWallet {
+        let dir =
+            std::env::temp_dir().join(format!("berlin-wallet-chain-{}", uuid::Uuid::now_v7()));
+        let path = dir.join("bdk.sqlite");
+        let seed = [0x22u8; 64];
+        let backend = Arc::new(MockBackend::new(kind, tip, remote_at_local));
+        let chain: Arc<dyn ChainBackend> = backend.clone();
+        let mut wallet = BdkWallet::open_with_backend(&path, &seed, Network::Regtest, chain)
+            .expect("open wallet");
+
+        let genesis = wallet.wallet().latest_checkpoint().block_id();
+        let mut ids = vec![genesis];
+        if height > 0 {
+            ids.push(BlockId {
+                height,
+                hash: local_hash,
+            });
+        }
+        let checkpoint = CheckPoint::from_block_ids(ids).expect("checkpoint");
+        wallet
+            .wallet_mut()
+            .apply_update(Update {
+                last_active_indices: BTreeMap::new(),
+                tx_update: Default::default(),
+                chain: Some(checkpoint),
+            })
+            .expect("apply checkpoint");
+        assert_eq!(wallet.wallet().latest_checkpoint().height(), height);
+
+        TempWallet {
+            dir,
+            wallet,
+            backend,
+        }
     }
 
     #[test]
@@ -560,35 +542,111 @@ mod tests {
         );
     }
 
-    #[test]
-    fn http_4xx_is_a_permanent_sync_error() {
-        let error = bdk_esplora::esplora_client::Error::HttpResponse {
-            status: 400,
-            message: "bad request".to_owned(),
-        };
-        assert!(!is_transient_esplora(&error));
+    #[tokio::test]
+    async fn a_conflicting_hash_rebuilds_for_every_backend() {
+        for kind in [ChainKind::Esplora, ChainKind::Electrum, ChainKind::Bitcoind] {
+            let mut fixture = wallet_at(
+                kind,
+                100,
+                hash(1),
+                ChainTip {
+                    height: 120,
+                    hash: hash(9),
+                },
+                Some(hash(2)),
+            );
+            fixture.wallet.sync().await.expect("sync");
+            assert_eq!(
+                fixture.backend.full_scan_calls(),
+                1,
+                "{kind}: an orphaned checkpoint must trigger a rebuild"
+            );
+            assert_eq!(
+                fixture.backend.sync_calls(),
+                0,
+                "{kind}: the incremental update must not be trusted"
+            );
+        }
     }
 
-    #[test]
-    fn malformed_body_is_a_permanent_sync_error() {
-        let error =
-            bdk_esplora::esplora_client::Error::Parsing("not-a-number".parse::<u32>().unwrap_err());
-        assert!(!is_transient_esplora(&error));
+    #[tokio::test]
+    async fn a_lower_remote_tip_rebuilds_for_every_backend() {
+        for kind in [ChainKind::Esplora, ChainKind::Electrum, ChainKind::Bitcoind] {
+            let mut fixture = wallet_at(
+                kind,
+                100,
+                hash(1),
+                ChainTip {
+                    height: 99,
+                    hash: hash(9),
+                },
+                None,
+            );
+            fixture.wallet.sync().await.expect("sync");
+            assert_eq!(fixture.backend.full_scan_calls(), 1, "{kind}");
+            assert_eq!(fixture.backend.sync_calls(), 0, "{kind}");
+        }
     }
 
-    #[test]
-    fn already_known_broadcast_is_not_a_failure() {
-        let error = bdk_esplora::esplora_client::Error::HttpResponse {
-            status: 400,
-            message: "Transaction already in mempool".to_owned(),
-        };
-        assert!(is_already_known_esplora(&error));
+    #[tokio::test]
+    async fn an_intact_chain_syncs_without_a_rebuild() {
+        for kind in [ChainKind::Esplora, ChainKind::Electrum, ChainKind::Bitcoind] {
+            let mut fixture = wallet_at(
+                kind,
+                100,
+                hash(1),
+                ChainTip {
+                    height: 120,
+                    hash: hash(9),
+                },
+                Some(hash(1)),
+            );
+            fixture.wallet.sync().await.expect("sync");
+            assert_eq!(fixture.backend.full_scan_calls(), 0, "{kind}");
+            assert_eq!(fixture.backend.sync_calls(), 1, "{kind}");
+        }
+    }
 
-        let error = bdk_esplora::esplora_client::Error::HttpResponse {
-            status: 400,
-            message: "bad-txns-inputs-missingorspent".to_owned(),
-        };
-        assert!(!is_already_known_esplora(&error));
+    #[tokio::test]
+    async fn transient_backend_errors_are_retried() {
+        let mut fixture = wallet_at(
+            ChainKind::Esplora,
+            0,
+            hash(0),
+            ChainTip {
+                height: 5,
+                hash: hash(5),
+            },
+            None,
+        );
+        // At height 0 the checkpoint is the wallet's genesis; point the mock's
+        // hash-at-local-height at it so the ancestry check passes.
+        let genesis = fixture.wallet.wallet().latest_checkpoint().hash();
+        fixture.backend.set_remote_at_local(Some(genesis));
+        fixture
+            .backend
+            .queue_tip_failures([MockFailure::Transient, MockFailure::Transient]);
+        fixture.wallet.sync().await.expect("sync");
+        assert_eq!(fixture.backend.tip_calls(), 3);
+        assert_eq!(fixture.backend.sync_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_backend_errors_are_not_retried() {
+        let mut fixture = wallet_at(
+            ChainKind::Esplora,
+            0,
+            hash(0),
+            ChainTip {
+                height: 5,
+                hash: hash(5),
+            },
+            Some(hash(1)),
+        );
+        fixture.backend.queue_tip_failures([MockFailure::Permanent]);
+        let err = fixture.wallet.sync().await.expect_err("permanent failure");
+        assert!(err.to_string().contains("permanent"), "unexpected: {err:#}");
+        assert_eq!(fixture.backend.tip_calls(), 1);
     }
 
     #[test]
@@ -598,17 +656,18 @@ mod tests {
         let source_path = base.join("source.sqlite");
         let temp_path = base.join("temp.sqlite");
         let seed = [0x44u8; 64];
-        let url = "http://127.0.0.1:1";
+        let chain: ChainBackendConfig = "http://127.0.0.1:1".parse().expect("config");
 
         let mut wallet =
-            BdkWallet::open_or_create(&source_path, &seed, Network::Regtest, url).unwrap();
+            BdkWallet::open_or_create(&source_path, &seed, Network::Regtest, chain.clone())
+                .unwrap();
         wallet.reveal_destination().unwrap();
         wallet.reveal_destination().unwrap();
         let previous = wallet
             .wallet()
             .next_derivation_index(KeychainKind::External);
 
-        let temp = BdkWallet::open_or_create(&temp_path, &seed, Network::Regtest, url).unwrap();
+        let temp = BdkWallet::open_or_create(&temp_path, &seed, Network::Regtest, chain).unwrap();
         wallet.swap_in_scanned_db(temp).expect("swap");
 
         assert!(
@@ -629,8 +688,6 @@ mod tests {
     #[test]
     fn lower_tip_update_is_a_noop_in_bdk() {
         use bdk_chain::local_chain::LocalChain;
-        use bdk_chain::{BlockId, CheckPoint};
-        use std::collections::BTreeMap;
 
         let blocks: BTreeMap<u32, BlockHash> = (0..=5).map(|i| (i, hash(i as u8 + 1))).collect();
         let mut local = LocalChain::from_blocks(blocks).unwrap();

@@ -35,7 +35,9 @@ berlin_wallet/                  # workspace root
     berlin-wallet-core/         # pure Rust orchestration (no uniffi, no FFI types)
       src/lib.rs
       src/client.rs             # Fedimint Client construction + module registration
-      src/bdk.rs                # BDK wallet, BIP84, Esplora sync, reorg recovery
+      src/bdk.rs                # BDK wallet, BIP84, sync, reorg anchor check, DB swap
+      src/chain/mod.rs          # ChainBackend trait, config parsing, ChainError
+      src/chain/esplora.rs      # Esplora backend (Electrum/bitcoind RPC are next)
       src/deposit.rs            # deposit request/address/funding/watch/adoption
       src/withdrawal.rs         # quote/send/reconcile/adoption
       src/journal.rs            # row types, state enums, Journal trait
@@ -121,6 +123,7 @@ cargo check   # -> exit 0
 - Storage: one shared `Database`; fedimint client `i` lives at `db.with_prefix([0x01] ++ u32_le(db_prefix))`; the app journal lives under a separate prefix `[0x00]`. The CLI uses the RocksDB backend at `<data-dir>/fedimint.rocksdb` (`fedimint-rocksdb` git tag `v0.12.0` with all fedimint crates patched); the hand-rolled `SqliteDb` remains for mobile. Production can inject any `Database`.
 - Crash-safe journal: raw byte API + serde_json versioned envelopes (`ROW_VERSION = 1`); rows keyed `[tag] ++ id_bytes`; intent + pending index committed in ONE `dbtx` (`begin_transaction … commit_tx`); idempotency keys + deterministic `OperationId`s; `FederationInfo` registry rows so restart can reopen existing partitions rather than re-joining.
 - Root secret: canonical `Bip39RootSecretStrategy` (mirrored from fedimint-bip39 `v0.12.0`) → `RootSecret::StandardDoubleDerive`; BDK uses the same BIP39 seed via BIP84, with no raw key reuse.
+- Chain backends: `BdkWallet` owns the `PersistedWallet<Connection>` and is the only place that calls `persist()`. A `chain::ChainBackend` implementation receives `&mut Wallet`, stages changes, and does nothing else. **Hard rule: a chain backend never persists and never owns the BDK database.** Persistence ordering is what makes the reorg rebuild/rename crash-safe, so it cannot be delegated. The reorg anchor check (`tip` + `block_hash_at` + the pure `reorg_decision`) also lives in `BdkWallet::sync`, above the backend, so every backend gets the same behaviour. `ChainError::{Transient, Permanent}` is one enum over one classifier *per backend*, not a shared upstream contract.
 - Two long-running tokio sync tasks sharing the journal (plus the adoption task):
   - BDK chain sync: `Wallet::start_sync_with_revealed_spks()` → source an `Update` → `apply_update` → `take_staged` → persist via `WalletPersister`. For `bdk_esplora` the update comes from `bdk_esplora::EsploraAsyncExt::sync` (partial) or `::full_scan` (full) — there is **no `EsploraClient` type and no `scan` method**. Then reconcile withdrawal txids to operations.
   - Fedimint federation sync: `spawn_federation_reconnect()` + `start_executor()` + `handle_events` / `get_event_log_transient_receiver()`; record deposit credits and withdrawal broadcasts in the journal.

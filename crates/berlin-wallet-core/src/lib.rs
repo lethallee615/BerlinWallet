@@ -7,6 +7,7 @@
 
 pub mod backup;
 pub mod bdk;
+pub mod chain;
 pub mod client;
 pub mod deposit;
 pub mod error;

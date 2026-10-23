@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use berlin_wallet_core::backup::{backup_data_dir, import_data_dir};
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet};
+use berlin_wallet_core::chain::ChainBackendConfig;
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
 };
@@ -72,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
                 &data_dir.join(BDK_DB_FILE),
                 &seed,
                 DEFAULT_NETWORK,
-                esplora_url,
+                chain_config(&esplora_url)?,
             )?;
             println!("network: {DEFAULT_NETWORK}");
             println!("data dir: {}", data_dir.display());
@@ -141,6 +142,14 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+/// Parse the caller-supplied chain source. A bare URL means Esplora, which keeps
+/// existing command lines working.
+fn chain_config(source: &str) -> anyhow::Result<ChainBackendConfig> {
+    source
+        .parse()
+        .map_err(|err| anyhow!("invalid chain source: {err:#}"))
 }
 
 fn data_dir() -> PathBuf {
@@ -237,7 +246,7 @@ async fn run(
         &data_dir.join(BDK_DB_FILE),
         seed,
         chain_network,
-        esplora_url,
+        chain_config(esplora_url)?,
     )?;
     let wallet = Arc::new(Mutex::new(bdk));
 
@@ -478,7 +487,8 @@ async fn restore(
     );
 
     let chain_network = client_network(&client).await?;
-    let mut bdk = BdkWallet::open_or_create(&bdk_path, seed, chain_network, esplora_url)?;
+    let mut bdk =
+        BdkWallet::open_or_create(&bdk_path, seed, chain_network, chain_config(esplora_url)?)?;
     let last_active = bdk.full_scan().await?;
     let ecash = client.get_balance_for_unit(AmountUnit::BITCOIN).await?;
 
@@ -690,8 +700,13 @@ mod tests {
         let seed = [0x42u8; 64];
         let esplora = "http://127.0.0.1:1";
         let source_db = source.join(BDK_DB_FILE);
-        let mut source_wallet =
-            BdkWallet::open_or_create(&source_db, &seed, Network::Regtest, esplora).unwrap();
+        let mut source_wallet = BdkWallet::open_or_create(
+            &source_db,
+            &seed,
+            Network::Regtest,
+            chain_config(esplora).unwrap(),
+        )
+        .unwrap();
         source_wallet.reveal_destination().unwrap();
         source_wallet.reveal_destination().unwrap();
         let source_balance = source_wallet.balance();
@@ -717,15 +732,20 @@ mod tests {
             &imported.join(BDK_DB_FILE),
             &seed,
             Network::Regtest,
-            esplora,
+            chain_config(esplora).unwrap(),
         )
         .unwrap();
         let imported_next = imported_wallet.reveal_destination().unwrap();
         let imported_balance = imported_wallet.balance();
         drop(imported_wallet);
 
-        let mut source_wallet =
-            BdkWallet::open_or_create(&source_db, &seed, Network::Regtest, esplora).unwrap();
+        let mut source_wallet = BdkWallet::open_or_create(
+            &source_db,
+            &seed,
+            Network::Regtest,
+            chain_config(esplora).unwrap(),
+        )
+        .unwrap();
         let source_next = source_wallet.reveal_destination().unwrap();
         assert_eq!(imported_next, source_next, "address state must match");
         assert_eq!(

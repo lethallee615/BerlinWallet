@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use berlin_wallet_core::backup;
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet, KeychainKind};
+use berlin_wallet_core::chain::ChainBackendConfig;
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_existing_client, open_rocksdb,
     recover_client, wallet_client_config,
@@ -267,7 +268,7 @@ impl PegWallet {
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
             network,
-            esplora_url,
+            parse_chain_source(&esplora_url)?,
         )?;
         let state = WalletState {
             client,
@@ -324,7 +325,7 @@ impl PegWallet {
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
             network,
-            esplora_url,
+            parse_chain_source(&esplora_url)?,
         )?;
         let last_active = bdk.full_scan().await?;
         let operation_log_empty = client
@@ -728,7 +729,7 @@ impl PegWallet {
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
             network,
-            esplora_url,
+            parse_chain_source(&esplora_url)?,
         )?;
         let state = WalletState {
             client,
@@ -773,6 +774,14 @@ impl PegWallet {
             min_withdrawal_sat,
         })
     }
+}
+
+/// Parse the caller-supplied chain source. A bare URL means Esplora, which keeps
+/// existing call sites working.
+fn parse_chain_source(source: &str) -> Result<ChainBackendConfig> {
+    source
+        .parse()
+        .map_err(|parse_err| err(format!("invalid chain source: {parse_err:#}")))
 }
 
 fn last_active_summary(last_active: &[(KeychainKind, u32)]) -> (Option<u32>, Option<u32>) {
