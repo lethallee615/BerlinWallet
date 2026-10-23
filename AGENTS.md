@@ -38,7 +38,8 @@ berlin_wallet/                  # workspace root
       src/lib.rs
       src/client.rs             # Fedimint Client construction + module registration
       src/bdk.rs                # BDK wallet, BIP84, sync, reorg anchor check, DB swap
-      src/chain/mod.rs          # ChainBackend trait, config parsing, ChainError
+      src/chain/mod.rs          # ChainBackend trait, ChainKind/Tip/Options, ChainError
+      src/chain/config.rs       # chain-source parsing + backend construction
       src/chain/esplora.rs      # Esplora backend
       src/chain/electrum.rs     # Electrum backend
       src/chain/bitcoind.rs     # bitcoind JSON-RPC backend (block-walk, birthday)

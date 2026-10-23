@@ -43,7 +43,8 @@ UI.
 | `crates/berlin-wallet-core/src/lib.rs` | Public module exports and `Journal`/row type re-exports. |
 | `client.rs` | `ClientBuilder` setup, `mintv2` + `walletv2` registration, fresh join, existing open, mnemonic recovery, RocksDB/SQLite database constructors, wallet config/dust lookup. |
 | `bdk.rs` | BIP84 descriptors, `PersistedWallet<Connection>`, address reveal, funding transaction build/sign/broadcast, full scan, partial sync, ancestry/reorg recovery and the DB swap. Persistence lives here and never in the chain backend. |
-| `chain/mod.rs` | `ChainBackend` trait, `ChainBackendConfig` parsing, `ChainError` kinds, `ChainTip`/`FullScanOptions`. |
+| `chain/mod.rs` | `ChainBackend` trait, `ChainKind`, `ChainTip`, `FullScanOptions`, `ChainError` kinds; re-exports the config types. |
+| `chain/config.rs` | Chain-source parsing (`esplora:`/`electrum:`/`bitcoind:`), `canonical()`/`describe()` for `chain.json` and logs, backend construction. |
 | `chain/esplora.rs` | Esplora (`bdk_esplora` async) sync, full scan, tip lookup, broadcast. |
 | `chain/electrum.rs` | Electrum (`bdk_electrum`, blocking behind `spawn_blocking`) sync, full scan, tip lookup, broadcast. |
 | `chain/bitcoind.rs` | bitcoind JSON-RPC (`bdk_bitcoind_rpc::Emitter`) block-walk sync, bounded full scan, mempool/eviction updates. |
