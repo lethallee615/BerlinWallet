@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bdk_chain::ChainPosition;
 pub use bdk_wallet::KeychainKind;
 use bdk_wallet::descriptor::IntoWalletDescriptor;
 use bdk_wallet::rusqlite::Connection;
@@ -19,6 +20,22 @@ const SYNC_MAX_ATTEMPTS: u32 = 3;
 const SYNC_BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// Cap the retry backoff so a long outage cannot hold a sync task for minutes.
 const SYNC_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// The earliest block height at which the wallet's graph has a confirmed
+/// transaction.
+///
+/// This is the lowest height a rebuild has to cover: everything at or above it
+/// may contain activity this wallet knows about. `None` means the graph has no
+/// confirmed transactions (unconfirmed-only or empty), so a fallback is needed.
+fn earliest_confirmed_height(wallet: &Wallet) -> Option<u32> {
+    wallet
+        .transactions()
+        .filter_map(|tx| match tx.chain_position {
+            ChainPosition::Confirmed { anchor, .. } => Some(anchor.block_id.height),
+            ChainPosition::Unconfirmed { .. } => None,
+        })
+        .min()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReorgDecision {
@@ -341,27 +358,42 @@ impl BdkWallet {
     /// update cannot force the tip down. The old DB is replaced only after the
     /// fresh wallet has successfully full-scanned.
     ///
-    /// This is the only place a scan birthday is clamped. A rebuild knows the
-    /// height it is replacing; `restore` does not, so a birthday that is too
-    /// high during restore is still the caller's mistake and cannot be detected
-    /// here.
+    /// This is the only place a scan floor is derived. A rebuild has the tx
+    /// graph it is replacing, so the floor comes from the earliest confirmed
+    /// anchor in that graph where possible; the configured birthday is only a
+    /// fallback for a wallet with no confirmed transactions, and the orphaned
+    /// checkpoint height caps both. `restore` has neither a graph to inspect nor
+    /// an orphaned height to cap against, so a birthday that is too high during
+    /// restore is still the caller's mistake and cannot be detected here.
     async fn reset_and_full_scan(&mut self) -> Result<(), ChainError> {
         let orphaned_height = self.wallet().latest_checkpoint().height();
         let chain_kind = self.chain.kind();
         let mut options = self.chain.full_scan_options();
-        // A block-walk backend scans forward from the birthday; starting above
-        // the orphaned checkpoint would silently drop every confirmation below
-        // it. Never scan above the height we are replacing.
-        if let Some(configured) = options.birthday_height
-            && configured > orphaned_height
-        {
-            tracing::warn!(
-                backend = %chain_kind,
-                configured_birthday = configured,
-                orphaned_height,
-                "configured scan birthday is above the orphaned checkpoint; rebuilding with birthday = orphaned height"
-            );
-            options.birthday_height = Some(orphaned_height);
+
+        // A block-walk backend only walks forward from where it starts, so the
+        // floor must cover the oldest activity this wallet already knows about —
+        // not just the configured birthday. Clamping to the orphaned height
+        // alone would still lose everything between the birthday and it.
+        if self.chain.full_scan_uses_birthday() {
+            let configured = options.birthday_height;
+            let earliest = earliest_confirmed_height(self.wallet());
+            let floor = configured
+                .unwrap_or(u32::MAX)
+                .min(earliest.unwrap_or(u32::MAX))
+                .min(orphaned_height);
+            if let Some(configured) = configured
+                && floor < configured
+            {
+                tracing::warn!(
+                    backend = %chain_kind,
+                    configured_birthday = configured,
+                    earliest_confirmed_height = earliest,
+                    orphaned_height,
+                    scan_floor = floor,
+                    "rebuild scan floor is below the configured birthday; rebuilding from the lower height"
+                );
+            }
+            options.birthday_height = Some(floor);
         }
 
         let temp_path = self.path.with_file_name(format!(
@@ -514,6 +546,19 @@ mod tests {
         tip: ChainTip,
         remote_at_local: Option<BlockHash>,
     ) -> TempWallet {
+        wallet_at_with_anchor(kind, height, local_hash, None, tip, remote_at_local)
+    }
+
+    /// Same, but with one confirmed payment at `anchor_height` already in the
+    /// wallet's graph (a "confirmed anchor").
+    fn wallet_at_with_anchor(
+        kind: ChainKind,
+        height: u32,
+        local_hash: BlockHash,
+        anchor_height: Option<u32>,
+        tip: ChainTip,
+        remote_at_local: Option<BlockHash>,
+    ) -> TempWallet {
         let dir =
             std::env::temp_dir().join(format!("berlin-wallet-chain-{}", uuid::Uuid::now_v7()));
         let path = dir.join("bdk.sqlite");
@@ -525,6 +570,17 @@ mod tests {
 
         let genesis = wallet.wallet().latest_checkpoint().block_id();
         let mut ids = vec![genesis];
+        if let Some(anchor_height) = anchor_height {
+            assert!(
+                anchor_height < height,
+                "the anchor must sit below the checkpoint it is compared with"
+            );
+            let anchor_hash = add_confirmed_payment(&mut wallet, anchor_height, genesis);
+            ids.push(BlockId {
+                height: anchor_height,
+                hash: anchor_hash,
+            });
+        }
         if height > 0 {
             ids.push(BlockId {
                 height,
@@ -547,6 +603,46 @@ mod tests {
             wallet,
             backend,
         }
+    }
+
+    /// Insert one transaction paying our own address into a block at `height`,
+    /// connected to `connected_to`, and return that block's hash.
+    fn add_confirmed_payment(
+        wallet: &mut BdkWallet,
+        height: u32,
+        connected_to: BlockId,
+    ) -> BlockHash {
+        let spk = wallet
+            .wallet_mut()
+            .reveal_next_address(KeychainKind::External)
+            .address
+            .script_pubkey();
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(50_000),
+                script_pubkey: spk,
+            }],
+        };
+        let block = bitcoin::Block {
+            header: bitcoin::block::Header {
+                version: bitcoin::block::Version::TWO,
+                prev_blockhash: hash(0xAB),
+                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+                time: 0,
+                bits: bitcoin::CompactTarget::from_consensus(0),
+                nonce: 0,
+            },
+            txdata: vec![tx],
+        };
+        let block_hash = block.block_hash();
+        wallet
+            .wallet_mut()
+            .apply_block_connected_to(&block, height, connected_to)
+            .expect("apply anchor block");
+        block_hash
     }
 
     #[test]
@@ -680,17 +776,25 @@ mod tests {
         assert_eq!(fixture.backend.tip_calls(), 1);
     }
 
+    /// Orphaned at 100 with a confirmed anchor at 90 and a configured birthday
+    /// at 500: the rebuild must start at the anchor, not at 500 or at 100.
     #[tokio::test]
-    async fn a_rebuild_clamps_a_birthday_above_the_orphaned_height() {
-        let mut fixture = wallet_at(
+    async fn a_rebuild_floors_the_scan_at_the_earliest_confirmed_anchor() {
+        let mut fixture = wallet_at_with_anchor(
             ChainKind::Bitcoind,
             100,
             hash(1),
+            Some(90),
             ChainTip {
                 height: 99,
                 hash: hash(9),
             },
             None,
+        );
+        assert_eq!(
+            earliest_confirmed_height(fixture.wallet.wallet()),
+            Some(90),
+            "fixture must carry the anchor"
         );
         fixture.backend.set_full_scan_options(FullScanOptions {
             stop_gap: 20,
@@ -702,17 +806,68 @@ mod tests {
         let options = fixture.backend.last_scan_options().expect("scan ran");
         assert_eq!(
             options.birthday_height,
-            Some(100),
-            "the rebuild must not scan above the orphaned checkpoint height"
+            Some(90),
+            "the floor is the earliest confirmed anchor"
         );
     }
 
+    /// No confirmed transactions: the birthday is the only lower bound, and the
+    /// orphaned height caps it.
     #[tokio::test]
-    async fn a_rebuild_keeps_a_birthday_below_the_orphaned_height() {
+    async fn a_rebuild_without_anchors_falls_back_to_the_orphaned_height() {
         let mut fixture = wallet_at(
             ChainKind::Bitcoind,
             100,
             hash(1),
+            ChainTip {
+                height: 99,
+                hash: hash(9),
+            },
+            None,
+        );
+        assert_eq!(earliest_confirmed_height(fixture.wallet.wallet()), None);
+        fixture.backend.set_full_scan_options(FullScanOptions {
+            stop_gap: 20,
+            birthday_height: Some(500),
+        });
+        fixture.wallet.sync().await.expect("sync");
+
+        let options = fixture.backend.last_scan_options().expect("scan ran");
+        assert_eq!(
+            options.birthday_height,
+            Some(100),
+            "without anchors the orphaned height caps the configured birthday"
+        );
+    }
+
+    /// Script-pubkey backends ignore a birthday, so the floor logic must not
+    /// invent one for them.
+    #[tokio::test]
+    async fn a_rebuild_leaves_a_script_pubkey_backend_scan_optionless() {
+        let mut fixture = wallet_at(
+            ChainKind::Esplora,
+            100,
+            hash(1),
+            ChainTip {
+                height: 99,
+                hash: hash(9),
+            },
+            None,
+        );
+        fixture.wallet.sync().await.expect("sync");
+        let options = fixture.backend.last_scan_options().expect("scan ran");
+        assert_eq!(options.birthday_height, None);
+    }
+
+    /// A configured birthday already below the anchor is kept: it is the
+    /// lowest bound and widening the scan is pointless (but harmless).
+    #[tokio::test]
+    async fn a_rebuild_keeps_a_configured_birthday_below_the_anchor() {
+        let mut fixture = wallet_at_with_anchor(
+            ChainKind::Bitcoind,
+            100,
+            hash(1),
+            Some(90),
             ChainTip {
                 height: 99,
                 hash: hash(9),
@@ -726,11 +881,7 @@ mod tests {
         fixture.wallet.sync().await.expect("sync");
 
         let options = fixture.backend.last_scan_options().expect("scan ran");
-        assert_eq!(
-            options.birthday_height,
-            Some(50),
-            "a birthday at or below the orphaned height is used unchanged"
-        );
+        assert_eq!(options.birthday_height, Some(50));
     }
 
     #[test]

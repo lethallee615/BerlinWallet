@@ -383,6 +383,10 @@ impl ChainBackend for BitcoindBackend {
             birthday_height: self.birthday_height,
         }
     }
+
+    fn full_scan_uses_birthday(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

@@ -220,6 +220,15 @@ pub trait ChainBackend: Send + Sync {
     fn full_scan_options(&self) -> FullScanOptions {
         FullScanOptions::default()
     }
+
+    /// Whether [`Self::full_scan`] consumes
+    /// [`FullScanOptions::birthday_height`] as a starting height.
+    ///
+    /// Only block-walk backends do. Script-pubkey backends always scan from
+    /// derivation index 0 and ignore it.
+    fn full_scan_uses_birthday(&self) -> bool {
+        false
+    }
 }
 
 /// How to reach the chain, as supplied by the caller (CLI argument, FFI

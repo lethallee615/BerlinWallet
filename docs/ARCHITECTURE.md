@@ -532,9 +532,13 @@ Consequences worth knowing:
   pre-materialized script list and a node with the block filter index, and have
   not been verified here.
 - **The reorg rebuild costs differently.** Steps 1–5 above are identical, but on
-  bitcoind the rebuild re-scans from the birthday. A wrong birthday silently
-  drops pre-birthday history, which is why the value is persisted in
-  `chain.json`.
+  bitcoind the rebuild re-scans from a derived floor:
+  `min(configured birthday, earliest confirmed anchor in the old graph, orphaned
+  checkpoint height)`. Because the graph is available at that moment, a birthday
+  above the wallet's own history cannot silently drop it; the birthday only acts
+  as a fallback for a wallet with no confirmed transactions. `restore` has
+  neither a graph nor a checkpoint to derive from, so a wrong birthday there
+  still drops history — which is why the value is persisted in `chain.json`.
 - **Blocking backends need socket timeouts.** `tokio::time::timeout` cannot
   cancel a blocking task. Electrum sets `Config::timeout(30)` and `retry(0)`
   (its own reconnect loop sleeps up to 30 s); bitcoind is built through

@@ -146,4 +146,9 @@ impl ChainBackend for MockBackend {
     fn full_scan_options(&self) -> FullScanOptions {
         *self.scan_options.lock().expect("mock options lock")
     }
+
+    fn full_scan_uses_birthday(&self) -> bool {
+        // Mirror the real backend: only the block-walk one scans from a height.
+        self.kind == ChainKind::Bitcoind
+    }
 }
