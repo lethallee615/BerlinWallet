@@ -1298,7 +1298,7 @@ again. No silent send on a changed quote.
 - `MintClientModule`; primary BTC module in the live federation
 - v1 `fedimint-mint-client` was removed from the workspace dependencies.
 
-**fedimint-lnv2-client (0.12.0)** — exists, but **not registered**: lightning is out of scope for this wallet. The live federation exposes `lnv2` as module 0; leaving it unregistered does not affect walletv2 flows.
+**fedimint-lnv2-client (0.12.0)** — exists, but is **not registered yet**. Lightning is now in the CLI-first MVP scope; the original plan excluded it. The live federation exposes `lnv2` as module 0; leaving it unregistered does not affect walletv2 flows.
 
 **bdk_wallet (3.2.0)**
 - `Wallet::create(desc, change_desc)` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`)

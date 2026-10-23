@@ -202,7 +202,6 @@ is outside the wallet core's defense.
   design.
 - Federation governance, guardian compromise thresholds, and the legal or
   operational solvency of a federation.
-- Lightning (`lnv2`), even though the test federation exposes it.
 - Hardware wallets, multisig on the BDK side, secure elements, and password-based
   seed encryption.
 - Mainnet operational security, monitoring, incident response, and exchange/
@@ -226,6 +225,9 @@ two cannot drift.
 - [§39: silent `watch` polling](API-VERIFICATION.md#39-observability-gaps).
 - [§39: mintv2 operation fee is not previewed at deposit request](API-VERIFICATION.md#39-observability-gaps).
 - [§36: devimint Esplora panics on a live reorg](API-VERIFICATION.md#36-devimints-esplora-panics-on-a-live-reorg).
+
+Lightning/`lnv2` is in the MVP scope but is not implemented yet; its gateway,
+liquidity, and routing trust model has not been analyzed.
 
 The dependency advisory-check policy is separate from these code findings and is
 documented in [`SECURITY.md`](../SECURITY.md#dependency-advisory-policy).

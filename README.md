@@ -26,8 +26,9 @@ custody split is explicit:
 - Withdrawal (peg-out) is: quote the federation send, send to a caller-supplied
   Bitcoin address, wait for the federation's final send state, and record the
   broadcast txid.
-- The same core is exposed through a UniFFI crate and a development CLI. A
-  desktop GUI is the next planned consumer; mobile may follow.
+- The same core is exposed through a UniFFI crate and a development CLI. The
+  near-term deliverable is a CLI-first MVP; the desktop GUI is deferred until
+  after MVP, with mobile later.
 
 This is **pre-alpha software**.
 
@@ -45,10 +46,13 @@ This is **pre-alpha software**.
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
 - The current test suite is 37 core tests, 4 CLI tests, and 4 FFI tests.
-- There is **no mainnet operational testing** recorded in this repository, no
-  desktop GUI, no mobile app, and no independent security audit.
-- `lnv2` (Lightning) is live in the test federation but is not registered or used
-  by this wallet. See `ROADMAP.md`.
+- There is **no mainnet operational testing** recorded in this repository and no
+  independent security audit. The desktop GUI and mobile app are deferred until
+  after the CLI-first MVP.
+- The CLI-first MVP scope now includes Lightning send/receive via `lnv2` and
+  alternate BDK chain backends (Electrum and bitcoind RPC, alongside Esplora).
+  None of those is implemented yet; `lnv2` is not registered. See `ROADMAP.md`
+  for the MVP checklist.
 
 ### Do not use this yet for
 
@@ -166,13 +170,15 @@ crates/
   berlin-wallet-cli/          REPL dev harness (`berlin-wallet`)
 ```
 
-The core does not depend on the FFI crate. The intended direction is
-`berlin-wallet-core` → a binding layer (`berlin-wallet-ffi`) → GUI. The GUI does
-not exist yet.
+The core does not depend on the FFI crate. The near-term direction is
+`berlin-wallet-core` → the CLI-first MVP. `berlin-wallet-ffi` remains the
+binding boundary for a later desktop GUI or mobile app; neither exists yet.
 
 ## Documentation
 
 - [`docs/README.md`](docs/README.md) — documentation index.
+- [`docs/JOURNAL.md`](docs/JOURNAL.md) — plain-language narrative of what was
+  built and why.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — crate boundaries, journal,
   state machines, crash safety, reorg handling, GUI gaps.
 - [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — trusted parties and failure

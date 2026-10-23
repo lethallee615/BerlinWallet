@@ -1319,8 +1319,8 @@ The live federation exposes `lnv2`, `meta`, `mintv2`, `walletv2`. The client now
 - `WalletClientInit` — walletv2.
 - v1 `fedimint-mint-client` — **removed** from dependencies and registration; it is not part of the
   v2 federation config.
-- `fedimint-lnv2-client` — exists and can be registered, but **not registered**: lightning is out of
-  scope for this wallet. The join still succeeds with the lnv2 module present in the config.
+- `fedimint-lnv2-client` — exists and can be registered. It is now in the CLI-first MVP scope but is
+  **not registered yet**; the join still succeeds with the lnv2 module present in the config.
 
 `lnv2` client crate source: `modules/fedimint-lnv2-client` at Git `v0.12.0`.
 

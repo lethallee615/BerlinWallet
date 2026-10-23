@@ -173,8 +173,8 @@ This split is central to understanding the code:
 
 `fedimint-walletv2-client` is registered with `WalletClientInit`; the v1
 `fedimint-wallet-client` is not registered. `fedimint-mintv2-client` is
-registered with `MintClientInit` and is the primary BTC module. `lnv2` is not
-registered.
+registered with `MintClientInit` and is the primary BTC module. `lnv2` is in the
+CLI-first MVP scope but is not registered yet.
 
 ## 5. Journal format and invariants
 
@@ -538,7 +538,8 @@ The source-verified reason and the original build failures are in
 
 ## 11. What a GUI still needs
 
-The core/FFI direction is `core → binding → GUI`, but the binding is deliberately
+The near-term direction is `core → CLI-first MVP`; the GUI is deferred. The
+`core → binding → GUI` path remains for later, but the binding is deliberately
 thin. A real GUI needs facilities that do **not** exist yet:
 
 1. **Event stream.** There is no push channel of deposit/withdrawal/balance
@@ -581,7 +582,8 @@ thin. A real GUI needs facilities that do **not** exist yet:
   deterministically; the BDK-side reorg bug is fixed, but the deposit/credit
   behavior is an open audit item (§41).
 - Multi-federation orchestration is not exposed by the CLI/FFI.
-- `lnv2` is out of scope and not registered even though the test federation
-  exposes it.
+- `lnv2` is in the CLI-first MVP scope but is not registered or implemented yet,
+  even though the test federation exposes it. Its gateway/liquidity trust model
+  is not yet analyzed.
 - There is no independent audit, no hardware wallet support, no encrypted
   seed/backup, and no mobile application.

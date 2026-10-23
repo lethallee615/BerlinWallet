@@ -9,11 +9,12 @@ documents are kept for history and may describe superseded assumptions.
 | Document | What it covers |
 |---|---|
 | [`../README.md`](../README.md) | What the wallet is, pre-alpha status, “do not use yet” limits, build prerequisites, crate layout, license. |
+| [`JOURNAL.md`](JOURNAL.md) | Plain-language narrative of what was built and why, including the current CLI-first MVP scope decision. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries, data directory, journal format and invariants, deposit/withdrawal state machines, crash-safety windows, reorg handling, `[patch.crates-io]`, GUI gaps, unknowns. |
 | [`THREAT-MODEL.md`](THREAT-MODEL.md) | Trusted parties, what breaks if the federation/Esplora/BDK/OS/mnemonic/backups/data-directory assumptions fail, and explicit out-of-scope items. |
 | [`../SECURITY.md`](../SECURITY.md) | Reporting a vulnerability, scope, supported versions, known-weak list, advisory policy. |
 | [`AUDIT.md`](AUDIT.md) | Audit brief: which crate first, invariants to attack, known-broken items, source-verified vs assumed. |
-| [`../ROADMAP.md`](../ROADMAP.md) | Staged plan: hygiene, hardening, audit, desktop GUI, mobile via FFI, out-of-scope work, open decisions. |
+| [`../ROADMAP.md`](../ROADMAP.md) | Staged CLI-first MVP plan, hardening, audit, and deferred GUI/mobile work. |
 
 ## Verification and planning history
 
@@ -35,6 +36,7 @@ documents are kept for history and may describe superseded assumptions.
 
 ## Where to look for a specific topic
 
+- **How the project got here / why the current scope changed:** `JOURNAL.md`.
 - **Why the journal is safe/unsafe:** `ARCHITECTURE.md` §5 and §8;
   `API-VERIFICATION.md` §18, §22, §27.
 - **Deposit flow:** `ARCHITECTURE.md` §6; `crates/berlin-wallet-core/src/deposit.rs`;

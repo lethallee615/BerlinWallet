@@ -1,5 +1,31 @@
 # AGENTS.md — durable project context: Berlin Wallet
 
+## Read first
+
+Every new session must read this file and [`docs/JOURNAL.md`](docs/JOURNAL.md)
+before changing code, docs, or the roadmap. `AGENTS.md` holds current scope and
+working rules; the journal explains how the project got here. Neither replaces
+the source or `docs/API-VERIFICATION.md` for current API behavior.
+
+## Current scope (2026-10-22)
+
+The near-term product is a **CLI-first MVP**. Desktop GUI and mobile are deferred
+until after the MVP.
+
+In scope:
+
+- On-chain BDK send/receive.
+- Fedimint `walletv2` peg-in/peg-out and `mintv2` ecash balance.
+- Lightning send/receive through `fedimint-lnv2-client`.
+- Three BDK chain backends: Esplora, Electrum, and bitcoind RPC.
+- Restore/backup, crash safety, deposit fee preview, and `watch` progress.
+
+Current reality: peg-in/peg-out and ecash balance are live-tested; Lightning and
+the alternate backends are **not implemented or registered yet**. Esplora is the
+only wired backend. The BDK path can reveal addresses and fund deposits, but a
+first-class arbitrary on-chain send is not built yet, and the crash matrix still
+has known uncovered windows. See `ROADMAP.md` for the MVP checklist.
+
 ## Crate layout
 
 ```
@@ -9,21 +35,25 @@ berlin_wallet/                  # workspace root
     berlin-wallet-core/         # pure Rust orchestration (no uniffi, no FFI types)
       src/lib.rs
       src/client.rs             # Fedimint Client construction + module registration
-      src/bdk.rs                # BDK wallet wrapper + chain sync
-      src/pegin.rs              # peg-in flow
-      src/pegout.rs             # peg-out flow
-      src/journal.rs            # crash-safe write-ahead journal (douglaz pattern)
-      src/sync.rs               # concurrent BDK chain task + fedimint federation task
-      src/ops.rs                # OperationId mapping / idempotency keys
-      error.rs
-    berlin-wallet-ffi/          # reserved: later UniFFI crate (depends on berlin-wallet-core)
+      src/bdk.rs                # BDK wallet, BIP84, Esplora sync, reorg recovery
+      src/deposit.rs            # deposit request/address/funding/watch/adoption
+      src/withdrawal.rs         # quote/send/reconcile/adoption
+      src/journal.rs            # row types, state enums, Journal trait
+      src/journal_db.rs         # versioned DB journal, tags, atomic transitions
+      src/sync.rs               # BDK, fedimint, and adoption tasks
+      src/backup.rs             # full data-directory backup/import
+      src/seed.rs               # BIP39, canonical root secret, client identity
+      src/network.rs            # chain-id -> bitcoin::Network
+      src/sqlite.rs             # SQLite Database backend (mobile)
+      src/wire.rs               # FeeQuoteWire
+      src/error.rs              # PegError and transient/permanent classification
+      src/ops.rs                # DepositId / WithdrawalId
+      src/fault.rs              # debug-only crash injection
+    berlin-wallet-ffi/          # UniFFI crate (depends on berlin-wallet-core)
       src/lib.rs                # uniffi::export, PegWallet object
-      uniffi/                   # generated bindings via uniffi-bindgen
-  crates/
-    berlin-wallet-cli/          # optional dev CLI (not required by spec)
+      src/bin/uniffi-bindgen.rs
+    berlin-wallet-cli/          # development REPL (`berlin-wallet`)
 ```
-
-`berlin-wallet-ffi` is reserved for the later UniFFI crate and is not created by this scaffold.
 
 ## Pinned dependencies
 
@@ -34,7 +64,7 @@ Versions below are verified against the crates.io sparse index + the committed `
 |---|---|---|
 | `fedimint-client` | `=0.12.0` | federation client, `Client`, `ClientBuilder` |
 | `fedimint-mintv2-client` | `=0.12.0` | ecash mintv2 module (`MintClientInit`) — primary BTC module; v1 `fedimint-mint-client` is not registered |
-| `fedimint-wallet-client` | `=0.12.0` | on-chain wallet module (`WalletClientInit`) |
+| `fedimint-walletv2-client` | `=0.12.0` | walletv2 receive/send module (`WalletClientInit`, `WalletClientModule`) |
 | `fedimint-client-module` | `=0.12.0` | `ClientModule` trait, `ClientModuleInit` |
 | `fedimint-connectors` | `=0.12.0` | `ConnectorRegistry` |
 | `fedimint-core` | `=0.12.0` | `Database`, `OperationId`, `Amount`, `OutPoint`, `FederationId` |
@@ -94,8 +124,8 @@ cargo check   # -> exit 0
 - Two long-running tokio sync tasks sharing the journal (plus the adoption task):
   - BDK chain sync: `Wallet::start_sync_with_revealed_spks()` → source an `Update` → `apply_update` → `take_staged` → persist via `WalletPersister`. For `bdk_esplora` the update comes from `bdk_esplora::EsploraAsyncExt::sync` (partial) or `::full_scan` (full) — there is **no `EsploraClient` type and no `scan` method**. Then reconcile withdrawal txids to operations.
   - Fedimint federation sync: `spawn_federation_reconnect()` + `start_executor()` + `handle_events` / `get_event_log_transient_receiver()`; record deposit credits and withdrawal broadcasts in the journal.
-- Peg-in: `WalletClientModule::allocate_deposit_address_pooled` → BDK pays deposit address → `subscribe_deposit` / `await_primary_bitcoin_module_output` → ecash minted via mint module.
-- Peg-out: `get_withdraw_fees` → `withdraw(address, amount, fee: PegOutFees, extra_meta)` → `subscribe_withdraw_updates` → BDK chain sync detects withdrawal tx → reconcile in journal.
+- Peg-in: `WalletClientModule::receive()` → BDK pays the deposit address → `await_receive(position)` → operation-log claim scan → `claim_bind` → ecash credited through mintv2; `net_credit` uses the claim fee and `Client::get_operation_fees`.
+- Peg-out: `send_fee` / `send_fee_quote` → `WalletClientModule::send(address, value, fee, custom_meta)` → `await_final_send_operation_state(operation_id)` → bounded change-output wait → journal `Broadcast`; external destinations reconcile from the federation txid, not a BDK scan.
 - Reorg policy: no `Reorged` journal states. Walletv2 finalizes receive outputs at `tip − 6` and has an append-only output log; `Success` means claim accepted, not confirmed; send `Success(txid)` is broadcast/acceptance-only. BDK `LocalChain::apply_update`/`merge_chains` handles checkpoint reorgs, but a lower remote tip can be a no-op; `BdkWallet::sync` verifies ancestry and rebuilds/full-scans on an orphaned checkpoint; the swap checkpoints/closes both DBs, atomically renames, reopens a new connection against the final path, and preserves max(next-index). Deterministic reorg tests require devimint/bitcoind `invalidateblock`, not Esplora.
 - Restore (fedimint-client 0.12.0): `ClientPreview::recover` → `wait_for_all_recoveries` → `ClientHandle::shutdown` → `ClientBuilder::open`; fresh recovery restores **balances only**, leaves the local operation log empty, and does not resume in-flight operations. The recovery artifact is **mnemonic + client data directory**, not mnemonic alone. Deposit/withdrawal lists are empty by design; adoption only applies when the client DB (operation log) is retained. A new `receive()` after restore does **not** re-claim a stranded older deposit; the UI must warn. The CLI provides `backup`/`restore-backup` for a full-directory copy including SQLite WAL/SHM sidecars and the RocksDB directory; it try-locks `fedimint.db.lock` and fails if the DB is live, and the archive is unencrypted (encrypt externally; the mnemonic is inside); a journal-only export is not sufficient. BDK restore must use `start_full_scan`; `stop_gap = 20` is only a floor.
 - Logging: CLI installs a stderr `tracing_subscriber` with `EnvFilter` (`RUST_LOG`, default `info`) and idempotent `try_init`; FFI does not install a subscriber (host owns it). The BDK orphaned checkpoint path emits an INFO `BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan`.
@@ -110,10 +140,12 @@ Compile-verified against the real crates; see `docs/API-VERIFICATION-FIRST-PASS.
 - `TransactionBuilder` = `fedimint_client::module::transaction::TransactionBuilder`
 - `OperationId` = `fedimint_core::core::OperationId`
 
+> The v1 `fedimint-wallet-client` names below are kept as historical reference. This workspace registers `fedimint-walletv2-client`; use the v2 flow above and verify exact names against the pinned source before coding.
+
 **fedimint-wallet-client 0.12.0**: `WalletClientModule::allocate_deposit_address_pooled()`, `allocate_deposit_address_expert_only()`, `safe_allocate_deposit_address()`, `peg_in(PegInRequest)`, `withdraw()`, `get_withdraw_fees()`, `send_fee_quote()`, `max_withdrawable_amount()`, `subscribe_deposit()`, `subscribe_withdraw_updates()`, `create_withdraw_output()`, `WalletClientInit` (`= WalletClientInit(pub Option<DynBitcoindRpc>)`).
 - `PegOutFees` = `fedimint_wallet_client::common::PegOutFees`
 
-**fedimint-mintv2-client 0.12.0**: `MintClientInit`/`MintClientModule`; v1 `fedimint-mint-client` is not registered. The live federation exposes `lnv2`/`meta`/`mintv2`/`walletv2`; `lnv2` is out of scope and not registered.
+**fedimint-mintv2-client 0.12.0**: `MintClientInit`/`MintClientModule`; v1 `fedimint-mint-client` is not registered. The live federation exposes `lnv2`/`meta`/`mintv2`/`walletv2`; `lnv2` is in MVP scope but is not registered yet.
 
 **bdk_wallet 3.2.0**: `Wallet::create()` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`), `reveal_next_address()`, `next_unused_address()`, `list_unspent()`, `get_utxo()`, `get_tx()`, `build_tx()`, `create_psbt()` (requires `bdk-tx` + `--cfg bdk_wallet_unstable`), `sign_with_signers()`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`, `start_sync_with_revealed_spks()`, `start_full_scan()` (restore), `apply_update_events()` (`WalletEvent::TxConfirmed`), `WalletPersister`/`PersistedWallet` (`PersistedWallet::create(&mut P, CreateParams)` / `PersistedWallet::load(&mut P, LoadParams)`; rusqlite or bdk_file_store).
 - `Update` = `bdk_wallet::Update` (crate root — **not** `bdk_wallet::chain::Update`)
@@ -129,6 +161,13 @@ Compile-verified against the real crates; see `docs/API-VERIFICATION-FIRST-PASS.
 ## Not verified (reference only — not compile-verified)
 
 **fedimint-clientd (reference daemon)**: `AppState::new(db_path)`, `multimint.register_new(invite_code)`, `multimint.all()`; REST endpoints `/v2/onchain/deposit-address`, `/v2/onchain/await-deposit`, `/v2/onchain/withdraw`. Read from the `fedimint/fedimint-clientd` `main.rs` GitHub source; `multimint` is a path crate, not a crates.io dependency, so `docs/API-VERIFICATION-FIRST-PASS.md` did **not** compile-verify these.
+
+## Branch and PR workflow
+
+- Branch from `main`. Use a `feat/`, `fix/`, or `chore/` prefix.
+- Open a pull request; do not commit directly to `main`.
+- Squash-merge the PR into `main`.
+- Keep the final commit message in the repository's existing style.
 
 ## Mandatory rule for all future work
 
