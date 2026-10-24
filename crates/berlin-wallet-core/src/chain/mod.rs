@@ -27,9 +27,11 @@ use async_trait::async_trait;
 use bdk_wallet::{KeychainKind, Wallet};
 use bitcoin::{BlockHash, Transaction};
 
+pub mod electrum;
 pub mod esplora;
 #[cfg(test)]
 pub mod mock;
+pub mod persist;
 
 /// Gap limit used for a restore full scan. It is a floor for the script-pubkey
 /// backends and the basis of the bounded range a block-walk backend derives.
@@ -227,6 +229,7 @@ pub trait ChainBackend: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainBackendConfig {
     Esplora { url: String },
+    Electrum { url: String },
 }
 
 impl ChainBackendConfig {
@@ -234,9 +237,14 @@ impl ChainBackendConfig {
         Self::Esplora { url: url.into() }
     }
 
+    pub fn electrum(url: impl Into<String>) -> Self {
+        Self::Electrum { url: url.into() }
+    }
+
     pub fn kind(&self) -> ChainKind {
         match self {
             Self::Esplora { .. } => ChainKind::Esplora,
+            Self::Electrum { .. } => ChainKind::Electrum,
         }
     }
 
@@ -244,6 +252,16 @@ impl ChainBackendConfig {
     pub fn describe(&self) -> String {
         match self {
             Self::Esplora { url } => format!("esplora: {url}"),
+            Self::Electrum { url } => format!("electrum: {url}"),
+        }
+    }
+
+    /// Round-trippable form for persistence. Unlike [`Self::describe`] this is
+    /// fed back to [`FromStr`], so it carries no cosmetic spaces.
+    pub fn canonical(&self) -> String {
+        match self {
+            Self::Esplora { url } => format!("esplora:{url}"),
+            Self::Electrum { url } => format!("electrum:{url}"),
         }
     }
 
@@ -252,6 +270,7 @@ impl ChainBackendConfig {
     pub fn connect(&self) -> anyhow::Result<Arc<dyn ChainBackend>> {
         let backend: Arc<dyn ChainBackend> = match self {
             Self::Esplora { url } => Arc::new(esplora::EsploraBackend::connect(url)?),
+            Self::Electrum { url } => Arc::new(electrum::ElectrumBackend::connect(url)?),
         };
         Ok(backend)
     }
@@ -275,13 +294,21 @@ impl FromStr for ChainBackendConfig {
             anyhow::ensure!(!rest.is_empty(), "esplora URL must not be empty");
             return Ok(Self::esplora(rest));
         }
+        if let Some(rest) = source.strip_prefix("electrum:") {
+            let rest = rest.trim();
+            anyhow::ensure!(!rest.is_empty(), "electrum URL must not be empty");
+            return Ok(Self::electrum(rest));
+        }
         if source.starts_with("http://") || source.starts_with("https://") {
             // Backwards compatible with the previous `esplora_url` parameter.
             return Ok(Self::esplora(source));
         }
+        if source.starts_with("tcp://") || source.starts_with("ssl://") {
+            return Ok(Self::electrum(source));
+        }
         anyhow::bail!(
-            "unrecognised chain source `{source}`: expected `esplora:http://…` \
-             or a bare http(s) URL"
+            "unrecognised chain source `{source}`: expected `esplora:http://…`, \
+             `electrum:tcp://…`, or a bare http(s)/tcp/ssl URL"
         )
     }
 }
@@ -309,14 +336,21 @@ mod tests {
     }
 
     #[test]
+    fn electrum_prefix_and_bare_schemes_are_accepted() {
+        let config: ChainBackendConfig = "electrum:tcp://127.0.0.1:60401".parse().expect("parse");
+        assert_eq!(config.kind(), ChainKind::Electrum);
+        assert_eq!(config.canonical(), "electrum:tcp://127.0.0.1:60401");
+
+        let bare: ChainBackendConfig = "ssl://electrum.example:50002".parse().expect("parse");
+        assert_eq!(bare.kind(), ChainKind::Electrum);
+    }
+
+    #[test]
     fn unknown_scheme_is_rejected() {
         assert!("ftp://example".parse::<ChainBackendConfig>().is_err());
         assert!("".parse::<ChainBackendConfig>().is_err());
-        assert!(
-            "electrum:tcp://127.0.0.1:50001"
-                .parse::<ChainBackendConfig>()
-                .is_err()
-        );
+        assert!("esplora:".parse::<ChainBackendConfig>().is_err());
+        assert!("electrum:  ".parse::<ChainBackendConfig>().is_err());
     }
 
     #[test]

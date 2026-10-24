@@ -45,6 +45,8 @@ UI.
 | `bdk.rs` | BIP84 descriptors, `PersistedWallet<Connection>`, address reveal, funding transaction build/sign/broadcast, full scan, partial sync, ancestry/reorg recovery and the DB swap. Persistence lives here and never in the chain backend. |
 | `chain/mod.rs` | `ChainBackend` trait, `ChainBackendConfig` parsing, `ChainError` kinds, `ChainTip`/`FullScanOptions`. |
 | `chain/esplora.rs` | Esplora (`bdk_esplora` async) sync, full scan, tip lookup, broadcast. |
+| `chain/electrum.rs` | Electrum (`bdk_electrum`, blocking behind `spawn_blocking`) sync, full scan, tip lookup, broadcast. |
+| `chain/persist.rs` | `chain.json` load/store/resolve and the never-silent backend-switch rule. |
 | `deposit.rs` | Deposit request, address task, funding, `await_receive` watcher, operation-log claim scan, orphan adoption, net-credit reconciliation. |
 | `withdrawal.rs` | Quote persistence, dust validation, send, final send state, change-output wait, external-address reconciliation, Send adoption. |
 | `journal.rs` | `DepositRow`, `WithdrawalRow`, state enums, `JournalBackend`, in-memory backend, net-credit math. |
@@ -80,11 +82,21 @@ contains:
 ```text
 <data-dir>/
   mnemonic                12-word BIP39 phrase, plaintext, mode 0600
+  chain.json              selected chain source, mode 0600 (see below)
   bdk.sqlite              BDK wallet + chain checkpoint (SQLite)
   bdk.sqlite-wal/-shm     SQLite sidecars while the DB is live
   fedimint.rocksdb/       Fedimint client + app journal (RocksDB directory)
   fedimint.db.lock        advisory lock used by fedimint-rocksdb / backup
 ```
+
+`chain.json` is a versioned `{"version":1,"source":"<canonical chain source>"}`
+envelope. It exists because a chain source used to be a per-call Esplora URL, so
+a restart could not disagree with itself; with more than one backend, silently
+opening an Electrum-backed wallet against the default Esplora URL would hide a
+misconfiguration. `resolve_chain_config` prefers an explicit caller value,
+otherwise the stored one, and logs a warning when the two differ. It can contain
+bitcoind credentials in the URL, which is the same plaintext-at-0600 posture as
+`mnemonic`.
 
 `berlin-wallet-core` has two database backends:
 

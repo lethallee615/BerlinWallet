@@ -154,7 +154,7 @@ crates/
   berlin-wallet-core/          pure Rust orchestration; no UniFFI types
     src/client.rs              Fedimint client builder, recover/open, RocksDB/SQLite
     src/bdk.rs                 BDK wallet, BIP84, sync, reorg anchor check, DB swap
-    src/chain/                 chain-backend trait + Esplora backend (Electrum/RPC next)
+    src/chain/                 chain-backend trait, Esplora + Electrum, chain.json
     src/deposit.rs             deposit request/address/funding/watch/adoption
     src/withdrawal.rs          quote/send/reconcile/adoption
     src/journal.rs             row types, state enums, Journal trait
