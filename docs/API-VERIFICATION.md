@@ -2577,3 +2577,62 @@ Verified with `RUST_LOG=info` against an invalid Esplora URL: core `tracing` lin
 `berlin_wallet_core::sync: BDK chain sync failed; will retry`) appeared on stderr while stdout stayed
 clean. The rescan line is in the `ReorgDecision::Orphaned` branch immediately before
 `reset_and_full_scan()`.
+
+## 43. Chain backend APIs — Electrum and bitcoind RPC (source-verified)
+
+The chain source is now a trait (`chain::ChainBackend`). The contract is
+symbol-verified against the **vendored sources resolved by `Cargo.lock`**, not
+against docs.rs and not against a plan:
+
+| Symbol | Version / file |
+|---|---|
+| `BdkElectrumClient::new(client)` | `bdk_electrum-0.23.2/src/bdk_electrum_client.rs:30` |
+| `BdkElectrumClient::sync(request, batch_size, fetch_prev_txouts)` | `:198` |
+| `BdkElectrumClient::full_scan(request, stop_gap, batch_size, fetch_prev_txouts)` | `:114` |
+| `BdkElectrumClient::transaction_broadcast(&tx)` | `:90` |
+| `electrum_client::Client::{new, from_config}` | `electrum-client-0.24.1/src/client.rs:151,157` |
+| `ConfigBuilder::{timeout, retry, build}` | `electrum-client-0.24.1/src/config.rs:58,64,76` |
+| internal reconnect loop with `thread::sleep` | `electrum-client-0.24.1/src/client.rs:32-100` |
+| `ElectrumApi::block_headers_subscribe` / `block_header(h)` | `electrum-client-0.24.1/src/api.rs:193,188` |
+| `Emitter::new(client, last_cp, start_height, expected_mempool_txs)` | `bdk_bitcoind_rpc-0.22.0/src/lib.rs:81` |
+| `Emitter::{next_block, mempool}`, `NO_EXPECTED_MEMPOOL_TXS` | `:202,111,63` |
+| `BlockEvent::{block, block_height, block_hash, connected_to}` | `:226-264` |
+| emitter rewind on an orphaned start checkpoint | `:308-329,360-377` |
+| `bitcoincore_rpc::Auth::{None,UserPass,CookieFile}` | `bitcoincore-rpc-0.19.0/src/client.rs:197` |
+| `Client::{new, from_jsonrpc}`; `new` cannot set a timeout | `:1288,1297` |
+| `jsonrpc::simple_http::Builder::{url, auth, cookie_auth, timeout, build}` | `jsonrpc-0.18.0/src/http/simple_http.rs:378,384,395,372,417` |
+| `jsonrpc::Client::with_transport` | `jsonrpc-0.18.0/src/client.rs:41` |
+| `jsonrpc::error::RpcError { code: i32, message, .. }` | `jsonrpc-0.18.0/src/error.rs:124-131` |
+| `Wallet::apply_block_connected_to` / `apply_unconfirmed_txs` / `apply_evicted_txs` | `bdk_wallet-3.2.0/src/wallet/mod.rs:2702,2749,2816` |
+| `Wallet::spk_index()` → `KeychainTxOutIndex::last_used_index` | `bdk_wallet-3.2.0/src/wallet/mod.rs:2590`; `bdk_chain-0.23.3/src/indexer/keychain_txout.rs:945` |
+| `CreateParams::create_wallet_no_persist` | `bdk_wallet-3.2.0/src/wallet/params.rs:212` |
+
+Compile-checked properties (a scratch crate against the same pinned versions):
+
+- `SyncRequest<I>` and `FullScanRequest<K>` are `Send` (`Box<dyn Iterator + Send>`,
+  `Box<dyn FnMut + Send + 'static>` in `bdk_core-0.6.4/src/spk_client.rs:9,11,241,477`),
+  so a request can cross `spawn_blocking` while the wallet stays on the async task.
+- `electrum_client::Client`, `BdkElectrumClient<Client>`, and
+  `bitcoincore_rpc::Client` are `Send + Sync`.
+- `Emitter<Arc<Client>>` type-checks (`Arc<C>: Deref<Target = C>`), which is what
+  lets the emitter be driven from a blocking task.
+
+Behavioural facts that the code depends on:
+
+- `bdk_electrum` **also** no-ops when the remote tip is lower than the local
+  checkpoint (`bdk_electrum_client.rs:612-619`, returning `prev_tip`). The reorg
+  anchor check is therefore required for Electrum exactly as it is for Esplora.
+- `bdk_bitcoind_rpc`'s `Emitter` searches `last_cp` for an agreement point and
+  rewinds, but the wallet's own DB swap stays the authoritative repair path.
+- Regtest devimint esplora ships electrs; its regtest Electrum RPC defaults to
+  `127.0.0.1:60401`.
+
+Not verified here (no live node in this environment):
+
+- An Electrum sync/full scan/restore against a live electrs.
+- A bitcoind block-walk sync, mempool eviction handling, and a birthday-bounded
+  restore against a live node.
+- `invalidateblock` on the bitcoind backend (expected to work, unlike the
+  devimint Esplora binary; §36/§40).
+- `bip158::FilterIter` is **not** used. `getcfilters` and the block-filter-index
+  requirement were not tested, so no code depends on them.

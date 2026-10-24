@@ -70,9 +70,10 @@ records the federation's `Success(txid)`. There is no independent confirmation
 policy for that withdrawal in the current state machine; the chain is what users
 must ultimately check.
 
-### Esplora
+### Chain source (Esplora, Electrum, or bitcoind RPC)
 
-The wallet uses one Esplora endpoint as its BDK chain source. That server:
+The wallet uses exactly one BDK chain source, selected by configuration and
+recorded in `chain.json`. Whichever is chosen:
 
 - sees every address/script the BDK wallet reveals;
 - can link all of those addresses to each other and to the user's IP/timing;
@@ -82,10 +83,24 @@ The wallet uses one Esplora endpoint as its BDK chain source. That server:
   confirmations;
 - can censor a broadcast or serve a stale/forked view.
 
-A single Esplora server creates a single linkability point: using one endpoint
-for the wallet's whole history lets that operator correlate the wallet's
-addresses. The code does not use independent chain sources or privacy-preserving
-queries.
+The trust boundary differs by backend:
+
+- **Esplora** — an HTTP server, usually someone else's. Full address history
+  visible to that operator.
+- **Electrum** — a socket server, usually someone else's. Script-hash queries
+  reveal the wallet's whole script set over time (a script-hash query is
+  trivially linked back to an address by the server if it has the chain).
+- **bitcoind RPC** — your own node, or a node you are trusting with a wallet's
+  query pattern. No third party sees the script set, but the node can still lie,
+  and the RPC credentials live in `chain.json` at mode 0600 alongside the
+  plaintext mnemonic.
+
+A single chain source creates a single linkability point: using one endpoint for
+the wallet's whole history lets that operator correlate the wallet's addresses —
+unless you operate the node yourself, in which case the linkability point is the
+node operator, who is you. The code does not use independent chain sources or
+privacy-preserving queries, and switching backends does not unlink past
+history.
 
 `BdkWallet::sync` verifies ancestry and rebuilds/full-scans when the stored
 checkpoint is orphaned. That is a correctness guard against the BDK

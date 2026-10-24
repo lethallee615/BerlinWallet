@@ -1,8 +1,11 @@
 //! Full data-directory backup/import helpers.
 //!
-//! The artifact is the entire directory: mnemonic, BDK SQLite (including
-//! `-wal`/`-shm`), and the fedimint RocksDB directory. A hand-picked file list
-//! can silently lose WAL commits or RocksDB sidecars.
+//! The artifact is the entire directory: mnemonic, `chain.json` (the selected
+//! chain source, when the data directory has recorded one), BDK SQLite
+//! (including `-wal`/`-shm`), and the fedimint RocksDB directory. `chain.json`
+//! is not a precondition — it is copied only because [`copy_dir`] takes every
+//! entry — but dropping it would silently reset the chain backend on restore.
+//! A hand-picked file list can lose it, WAL commits, or RocksDB sidecars.
 
 use std::path::Path;
 

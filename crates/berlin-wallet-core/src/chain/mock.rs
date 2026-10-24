@@ -29,6 +29,7 @@ pub struct MockBackend {
     tip: Mutex<ChainTip>,
     remote_at_local: Mutex<Option<BlockHash>>,
     tip_failures: Mutex<VecDeque<MockFailure>>,
+    scan_options: Mutex<FullScanOptions>,
     tip_calls: AtomicUsize,
     sync_calls: AtomicUsize,
     full_scan_calls: AtomicUsize,
@@ -42,6 +43,7 @@ impl MockBackend {
             tip: Mutex::new(tip),
             remote_at_local: Mutex::new(remote_at_local),
             tip_failures: Mutex::new(VecDeque::new()),
+            scan_options: Mutex::new(FullScanOptions::default()),
             tip_calls: AtomicUsize::new(0),
             sync_calls: AtomicUsize::new(0),
             full_scan_calls: AtomicUsize::new(0),
@@ -51,6 +53,12 @@ impl MockBackend {
 
     pub fn set_tip(&self, tip: ChainTip) {
         *self.tip.lock().expect("mock tip lock") = tip;
+    }
+
+    /// What this backend reports as its configured full-scan options (a
+    /// block-walk backend reports its birthday here).
+    pub fn set_full_scan_options(&self, options: FullScanOptions) {
+        *self.scan_options.lock().expect("mock options lock") = options;
     }
 
     pub fn set_remote_at_local(&self, hash: Option<BlockHash>) {
@@ -133,5 +141,14 @@ impl ChainBackend for MockBackend {
         self.full_scan_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_scan_options.lock().expect("mock options lock") = Some(options);
         Ok(Vec::new())
+    }
+
+    fn full_scan_options(&self) -> FullScanOptions {
+        *self.scan_options.lock().expect("mock options lock")
+    }
+
+    fn full_scan_uses_birthday(&self) -> bool {
+        // Mirror the real backend: only the block-walk one scans from a height.
+        self.kind == ChainKind::Bitcoind
     }
 }
