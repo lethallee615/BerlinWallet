@@ -10,6 +10,11 @@
 
 # Berlin Wallet
 
+> **Status: early and unaudited.** The core works end-to-end against a local
+> Fedimint federation, but it has not had an external audit and no funds should
+> be considered safe yet. Interfaces and the on-disk format may change without
+> migration.
+
 Berlin Wallet is a Rust wallet core for an on-chain **self-custodial** BDK
 wallet and a **custodial** Fedimint ecash balance while funds are pegged. The
 custody split is explicit:

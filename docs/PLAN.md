@@ -99,7 +99,7 @@ Working sandbox setup:
 rustup toolchain install 1.91 --profile minimal
 uv tool install cmake
 uv pip install --target /tmp/opencode/lc libclang   # glibc-compatible libclang (PyPI)
-# LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS are set in .cargo/config.toml [env]
+# LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS come from the shell (see README).
 cargo check   # -> exit 0
 ```
 
@@ -1448,7 +1448,7 @@ scaffold; docs.rs links are for the pinned versions.
     (`Copy + Ord + Serialize + Deserialize`), `OperationId` (manual serde), `FederationId`
     (`Copy + Ord + Serialize + Deserialize`), `FeeQuote` (`Clone + PartialEq + Eq + Debug`).
 13. **Build note** — `cargo check` was run with `cmake` on `PATH`; `LIBCLANG_PATH` and
-    `BINDGEN_EXTRA_CLANG_ARGS` are in `.cargo/config.toml [env]`.
+    `BINDGEN_EXTRA_CLANG_ARGS` come from the shell, not `.cargo/config.toml`.
 14. **`tracing`** — already pinned in §2 (`=0.1.44`) and used by `sync::adoption_task` for transient
     pass warnings; no dependency change was needed.
 
