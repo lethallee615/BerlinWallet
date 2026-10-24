@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use berlin_wallet_core::backup;
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet, KeychainKind};
+use berlin_wallet_core::chain::ChainBackendConfig;
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_existing_client, open_rocksdb,
     recover_client, wallet_client_config,
@@ -121,6 +122,10 @@ pub struct WalletInfo {
     pub onchain_balance_sat: u64,
     pub ecash_balance_msat: u64,
     pub min_withdrawal_sat: u64,
+    /// Active chain backend, human-readable and without credentials.
+    pub chain_source: String,
+    /// `esplora` / `electrum` / `bitcoind`.
+    pub chain_kind: String,
 }
 
 /// Nullable net credit is deliberate: `None` means the mintv2 operation fee is
@@ -233,7 +238,7 @@ impl PegWallet {
     }
 
     /// Join (or open) a federation using this data directory.
-    pub async fn join(&self, invite_code: String, esplora_url: String) -> Result<WalletInfo> {
+    pub async fn join(&self, invite_code: String, chain_source: String) -> Result<WalletInfo> {
         self.ensure_open()?;
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
@@ -267,7 +272,7 @@ impl PegWallet {
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
             network,
-            esplora_url,
+            self.resolve_chain_source(Some(chain_source))?,
         )?;
         let state = WalletState {
             client,
@@ -283,14 +288,16 @@ impl PegWallet {
 
     /// Open an existing wallet without an invite. Use this on app restart when
     /// the data directory already contains a joined client.
-    pub async fn open(&self, esplora_url: String) -> Result<WalletInfo> {
+    /// `chain_source` `None` means "use the one recorded in `chain.json`".
+    /// Passing a value changes it; the change is logged, never silent.
+    pub async fn open(&self, chain_source: Option<String>) -> Result<WalletInfo> {
         self.ensure_open()?;
-        self.open_existing(esplora_url, None).await
+        self.open_existing(chain_source, None).await
     }
 
     /// Restore a fresh data directory from the mnemonic. This performs the
     /// 0.12.0 recover/wait/shutdown/reopen flow and a full BDK scan.
-    pub async fn restore(&self, invite_code: String, esplora_url: String) -> Result<RestoreView> {
+    pub async fn restore(&self, invite_code: String, chain_source: String) -> Result<RestoreView> {
         self.ensure_open()?;
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
@@ -324,7 +331,7 @@ impl PegWallet {
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
             network,
-            esplora_url,
+            self.resolve_chain_source(Some(chain_source))?,
         )?;
         let last_active = bdk.full_scan().await?;
         let operation_log_empty = client
@@ -373,7 +380,7 @@ impl PegWallet {
         &self,
         source_dir: String,
         invite_code: String,
-        esplora_url: String,
+        chain_source: Option<String>,
     ) -> Result<WalletInfo> {
         self.ensure_open()?;
         if self.inner.lock().await.is_some() {
@@ -385,7 +392,7 @@ impl PegWallet {
             .await
             .map_err(|e| err(format!("backup import task failed: {e}")))??;
         let invite = InviteCode::from_str(&invite_code).context("invalid invite code")?;
-        self.open_existing(esplora_url, Some(invite.federation_id()))
+        self.open_existing(chain_source, Some(invite.federation_id()))
             .await
     }
 
@@ -661,6 +668,20 @@ impl PegWallet {
         Ok(())
     }
 
+    /// Resolve the chain source for this data directory and record it in
+    /// `chain.json`. `requested` wins over the stored value, and a difference is
+    /// logged rather than applied silently.
+    fn resolve_chain_source(&self, requested: Option<String>) -> Result<ChainBackendConfig> {
+        berlin_wallet_core::chain::persist::resolve_chain_config(
+            &self.data_dir,
+            requested.as_deref(),
+        )
+        .map_err(|resolve_err| err(format!("{resolve_err:#}")))?
+        .ok_or_else(|| {
+            err("no chain source recorded; pass one (esplora:http://… or electrum:tcp://…)")
+        })
+    }
+
     async fn install_state(&self, mut state: WalletState) -> Result<()> {
         let mut guard = self.inner.lock().await;
         if guard.is_some() {
@@ -693,7 +714,7 @@ impl PegWallet {
 
     async fn open_existing(
         &self,
-        esplora_url: String,
+        chain_source: Option<String>,
         expected_federation: Option<FederationId>,
     ) -> Result<WalletInfo> {
         if self.inner.lock().await.is_some() {
@@ -728,7 +749,7 @@ impl PegWallet {
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
             network,
-            esplora_url,
+            self.resolve_chain_source(chain_source)?,
         )?;
         let state = WalletState {
             client,
@@ -746,13 +767,15 @@ impl PegWallet {
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
         let network = client_network(&state.client).await?;
-        let onchain_balance_sat = state
-            .bdk
-            .lock()
-            .await
-            .balance()
-            .trusted_spendable()
-            .to_sat();
+        let (onchain_balance_sat, chain_source, chain_kind) = {
+            let bdk = state.bdk.lock().await;
+            let balance = bdk.balance().trusted_spendable().to_sat();
+            (
+                balance,
+                bdk.chain_description(),
+                bdk.chain_kind().to_string(),
+            )
+        };
         let ecash_balance_msat = state
             .client
             .get_balance_for_unit(AmountUnit::BITCOIN)
@@ -771,6 +794,8 @@ impl PegWallet {
             onchain_balance_sat,
             ecash_balance_msat,
             min_withdrawal_sat,
+            chain_source,
+            chain_kind,
         })
     }
 }
@@ -902,7 +927,7 @@ mod tests {
             .expect_err("balance after shutdown");
         assert!(error.to_string().contains("create a new PegWallet"));
         let error = wallet
-            .open("http://127.0.0.1:1".to_owned())
+            .open(Some("http://127.0.0.1:1".to_owned()))
             .await
             .expect_err("open after shutdown");
         assert!(error.to_string().contains("create a new PegWallet"));

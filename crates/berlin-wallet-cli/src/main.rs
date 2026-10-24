@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use berlin_wallet_core::backup::{backup_data_dir, import_data_dir};
 use berlin_wallet_core::bdk::{BDK_DB_FILE, BdkWallet};
+use berlin_wallet_core::chain::ChainBackendConfig;
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
 };
@@ -62,18 +63,17 @@ async fn main() -> anyhow::Result<()> {
     let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path)?;
     let seed = seed::mnemonic_seed(&mnemonic);
     let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
-    let esplora_url = args
-        .get(3)
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_ESPLORA_URL.to_owned());
+    let requested_chain = args.get(3).cloned();
     match command {
         None | Some("init") => {
+            let chain = chain_config(&data_dir, requested_chain.clone())?;
             let mut bdk = BdkWallet::open_or_create(
                 &data_dir.join(BDK_DB_FILE),
                 &seed,
                 DEFAULT_NETWORK,
-                esplora_url,
+                chain.clone(),
             )?;
+            println!("chain source: {}", chain.describe());
             println!("network: {DEFAULT_NETWORK}");
             println!("data dir: {}", data_dir.display());
             println!("mnemonic: {}", mnemonic_path.display());
@@ -96,25 +96,28 @@ async fn main() -> anyhow::Result<()> {
         Some("run") => {
             let invite = args
                 .get(2)
-                .ok_or_else(|| anyhow!("usage: berlin-wallet run <invite-code> [esplora-url]"))?;
-            run(invite, &seed, root_secret, &data_dir, &esplora_url).await
+                .ok_or_else(|| anyhow!("usage: berlin-wallet run <invite-code> [chain-source]"))?;
+            run(
+                invite,
+                &seed,
+                root_secret,
+                &data_dir,
+                requested_chain.clone(),
+            )
+            .await
         }
         Some("restore") => {
             let invite = args.get(2).ok_or_else(|| {
                 anyhow!(
-                    "usage: berlin-wallet restore <invite-code> [esplora-url] [expected-fed-id] [expected-client-identity]"
+                    "usage: berlin-wallet restore <invite-code> [chain-source] [expected-fed-id] [expected-client-identity]"
                 )
             })?;
-            let esplora_url = args
-                .get(3)
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_ESPLORA_URL.to_owned());
             restore(
                 invite,
                 &seed,
                 root_secret,
                 &data_dir,
-                &esplora_url,
+                args.get(3).cloned(),
                 args.get(4).map(String::as_str),
                 args.get(5).map(String::as_str),
             )
@@ -143,6 +146,27 @@ fn init_tracing() {
         .try_init();
 }
 
+/// Resolve the chain source for `data_dir`.
+///
+/// Precedence: the argument, then `BERLIN_WALLET_CHAIN`, then the value recorded
+/// in `chain.json`. If nothing is configured, fall back to the Esplora default
+/// and record it, so a second backend can never be switched in silently.
+fn chain_config(data_dir: &Path, requested: Option<String>) -> anyhow::Result<ChainBackendConfig> {
+    let requested = requested
+        .or_else(|| std::env::var("BERLIN_WALLET_CHAIN").ok())
+        .filter(|source| !source.trim().is_empty());
+    if let Some(config) =
+        berlin_wallet_core::chain::persist::resolve_chain_config(data_dir, requested.as_deref())?
+    {
+        return Ok(config);
+    }
+    let default: ChainBackendConfig = DEFAULT_ESPLORA_URL
+        .parse()
+        .expect("the default Esplora URL always parses");
+    berlin_wallet_core::chain::persist::store_chain_config(data_dir, &default)?;
+    Ok(default)
+}
+
 fn data_dir() -> PathBuf {
     std::env::var_os("BERLIN_WALLET_DATA_DIR")
         .map(PathBuf::from)
@@ -162,7 +186,7 @@ fn print_help() {
     );
     println!("  restore <invite> [esplora] [fed] [identity]");
     println!("                                      recover on a fresh data dir + full BDK scan");
-    println!("  run <invite> [esplora-url]          interactive manual-run session");
+    println!("  run <invite> [chain-source]         interactive manual-run session");
     println!();
     println!("interactive commands:");
     println!("  balance                             BDK balance");
@@ -221,7 +245,7 @@ async fn run(
     seed: &[u8; 64],
     root_secret: RootSecret,
     data_dir: &Path,
-    esplora_url: &str,
+    requested_chain: Option<String>,
 ) -> anyhow::Result<()> {
     let db = open_database(data_dir).await?;
     let journal = Journal::new(db.clone(), vec![0x00]);
@@ -233,11 +257,12 @@ async fn run(
     let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
     let federation_id = client.federation_id();
     let chain_network = client_network(&client).await?;
+    let chain = chain_config(data_dir, requested_chain)?;
     let bdk = BdkWallet::open_or_create(
         &data_dir.join(BDK_DB_FILE),
         seed,
         chain_network,
-        esplora_url,
+        chain.clone(),
     )?;
     let wallet = Arc::new(Mutex::new(bdk));
 
@@ -260,6 +285,7 @@ async fn run(
     println!("client identity: {identity}");
     println!("chain-id network: {chain_network}");
     println!("config network: {}", module.get_network());
+    println!("chain source: {}", chain.describe());
     println!("bdk address: {}", wallet.lock().await.reveal_destination()?);
     println!("min withdrawal: {} sat", min_withdrawal_sat(&client).await?);
     println!("type `help` for commands");
@@ -433,7 +459,7 @@ async fn restore(
     seed: &[u8; 64],
     root_secret: RootSecret,
     data_dir: &Path,
-    esplora_url: &str,
+    requested_chain: Option<String>,
     expected_federation_id: Option<&str>,
     expected_identity: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -478,7 +504,8 @@ async fn restore(
     );
 
     let chain_network = client_network(&client).await?;
-    let mut bdk = BdkWallet::open_or_create(&bdk_path, seed, chain_network, esplora_url)?;
+    let chain = chain_config(data_dir, requested_chain)?;
+    let mut bdk = BdkWallet::open_or_create(&bdk_path, seed, chain_network, chain.clone())?;
     let last_active = bdk.full_scan().await?;
     let ecash = client.get_balance_for_unit(AmountUnit::BITCOIN).await?;
 
@@ -690,8 +717,13 @@ mod tests {
         let seed = [0x42u8; 64];
         let esplora = "http://127.0.0.1:1";
         let source_db = source.join(BDK_DB_FILE);
-        let mut source_wallet =
-            BdkWallet::open_or_create(&source_db, &seed, Network::Regtest, esplora).unwrap();
+        let mut source_wallet = BdkWallet::open_or_create(
+            &source_db,
+            &seed,
+            Network::Regtest,
+            esplora.parse::<ChainBackendConfig>().unwrap(),
+        )
+        .unwrap();
         source_wallet.reveal_destination().unwrap();
         source_wallet.reveal_destination().unwrap();
         let source_balance = source_wallet.balance();
@@ -717,15 +749,20 @@ mod tests {
             &imported.join(BDK_DB_FILE),
             &seed,
             Network::Regtest,
-            esplora,
+            esplora.parse::<ChainBackendConfig>().unwrap(),
         )
         .unwrap();
         let imported_next = imported_wallet.reveal_destination().unwrap();
         let imported_balance = imported_wallet.balance();
         drop(imported_wallet);
 
-        let mut source_wallet =
-            BdkWallet::open_or_create(&source_db, &seed, Network::Regtest, esplora).unwrap();
+        let mut source_wallet = BdkWallet::open_or_create(
+            &source_db,
+            &seed,
+            Network::Regtest,
+            esplora.parse::<ChainBackendConfig>().unwrap(),
+        )
+        .unwrap();
         let source_next = source_wallet.reveal_destination().unwrap();
         assert_eq!(imported_next, source_next, "address state must match");
         assert_eq!(
