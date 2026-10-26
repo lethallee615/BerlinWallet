@@ -11,9 +11,13 @@ The log said what triggered the rebuild and which heights were involved, but not
 where the scan started. On the bitcoind backend that start height is the
 substance of the path: it is the minimum of the configured birthday, the
 earliest confirmed anchor in the old transaction graph, and the orphaned
-checkpoint height. With `birthday=0` a genesis rescan and a graph-derived floor
-looked identical in the old line, which is exactly the ambiguity that made a
-previous reorg reconstruction depend on reading raw block headers.
+checkpoint height. With `birthday=0` the minimum is 0 and the source is
+`configured_birthday`, so the rebuild rescans from genesis and the anchor never
+wins. That is correct for an explicit 0, but non-obvious; the anchor path only
+engages when the birthday is set above the wallet's activity. Before this change
+a genesis rescan and a graph-derived floor looked identical in the old line,
+which is exactly the ambiguity that made a previous reorg reconstruction depend
+on reading raw block headers.
 
 The line now appends `scan_floor=<height>` and
 `floor_source=<configured_birthday|graph_anchor|orphaned_height>`.
@@ -27,9 +31,11 @@ Floor resolution moved to the orphaned-checkpoint branch so the log and the
 rebuild use one value: `reset_and_full_scan` now receives the resolved floor
 instead of deriving it again. The WARN text and fields are unchanged. Unit tests
 pin that a configured birthday above the graph anchor does not win, and that the
-fallback and tie sources are reported correctly. The live check on devimint
-regtest is to fund a deposit, invalidate a block, and confirm
-`floor_source=graph_anchor` with a non-zero `scan_floor` while `birthday=0`.
+fallback, capping, anchor-only, and tie sources are reported correctly. The live
+check on devimint regtest runs twice: with `birthday=0`, expecting
+`scan_floor=0 floor_source=configured_birthday`; and with `birthday=500000` after
+funding a deposit and invalidating a block, expecting `floor_source=graph_anchor`
+with a non-zero `scan_floor` plus the WARN.
 
 ## 2026-10-22 — The chain source becomes a trait; Electrum and bitcoind RPC arrive
 

@@ -69,9 +69,13 @@ struct ScanFloor {
 /// Derive the rebuild floor from the configured birthday, the earliest
 /// confirmed anchor in the old graph, and the orphaned checkpoint height.
 ///
-/// The value is `min(configured, earliest_anchor, orphaned_height)`, unchanged.
-/// Ties go to the orphaned cap, then the graph anchor, then the configured
-/// birthday, so `source` always names an input that produced the value.
+/// The floor is the minimum of the three inputs: the configured birthday acts
+/// as a lower bound, the graph anchor pulls it up to the earliest known
+/// activity, and the orphaned height caps it. A configured birthday of `0`
+/// therefore means a genesis rescan: `0` wins and the graph anchor never
+/// applies. Ties go to the orphaned cap, then the graph anchor, then the
+/// configured birthday, so `source` always names an input that produced the
+/// value.
 fn resolve_scan_floor(
     configured_birthday: Option<u32>,
     earliest_confirmed_height: Option<u32>,
@@ -441,14 +445,15 @@ impl BdkWallet {
     ///
     /// `scan_floor` is resolved by [`resolve_scan_floor`] before the orphaned
     /// checkpoint is logged, so this function applies the already-logged value
-    /// rather than deriving it again. A rebuild has the tx graph it is
-    /// replacing, so the floor comes from the earliest confirmed anchor in that
-    /// graph where possible; the configured birthday is only a fallback for a
-    /// wallet with no confirmed transactions, and the orphaned checkpoint height
-    /// caps both. `None` means the backend scans by script and has no height
-    /// floor. `restore` has neither a graph to inspect nor an orphaned height to
-    /// cap against, so a birthday that is too high during restore is still the
-    /// caller's mistake and cannot be detected here.
+    /// rather than deriving it again. The floor is the minimum of the configured
+    /// birthday, the earliest confirmed anchor in the old graph, and the
+    /// orphaned checkpoint height: the birthday acts as a lower bound, the graph
+    /// anchor pulls the scan up to the earliest known activity, and the orphaned
+    /// height caps it. A configured birthday of `0` therefore means a genesis
+    /// rescan, not a graph-anchor rescan. `None` means the backend scans by
+    /// script and has no height floor. `restore` has neither a graph to inspect
+    /// nor an orphaned height to cap against, so a birthday that is too high
+    /// during restore is still the caller's mistake and cannot be detected here.
     async fn reset_and_full_scan(
         &mut self,
         scan_floor: Option<ScanFloor>,
@@ -985,6 +990,14 @@ mod tests {
         let tie = resolve_scan_floor(Some(90), Some(90), 1000);
         assert_eq!(tie.height, 90);
         assert_eq!(tie.source, ScanFloorSource::GraphAnchor);
+
+        let capped = resolve_scan_floor(Some(500), Some(400), 100);
+        assert_eq!(capped.height, 100);
+        assert_eq!(capped.source, ScanFloorSource::OrphanedHeight);
+
+        let anchor_only = resolve_scan_floor(None, Some(90), 1000);
+        assert_eq!(anchor_only.height, 90);
+        assert_eq!(anchor_only.source, ScanFloorSource::GraphAnchor);
     }
 
     #[test]
