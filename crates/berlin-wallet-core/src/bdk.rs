@@ -37,6 +37,70 @@ fn earliest_confirmed_height(wallet: &Wallet) -> Option<u32> {
         .min()
 }
 
+/// Which input actually set the rebuild's scan floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanFloorSource {
+    ConfiguredBirthday,
+    GraphAnchor,
+    OrphanedHeight,
+}
+
+impl ScanFloorSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfiguredBirthday => "configured_birthday",
+            Self::GraphAnchor => "graph_anchor",
+            Self::OrphanedHeight => "orphaned_height",
+        }
+    }
+}
+
+/// A resolved rebuild scan floor plus the inputs it came from, so the log site
+/// and the WARN can name the winning input rather than just the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScanFloor {
+    height: u32,
+    source: ScanFloorSource,
+    configured_birthday: Option<u32>,
+    earliest_confirmed_height: Option<u32>,
+    orphaned_height: u32,
+}
+
+/// Derive the rebuild floor from the configured birthday, the earliest
+/// confirmed anchor in the old graph, and the orphaned checkpoint height.
+///
+/// The floor is the minimum of the three inputs: the configured birthday acts
+/// as a lower bound, the graph anchor pulls it up to the earliest known
+/// activity, and the orphaned height caps it. A configured birthday of `0`
+/// therefore means a genesis rescan: `0` wins and the graph anchor never
+/// applies. Ties go to the orphaned cap, then the graph anchor, then the
+/// configured birthday, so `source` always names an input that produced the
+/// value.
+fn resolve_scan_floor(
+    configured_birthday: Option<u32>,
+    earliest_confirmed_height: Option<u32>,
+    orphaned_height: u32,
+) -> ScanFloor {
+    let height = configured_birthday
+        .unwrap_or(u32::MAX)
+        .min(earliest_confirmed_height.unwrap_or(u32::MAX))
+        .min(orphaned_height);
+    let source = if height == orphaned_height {
+        ScanFloorSource::OrphanedHeight
+    } else if Some(height) == earliest_confirmed_height {
+        ScanFloorSource::GraphAnchor
+    } else {
+        ScanFloorSource::ConfiguredBirthday
+    };
+    ScanFloor {
+        height,
+        source,
+        configured_birthday,
+        earliest_confirmed_height,
+        orphaned_height,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReorgDecision {
     AncestorOk,
@@ -332,17 +396,38 @@ impl BdkWallet {
             remote_at_local,
         ) == ReorgDecision::Orphaned
         {
-            tracing::info!(
-                backend = %chain.kind(),
-                local_height,
-                remote_height = remote.height,
-                remote_tip = %remote.hash,
-                "BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan"
-            );
+            let scan_floor = self.chain.full_scan_uses_birthday().then(|| {
+                resolve_scan_floor(
+                    self.chain.full_scan_options().birthday_height,
+                    earliest_confirmed_height(self.wallet()),
+                    local_height,
+                )
+            });
+            // Existing fields first; the resolved floor and its source are
+            // appended so the log says where the rescan starts and why.
+            if let Some(floor) = scan_floor {
+                tracing::info!(
+                    backend = %chain.kind(),
+                    local_height,
+                    remote_height = remote.height,
+                    remote_tip = %remote.hash,
+                    scan_floor = floor.height,
+                    floor_source = %floor.source.as_str(),
+                    "BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan"
+                );
+            } else {
+                tracing::info!(
+                    backend = %chain.kind(),
+                    local_height,
+                    remote_height = remote.height,
+                    remote_tip = %remote.hash,
+                    "BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan"
+                );
+            }
             // The incremental update cannot lower the local tip (merge_chains
             // returns an empty changeset when the update tip is lower and all
             // overlapping hashes agree). Rebuild from scratch and full-scan.
-            self.reset_and_full_scan().await?;
+            self.reset_and_full_scan(scan_floor).await?;
             return Ok(());
         }
 
@@ -358,15 +443,21 @@ impl BdkWallet {
     /// update cannot force the tip down. The old DB is replaced only after the
     /// fresh wallet has successfully full-scanned.
     ///
-    /// This is the only place a scan floor is derived. A rebuild has the tx
-    /// graph it is replacing, so the floor comes from the earliest confirmed
-    /// anchor in that graph where possible; the configured birthday is only a
-    /// fallback for a wallet with no confirmed transactions, and the orphaned
-    /// checkpoint height caps both. `restore` has neither a graph to inspect nor
-    /// an orphaned height to cap against, so a birthday that is too high during
-    /// restore is still the caller's mistake and cannot be detected here.
-    async fn reset_and_full_scan(&mut self) -> Result<(), ChainError> {
-        let orphaned_height = self.wallet().latest_checkpoint().height();
+    /// `scan_floor` is resolved by [`resolve_scan_floor`] before the orphaned
+    /// checkpoint is logged, so this function applies the already-logged value
+    /// rather than deriving it again. The floor is the minimum of the configured
+    /// birthday, the earliest confirmed anchor in the old graph, and the
+    /// orphaned checkpoint height: the birthday acts as a lower bound, the graph
+    /// anchor pulls the scan up to the earliest known activity, and the orphaned
+    /// height caps it. A configured birthday of `0` therefore means a genesis
+    /// rescan, not a graph-anchor rescan. `None` means the backend scans by
+    /// script and has no height floor. `restore` has neither a graph to inspect
+    /// nor an orphaned height to cap against, so a birthday that is too high
+    /// during restore is still the caller's mistake and cannot be detected here.
+    async fn reset_and_full_scan(
+        &mut self,
+        scan_floor: Option<ScanFloor>,
+    ) -> Result<(), ChainError> {
         let chain_kind = self.chain.kind();
         let mut options = self.chain.full_scan_options();
 
@@ -374,26 +465,20 @@ impl BdkWallet {
         // floor must cover the oldest activity this wallet already knows about —
         // not just the configured birthday. Clamping to the orphaned height
         // alone would still lose everything between the birthday and it.
-        if self.chain.full_scan_uses_birthday() {
-            let configured = options.birthday_height;
-            let earliest = earliest_confirmed_height(self.wallet());
-            let floor = configured
-                .unwrap_or(u32::MAX)
-                .min(earliest.unwrap_or(u32::MAX))
-                .min(orphaned_height);
-            if let Some(configured) = configured
-                && floor < configured
+        if let Some(floor) = scan_floor {
+            if let Some(configured) = floor.configured_birthday
+                && floor.height < configured
             {
                 tracing::warn!(
                     backend = %chain_kind,
                     configured_birthday = configured,
-                    earliest_confirmed_height = earliest,
-                    orphaned_height,
-                    scan_floor = floor,
+                    earliest_confirmed_height = floor.earliest_confirmed_height,
+                    orphaned_height = floor.orphaned_height,
+                    scan_floor = floor.height,
                     "rebuild scan floor is below the configured birthday; rebuilding from the lower height"
                 );
             }
-            options.birthday_height = Some(floor);
+            options.birthday_height = Some(floor.height);
         }
 
         let temp_path = self.path.with_file_name(format!(
@@ -882,6 +967,37 @@ mod tests {
 
         let options = fixture.backend.last_scan_options().expect("scan ran");
         assert_eq!(options.birthday_height, Some(50));
+    }
+
+    #[test]
+    fn configured_birthday_above_graph_anchor_does_not_win_the_floor() {
+        let floor = resolve_scan_floor(Some(500), Some(90), 100);
+        assert_eq!(floor.height, 90);
+        assert_eq!(floor.source, ScanFloorSource::GraphAnchor);
+    }
+
+    #[test]
+    fn scan_floor_source_names_the_winning_input() {
+        let configured = resolve_scan_floor(Some(90), Some(500), 1000);
+        assert_eq!(configured.height, 90);
+        assert_eq!(configured.source, ScanFloorSource::ConfiguredBirthday);
+
+        let orphaned = resolve_scan_floor(None, None, 1000);
+        assert_eq!(orphaned.height, 1000);
+        assert_eq!(orphaned.source, ScanFloorSource::OrphanedHeight);
+
+        // Ties go to the graph anchor over the configured birthday.
+        let tie = resolve_scan_floor(Some(90), Some(90), 1000);
+        assert_eq!(tie.height, 90);
+        assert_eq!(tie.source, ScanFloorSource::GraphAnchor);
+
+        let capped = resolve_scan_floor(Some(500), Some(400), 100);
+        assert_eq!(capped.height, 100);
+        assert_eq!(capped.source, ScanFloorSource::OrphanedHeight);
+
+        let anchor_only = resolve_scan_floor(None, Some(90), 1000);
+        assert_eq!(anchor_only.height, 90);
+        assert_eq!(anchor_only.source, ScanFloorSource::GraphAnchor);
     }
 
     #[test]
