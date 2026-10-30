@@ -412,7 +412,7 @@ impl BdkWallet {
                     remote_height = remote.height,
                     remote_tip = %remote.hash,
                     scan_floor = floor.height,
-                    floor_source = floor.source.as_str(),
+                    floor_source = %floor.source.as_str(),
                     "BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan"
                 );
             } else {
