@@ -2981,3 +2981,67 @@ the counterparties.
 - Still unverified at runtime: gateway selection against a real federation,
   paid/failed/expired/interrupted invoices, and refund/claim timing on a
   regtest federation. Those are #23's live gates.
+
+## 49. lnv2 send/receive implementation and live gate
+
+Implementation:
+
+- `client::configured_builder` registers
+  `fedimint_lnv2_client::LightningClientInit::default()` alongside mintv2 and
+  walletv2. The live federation exposes `lnv2` at module 0.
+- `crates/berlin-wallet-core/src/lightning.rs`:
+  - `prepare_send` checks `get_invoice_send_status` first, selects the gateway,
+    quotes the gateway fee and the federation `send_fee_quote`, writes a
+    `Pending` row, and returns the quote. The row id is the `custom_meta.id`.
+  - `execute_send` calls `send` once, persists the operation id, and waits up to
+    300 s for `await_final_send_operation_state`; the adoption tick resumes a row
+    that outlives that wait.
+  - `request_receive` selects/quotes the gateway, writes a `Pending` row, calls
+    `receive`, and persists the invoice, payment hash, and operation id.
+  - `refresh_row`/`refresh_pending` update final states; `ln-status` and
+    `ln-list` refresh pending rows on demand.
+  - `adopt_lightning_operations` scans the operation log for
+    `LightningOperationMeta::{Send,Receive}`, matches `custom_meta.id` or the
+    operation id, and updates/creates a row. It never calls `send`/`receive`.
+  - Receive rows have a local expiry fallback: if the invoice is expired and
+    the upstream final stream has not returned, the row is marked `Expired`.
+- Journal: `LightningRow` under tag `0x0A` with kind (Send/Receive), origin,
+  invoice, payment hash, amount, gateway, gateway fee, federation fee quote,
+  operation id, state, preimage, expiry, and last error. States are `Pending`,
+  `Succeeded`, `Refunded`, `Claimed`, `Expired`, `Failed`.
+- CLI: `ln-send <invoice> [gateway]`, `ln-receive <sat> [expiry] [gateway]
+  [description...]`, `ln-status <id>`, `ln-list`, `ln-gateways`.
+
+Live gate (2026-10-31, devimint v0.12.0, fresh data directory):
+
+- **Paid send**: 1,000,000 msat invoice via the LDK gateway. Quote: gateway
+  5,000 msat, federation 2,104 msat, total 1,007,104 msat. Row `Succeeded` with
+  preimage; the LND invoice was `SETTLED` for 1,000 sat; the ecash balance fell
+  by exactly 1,007,104 msat.
+- **Paid receive (online)**: 50,000,000 msat invoice via the LDK gateway. Quote:
+  gateway 152,000 msat, federation 2,688 msat, net 49,845,312 msat. LND paid it;
+  the row became `Claimed`; the balance rose by 49,845,760 msat (the quote is
+  conservative by 448 msat).
+- **Receive across restart**: a 10,000,000 msat invoice was paid while the client
+  was offline. On restart the row was still `Pending`; after the client stayed
+  online for 30 s it became `Claimed` and the balance rose by 9,966,080 msat.
+  This exercises resume/adoption, not a re-send.
+- **Expired receive**: a 1 s invoice was not paid; the row became `Expired` via
+  the local invoice-expiry fallback (the upstream final stream lagged).
+- **Expired send**: an invoice with a 1 s expiry was refused by `send`; the row
+  became `Failed` with "Invoice has expired". No funds moved.
+- **Duplicate send**: re-sending an already-`Succeeded` invoice was refused with
+  the existing row id and state; no second operation.
+- **Gateways**: the federation listed LDK, LND, and a second LDK gateway; the
+  send/receive tests used the LDK gateway at `127.0.0.1:10146/v1`.
+
+Upgrade note: a client data directory created **before** lnv2 was registered
+does not gain the module. The client stores only the module configs it
+registered at join; `get_first_module::<LightningClientModule>()` then reports
+"No modules found of kind lnv2". A fresh join or restore is required. The live
+gate used a fresh directory.
+
+Not exercised: a gateway that fails after funding (refund/forfeit path), a
+gateway with exhausted inbound/outbound liquidity, multiple concurrent invoices,
+LNURL, and signet. The expired paths exercise failure handling but not a
+gateway-side routing failure.

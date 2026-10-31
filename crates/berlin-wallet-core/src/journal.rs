@@ -12,7 +12,7 @@ use fedimint_eventlog::EventLogId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::ops::{DepositId, OnchainSendId, WithdrawalId};
+use crate::ops::{DepositId, LightningId, OnchainSendId, WithdrawalId};
 use crate::wire::FeeQuoteWire;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +260,88 @@ pub enum OnchainSendState {
     Broadcast,
 }
 
+/// Direction of a Lightning operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LightningKind {
+    Send,
+    Receive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LightningOrigin {
+    Requested,
+    Adopted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LightningState {
+    Pending,
+    Succeeded,
+    Refunded,
+    Claimed,
+    Expired,
+    Failed,
+}
+
+/// One Lightning send or receive, keyed by the id carried in `custom_meta`.
+///
+/// The row is written before the lnv2 operation is created, so a restart can
+/// find the operation by the id and never re-send an invoice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightningRow {
+    pub id: LightningId,
+    pub federation_id: FederationId,
+    pub kind: LightningKind,
+    pub origin: LightningOrigin,
+    pub invoice: Option<String>,
+    pub payment_hash: Option<String>,
+    pub amount_msat: u64,
+    pub gateway: Option<String>,
+    pub gateway_fee_msat: Option<u64>,
+    pub federation_quote: Option<FeeQuoteWire>,
+    pub operation_id: Option<OperationId>,
+    pub state: LightningState,
+    pub preimage: Option<String>,
+    pub expiry_secs: Option<u32>,
+    pub last_error: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl LightningRow {
+    pub fn requested(
+        id: LightningId,
+        federation_id: FederationId,
+        kind: LightningKind,
+        amount_msat: u64,
+    ) -> Self {
+        let now = now_ms();
+        Self {
+            id,
+            federation_id,
+            kind,
+            origin: LightningOrigin::Requested,
+            invoice: None,
+            payment_hash: None,
+            amount_msat,
+            gateway: None,
+            gateway_fee_msat: None,
+            federation_quote: None,
+            operation_id: None,
+            state: LightningState::Pending,
+            preimage: None,
+            expiry_secs: None,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn touch(&mut self) {
+        self.updated_at = now_ms();
+    }
+}
+
 /// Audit row for a first-class on-chain send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnchainSendRow {
@@ -310,6 +392,7 @@ struct JournalInner {
     deposits: BTreeMap<DepositId, DepositRow>,
     withdrawals: BTreeMap<WithdrawalId, WithdrawalRow>,
     onchain_sends: BTreeMap<OnchainSendId, OnchainSendRow>,
+    lightning: BTreeMap<LightningId, LightningRow>,
     /// Unique owner of each walletv2 Send operation.
     withdrawal_ops: BTreeMap<OperationId, WithdrawalId>,
     claims: BTreeMap<(FederationId, bitcoin::OutPoint), DepositId>,
@@ -441,6 +524,14 @@ pub trait JournalBackend: Send + Sync {
     /// Append an audit row for a broadcast on-chain send.
     async fn insert_onchain_send(&self, row: &OnchainSendRow) -> anyhow::Result<()>;
     async fn onchain_sends_all(&self) -> anyhow::Result<Vec<OnchainSendRow>>;
+    /// Insert a Lightning send/receive row. The row id is also the
+    /// idempotency key carried in `custom_meta`.
+    async fn insert_lightning(&self, row: &LightningRow) -> anyhow::Result<()>;
+    /// Replace a Lightning row after an operation-id or final-state update.
+    async fn update_lightning(&self, row: &LightningRow) -> anyhow::Result<()>;
+    async fn lightning(&self, id: &LightningId) -> anyhow::Result<Option<LightningRow>>;
+    async fn lightning_all(&self) -> anyhow::Result<Vec<LightningRow>>;
+    async fn lightning_pending(&self) -> anyhow::Result<Vec<LightningRow>>;
     async fn open_withdrawal(
         &self,
         federation_id: &FederationId,
@@ -986,6 +1077,40 @@ impl JournalBackend for MemoryJournal {
         let mut rows: Vec<OnchainSendRow> = inner.onchain_sends.values().cloned().collect();
         rows.sort_by_key(|row| row.created_at);
         Ok(rows)
+    }
+
+    async fn insert_lightning(&self, row: &LightningRow) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.lightning.insert(row.id.clone(), row.clone());
+        Ok(())
+    }
+
+    async fn update_lightning(&self, row: &LightningRow) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.lightning.insert(row.id.clone(), row.clone());
+        Ok(())
+    }
+
+    async fn lightning(&self, id: &LightningId) -> anyhow::Result<Option<LightningRow>> {
+        let inner = self.inner.lock().await;
+        Ok(inner.lightning.get(id).cloned())
+    }
+
+    async fn lightning_all(&self) -> anyhow::Result<Vec<LightningRow>> {
+        let inner = self.inner.lock().await;
+        let mut rows: Vec<LightningRow> = inner.lightning.values().cloned().collect();
+        rows.sort_by_key(|row| row.created_at);
+        Ok(rows)
+    }
+
+    async fn lightning_pending(&self) -> anyhow::Result<Vec<LightningRow>> {
+        let inner = self.inner.lock().await;
+        Ok(inner
+            .lightning
+            .values()
+            .filter(|row| row.state == LightningState::Pending)
+            .cloned()
+            .collect())
     }
 
     async fn open_withdrawal(
@@ -1544,6 +1669,46 @@ mod tests {
             .expect("insert on-chain send");
         let rows = journal.onchain_sends_all().await.expect("list");
         assert_eq!(rows, vec![row]);
+    }
+
+    #[tokio::test]
+    async fn lightning_rows_round_trip_in_memory() {
+        let journal = Journal::in_memory();
+        let id = LightningId::new();
+        let mut row = LightningRow::requested(
+            id.clone(),
+            FederationId::dummy(),
+            LightningKind::Send,
+            100_000,
+        );
+        row.invoice = Some("lnbcrt1...".to_owned());
+        row.payment_hash = Some("00".repeat(32));
+        journal.insert_lightning(&row).await.expect("insert");
+        assert_eq!(
+            journal.lightning(&id).await.expect("get"),
+            Some(row.clone())
+        );
+        assert_eq!(journal.lightning_pending().await.expect("pending").len(), 1);
+
+        row.state = LightningState::Succeeded;
+        row.preimage = Some("11".repeat(32));
+        journal.update_lightning(&row).await.expect("update");
+        assert_eq!(
+            journal
+                .lightning(&id)
+                .await
+                .expect("get")
+                .expect("row")
+                .state,
+            LightningState::Succeeded
+        );
+        assert!(
+            journal
+                .lightning_pending()
+                .await
+                .expect("pending")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

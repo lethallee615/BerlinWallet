@@ -4,6 +4,38 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-31 — Lightning send and receive are wired
+
+The API verification in §48 became the implementation. `lnv2` is registered with
+`LightningClientInit::default()`, and `lightning.rs` follows the deposit and
+withdrawal discipline rather than inventing a second one.
+
+A Lightning row is written **before** the operation, with its id in
+`custom_meta.id`. A send first checks `get_invoice_send_status`; an invoice that
+has any operation is refused rather than re-sent. The operation id is persisted
+after `send`/`receive`, and the final state is driven by the lnv2 state machine.
+The adoption pass scans the operation log and matches `custom_meta.id` (or the
+operation id), so a restart resumes and updates a row without re-sending.
+`ln-status` and `ln-list` refresh pending rows on demand; the 60 s adoption tick
+does the same in the background.
+
+Fees are kept as two layers: the gateway fee from `RoutingInfo`/the operation
+meta, and the federation `FeeQuote` from `send_fee_quote`/`receive_fee_quote`.
+The send quote total matched the balance drop exactly (1,007,104 msat for a
+1,000 sat invoice: 5,000 gateway + 2,104 federation). The receive quote is
+conservative by a few hundred msat; the balance is the truth.
+
+The live gates on devimint: a paid send (`Succeeded`, preimage, LND invoice
+`SETTLED`), a paid receive (`Claimed`), a receive paid while the client was
+offline and claimed after restart, an expired receive (`Expired`), an expired
+send (`Failed`), and a duplicate settled send refused. The expired receive uses
+a local invoice-deadline fallback because the upstream final stream lagged.
+
+Two limits are deliberate. A client data directory created before lnv2 was
+registered has no lnv2 module in its stored module config; it needs a fresh
+join/restore. And a gateway-side routing failure (as opposed to an expired
+invoice) was not exercised; signet is still a live-gate gap.
+
 ## 2026-10-31 — lnv2 client API verified before implementation
 
 Lightning was the next MVP gap, but the `fedimint-lnv2-client` surface had never

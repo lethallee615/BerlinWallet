@@ -23,6 +23,8 @@ fedimint-connectors = "=0.12.0"
 fedimint-core = "=0.12.0"
 fedimint-derive-secret = "=0.12.0"
 fedimint-eventlog = "=0.12.0"
+fedimint-lnv2-client = "=0.12.0"
+fedimint-lnv2-common = "=0.12.0"
 fedimint-mintv2-client = "=0.12.0"
 fedimint-rocksdb = "=0.12.0"
 fedimint-walletv2-client = "=0.12.0"
@@ -34,6 +36,7 @@ bdk_esplora = "=0.22.1"
 bdk_electrum = "=0.23.2"
 bdk_bitcoind_rpc = "=0.22.0"
 bip39 = { version = "=2.2.0", features = ["rand"] }
+lightning-invoice = { version = "0.33.2", features = ["std"] }
 bitcoin = { version = "=0.32.8", features = ["serde"] }
 futures = "0.3"
 rand = "0.8"

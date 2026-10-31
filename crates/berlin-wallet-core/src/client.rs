@@ -5,6 +5,7 @@ use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::db::Database;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
+use fedimint_lnv2_client::LightningClientInit as Lnv2ClientInit;
 use fedimint_mintv2_client::MintClientInit as Mintv2ClientInit;
 use fedimint_walletv2_client::WalletClientInit;
 use fedimint_walletv2_common::KIND as WALLET_V2_KIND;
@@ -15,12 +16,16 @@ async fn configured_builder() -> anyhow::Result<ClientBuilder> {
     let mut builder = Client::builder().await?;
     // The federation family is v2: mintv2 is the primary BTC module. The v1
     // mint client is intentionally not registered (it is not in the v2
-    // federation config). Lightning/lnv2 is out of scope for this wallet.
+    // federation config).
     builder.with_module(Mintv2ClientInit);
     // `WalletClientInit` is a unit struct (`#[derive(Default)]`). The real
     // `WalletClientConfig` is per-federation module config delivered through
     // `ClientModuleInitArgs::cfg()`, not a client-builder argument.
     builder.with_module(WalletClientInit);
+    // lnv2 discovers the federation's vetted gateways at runtime; the default
+    // init needs no gateway URL. Register only v2; the live federation has no
+    // v1 `ln` module.
+    builder.with_module(Lnv2ClientInit::default());
     Ok(builder)
 }
 
@@ -210,8 +215,8 @@ mod tests {
     use fedimint_eventlog::EventLogId;
 
     use super::*;
-    use crate::journal::{DepositRow, Journal, OnchainSendRow};
-    use crate::ops::{DepositId, OnchainSendId};
+    use crate::journal::{DepositRow, Journal, LightningRow, OnchainSendRow};
+    use crate::ops::{DepositId, LightningId, OnchainSendId};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rocksdb_journal_rows_survive_reopen() {
@@ -239,6 +244,37 @@ mod tests {
         assert_eq!(row.id, id);
         assert_eq!(row.amount, amount);
         assert_eq!(row.federation_id, federation_id);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rocksdb_lightning_row_survives_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("berlin-wallet-rocksdb-{}", uuid::Uuid::now_v7()));
+        let id = LightningId::new();
+
+        {
+            let db = open_rocksdb(&path).await.expect("open rocksdb");
+            let journal = Journal::new(db, vec![0x00]);
+            let row = LightningRow::requested(
+                id.clone(),
+                FederationId::dummy(),
+                crate::journal::LightningKind::Send,
+                100_000,
+            );
+            journal
+                .insert_lightning(&row)
+                .await
+                .expect("insert lightning row");
+        }
+
+        let db = open_rocksdb(&path).await.expect("reopen rocksdb");
+        let journal = Journal::new(db, vec![0x00]);
+        let rows = journal.lightning_all().await.expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].state, crate::journal::LightningState::Pending);
 
         let _ = std::fs::remove_dir_all(path);
     }
