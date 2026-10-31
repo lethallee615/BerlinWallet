@@ -631,8 +631,9 @@ thin. A real GUI needs facilities that do **not** exist yet:
    require the caller to choose a path. There is no platform-specific default,
    permission model, migration, or "app support directory" integration.
 6. **Product-level state.** There is no GUI model for pending operation lists,
-   quote confirmation, restore warnings, event history, or multi-federation
-   selection. The core exposes records; the UI contract has to be built.
+   quote confirmation, event history, or multi-federation selection. Restore
+   warnings are exposed as exact strings in `RestoreView`; the core exposes
+   records, and the rest of the UI contract has to be built.
 7. **Release packaging, update, and telemetry.** None of this exists in this
    repository.
 

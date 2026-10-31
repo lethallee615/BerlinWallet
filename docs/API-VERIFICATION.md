@@ -1657,6 +1657,8 @@ does `recover → wait_for_all_recoveries → shutdown → open`.
 6. `handle.shutdown().await`.
 7. `configured_builder().open(connectors, db, root_secret)`.
 8. Assert the reopened federation id and `all_modules_usable()`.
+9. `wait_for_all_active_state_machines()` so the recovered-notes issuance
+   state machine settles before the caller reads the balance (§52).
 
 `cli::restore` additionally:
 
@@ -1724,7 +1726,8 @@ restore assertions: ok
 
 Original balances were the same: ecash `36,402,688 msat`, BDK `0.00059473 BTC`. The full scan
 found activity out to external index 11 / internal index 2 — addresses a fresh partial sync would
-never have requested. Unit coverage:
+never have requested. A 2026-10-31 devimint rerun initially read `0 msat` immediately after
+reopen; §52 added the active-state wait and re-verified the recovered balance. Unit coverage:
 `seed::tests::client_identity_is_stable_for_the_same_seed`; the restore itself is an end-to-end
 live test (it needs the federation).
 
@@ -1922,6 +1925,13 @@ request-deposit 10000
 
 **Conclusion:** simply requesting a new deposit does **not** re-derive the old tweak index or
 re-claim the stranded UTXO in 0.12.0.
+
+2026-10-31 devimint rerun: the new request returned the **same** walletv2
+address as the stranded 50,000 sat UTXO (walletv2 address reuse), unlike the
+signet run above. Even then, after ten more blocks the ecash balance was
+unchanged, the new row remained `AddressShown`, and the stranded UTXO was still
+unspent (11 confirmations). Address equality is not a recovery signal; the new
+receive did not re-claim the outpoint.
 
 ### 30.8 What the 0.12.0 walletv2 API allows
 
@@ -3148,3 +3158,54 @@ One non-fatal `fm::client` warning occurred while setting the claim outcome
 (`Write-write conflict detected`); the operation still reached `Done` with the
 expected net credit. It is a client journal concurrency warning, not an Electrum
 error.
+
+## 52. Restore assertions, warnings, and balance settlement (2026-10-31)
+
+The restore contract is now executable instead of only documented:
+
+- `restore_policy::RestoreSummary` turns `(operation_log_empty, deposit_count,
+  withdrawal_count)` into `history_unavailable`, the exact CLI/FFI warning
+  strings, and `is_balances_only()`. The warning strings are:
+  - `History unavailable after restore — balances recovered`
+  - `A previous deposit may still need to be claimed; keep the original client
+    data. A new deposit request does not recover it.`
+  - `Recovery requires your mnemonic plus the original client data backup.`
+- `recover_client` now calls `Client::wait_for_all_active_state_machines()`
+  (`fedimint-client/src/client.rs:2070`) after reopening. mintv2 recovery
+  reconstructs notes by adding a pending output state machine; without this
+  wait, the reopened client reported `0 msat` immediately while the issuance
+  was still settling.
+- `cli::restore` prints the operation-log/history flags, journal counts, and
+  every warning, and fails unless the result is balances-only.
+- FFI `RestoreView` adds `warnings: Vec<String>` and keeps
+  `history_unavailable`; `restore` fails if the fresh restore is not
+  balances-only. The exact warning text is unit-tested in core, CLI, and FFI.
+
+Live gate (2026-10-31, devimint v0.12.0, bitcoind backend):
+
+- Source `/tmp/bw-restore-source` settled a 100,000 sat deposit:
+  `net_credit=99577856 msat`. It then requested and funded a 50,000 sat deposit
+  and mined one block, leaving it unclaimed (`state=AddressShown`,
+  `funding_txid=e385adcf…`, UTXO value 0.00050000 BTC).
+- Fresh mnemonic restore in `/tmp/bw-restore-fresh`:
+  - `restore ecash balance: 99577856 msat (99577 sat)` — recovered.
+  - `restore bdk balance: { …, confirmed: 0.09849694 BTC }` — matched the
+    source balance.
+  - `restore operation log empty: true`
+  - `restore history unavailable: true`
+  - `restore journal deposits: 0`
+  - `restore journal withdrawals: 0`
+  - all three warnings were printed.
+- The new `request-deposit 10000` after restore returned the **same** walletv2
+  address as the stranded 50,000 sat UTXO (`bcrt1qf64…`) in this run. After ten
+  more blocks the new row was still `AddressShown`, ecash stayed
+  `99577856 msat`, and the stranded UTXO was still unspent (11 confirmations).
+  Address reuse is therefore not a recovery signal: a new receive did not
+  re-claim the old outpoint.
+
+An earlier run of the same gate exposed the settlement bug: recovery logged
+`amount=Some(99577856msat)`, but the CLI printed `0 msat` because it read the
+balance before the recovered-notes output state machine ran. The active-state
+wait in `recover_client` fixed it; the final run above is the post-fix result.
+
+Tests: 103 core, 5 CLI, 6 FFI.

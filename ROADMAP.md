@@ -37,8 +37,8 @@ MVP is called done.
       guarantees. Electrum is live-gated in `API-VERIFICATION.md` §51.
 - [x] **Restore and backup.** Mnemonic restore, full-directory backup/import, and
       the limitations of a mnemonic-only restore are implemented and documented.
-      In-flight-operation recovery remains an upstream gap; the assertions are
-      tracked in (#26).
+      The balances-only assertions and warning text are live in §52;
+      in-flight-operation recovery remains an upstream gap.
 - [ ] **Crash safety** (#25). The state machines survive the documented crash windows
       without double credit, double send, lost credit, or a stale open row. The
       existing matrix is a start; the narrow broadcast/persist windows and
@@ -154,8 +154,8 @@ This is the work that must happen before “real use” is more than an aspirati
   - one claim owner per outpoint;
   - one withdrawal row per walletv2 Send operation;
   - terminal-only watermark advance.
-- Add a restore test that clearly asserts balances-only recovery, empty history,
-  and stranded in-flight operations, so the UI cannot accidentally promise more.
+- [x] Assert balances-only recovery, empty history, and the stranded-deposit
+  warning; live gate in `API-VERIFICATION.md` §52.
 
 ### Fee and status correctness
 
