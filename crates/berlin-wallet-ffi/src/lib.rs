@@ -25,7 +25,7 @@ use berlin_wallet_core::client::{
 use berlin_wallet_core::deposit;
 use berlin_wallet_core::journal::{
     DepositOrigin, DepositRow, DepositState, Journal, WithdrawalOrigin, WithdrawalRow,
-    WithdrawalState,
+    WithdrawalState, collapse_deposit_rows,
 };
 use berlin_wallet_core::network::{
     init_network, parse_network, require_recorded_network, verified_client_network,
@@ -575,10 +575,7 @@ impl PegWallet {
         self.ensure_open()?;
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
-        Ok(state
-            .journal
-            .deposits_all()
-            .await?
+        Ok(collapse_deposit_rows(state.journal.deposits_all().await?)
             .iter()
             .map(deposit_view)
             .collect())

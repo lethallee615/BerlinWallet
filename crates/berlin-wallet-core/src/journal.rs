@@ -47,6 +47,50 @@ pub enum WithdrawalState {
     Cancelled,
 }
 
+/// Collapse rows that describe the same deposit into one display row.
+///
+/// A `Requested` row and an `Adopted` row can both describe one claim: the
+/// requested row is the user-facing record and the adopted row is the claim
+/// owner created by the pre-fix adoption race. Both are truthful; showing both
+/// makes one deposit look like two. Rows are grouped by funding txid (one
+/// deposit output per funding tx), then operation id, then row id.
+///
+/// The visible row is the best one in the group: a `Done` row first, then a
+/// `Requested` row, then the most recently updated. This keeps a genuine
+/// adopted-only deposit visible while hiding a duplicate of a requested one.
+pub fn collapse_deposit_rows(rows: Vec<DepositRow>) -> Vec<DepositRow> {
+    use std::collections::BTreeMap;
+
+    fn score(row: &DepositRow) -> (bool, bool, u64) {
+        (
+            row.state == DepositState::Done,
+            row.origin == DepositOrigin::Requested,
+            row.updated_at,
+        )
+    }
+
+    let mut groups: BTreeMap<String, DepositRow> = BTreeMap::new();
+    for row in rows {
+        let key = if let Some(txid) = row.funding_txid {
+            format!("txid:{txid}")
+        } else if let Some(operation_id) = row.operation_id {
+            format!("op:{operation_id:?}")
+        } else {
+            format!("id:{}", row.id.0)
+        };
+        match groups.get(&key) {
+            Some(existing) if score(&row) <= score(existing) => {}
+            _ => {
+                groups.insert(key, row);
+            }
+        }
+    }
+
+    let mut rows: Vec<DepositRow> = groups.into_values().collect();
+    rows.sort_by_key(|row| row.created_at);
+    rows
+}
+
 /// `claim_bind` result: either this call owns the credit, or another row does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindResult {
@@ -1339,6 +1383,75 @@ mod tests {
             row.net_credit, None,
             "an unknown operation fee must stay pending, not become zero"
         );
+    }
+
+    #[test]
+    fn duplicate_deposit_rows_collapse_for_display() {
+        let federation_id = FederationId::dummy();
+        let operation_id = OperationId::new_random();
+        let txid = bitcoin::Txid::from_byte_array([0x42; 32]);
+        let mut requested = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(100_000),
+        );
+        requested.state = DepositState::Done;
+        requested.funding_txid = Some(txid);
+        requested.operation_id = Some(operation_id);
+
+        let mut adopted = requested.clone();
+        adopted.id = DepositId::new();
+        adopted.origin = DepositOrigin::Adopted;
+
+        let collapsed = collapse_deposit_rows(vec![requested.clone(), adopted.clone()]);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(
+            collapsed[0].origin,
+            DepositOrigin::Requested,
+            "the user-facing requested row wins a tie"
+        );
+
+        // An adopted-only row is a real deposit and stays visible.
+        let only_adopted = collapse_deposit_rows(vec![adopted]);
+        assert_eq!(only_adopted.len(), 1);
+        assert_eq!(only_adopted[0].origin, DepositOrigin::Adopted);
+
+        // Different funding txids are different deposits.
+        let mut other = requested;
+        other.id = DepositId::new();
+        other.funding_txid = Some(bitcoin::Txid::from_byte_array([0x43; 32]));
+        assert_eq!(
+            collapse_deposit_rows(vec![other, collapsed[0].clone()]).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_done_row_outranks_an_open_duplicate_for_display() {
+        let federation_id = FederationId::dummy();
+        let txid = bitcoin::Txid::from_byte_array([0x44; 32]);
+        let mut requested = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(100_000),
+        );
+        requested.funding_txid = Some(txid);
+        let mut adopted = requested.clone();
+        adopted.id = DepositId::new();
+        adopted.origin = DepositOrigin::Adopted;
+        adopted.state = DepositState::Done;
+        adopted.operation_id = Some(OperationId::new_random());
+
+        let collapsed = collapse_deposit_rows(vec![requested, adopted]);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(
+            collapsed[0].origin,
+            DepositOrigin::Adopted,
+            "a successful adopted row must not be hidden behind an open request"
+        );
+        assert_eq!(collapsed[0].state, DepositState::Done);
     }
 
     #[tokio::test]

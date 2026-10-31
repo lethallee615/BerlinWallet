@@ -26,7 +26,7 @@ pub use client::{min_withdrawal_sat, open_rocksdb, open_sqlite};
 pub use error::{Classify, ErrorClass, PegError, classify_error};
 pub use journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositOrigin, DepositRow, DepositState, Journal,
-    JournalBackend, WithdrawalRow, WithdrawalState,
+    JournalBackend, WithdrawalRow, WithdrawalState, collapse_deposit_rows,
 };
 pub use network::{
     NETWORK_FILE, client_network, init_network, load_network, network_from_chain_id,
