@@ -2713,3 +2713,11 @@ Fix:
 
 Tests: `an_open_row_matches_a_claim_by_script_and_amount` and
 `closing_an_open_row_from_an_adopted_claim_records_the_operation`.
+
+Resolution (2026-10-31, after the fix in #35): on restart the requested row was
+`Done` with `operation_id = d941d2bb_bb6658d0`, `funding_outpoint =
+0d801bad…:0`, `gross_deposited = 100000 SAT`, `claim_fee = 316 SAT`, and
+`net_credit = 99,577,856 msat`; `ecash-balance` matched exactly. `list-deposits`
+shows the `Requested` and `Adopted` rows for the same txid and operation id,
+which is one deposit with a historical duplicate claim owner, not two deposits.
+A restart did not change the balance.
