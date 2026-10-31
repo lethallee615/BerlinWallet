@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: f6835ea
+Main at: c086051
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -25,7 +25,7 @@ actually stands.
 | restore-backup | Mnemonic restore, full-directory backup, documented limits | done | — | `API-VERIFICATION.md` §28–§31, §52; `docs/ARCHITECTURE.md` §8.1 |
 | crash-safety | Documented crash windows survive restart | done | — | `API-VERIFICATION.md` §27, §53; deterministic CI matrix; one devimint-only window |
 | fee-preview | Claim and mintv2 operation fee before funding | live | — | `API-VERIFICATION.md` §50; devimint 2026-10-31 |
-| watch-progress | `watch` reports progress instead of polling silently | todo | #22 | Silent polling |
+| watch-progress | `watch` reports progress instead of polling silently | live | — | `API-VERIFICATION.md` §54; devimint heartbeat/SIGINT 2026-10-31 |
 
 ## Backend coverage
 
@@ -41,6 +41,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
+| 2026-10-31 | `watch` heartbeat: initial + 10s stderr lines with state/positions/funding; SIGINT returned to the prompt | devimint bitcoind | pass | #22, §54 |
 | 2026-10-31 | Fresh restore recovered 99,577,856 msat and BDK 0.09849694; empty history/warnings; new receive did not reclaim a stranded 50,000 sat deposit | bitcoind RPC | pass | #26, §52 |
 | 2026-10-31 | Electrum sync, 100,000 sat deposit -> Done (99,577,856 msat), 50,000 sat withdrawal -> Broadcast and 1 conf; restart and `chain.json` reuse | electrum tcp://127.0.0.1:60401 | pass | #24, §51 |
 | 2026-10-31 | 100,000 sat deposit preview: claim 316 sat, operation estimate 100,100 msat; actual 103,072 msat, net 99,580,928 msat | bitcoind RPC | pass | #21, §50 |
@@ -63,7 +64,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 |---|---|
 | P0 | — |
 | P1 | — |
-| P2 | #9, #22, #27, #28, #29, #30, #38, #39 |
+| P2 | #9, #27, #28, #29, #30, #38, #39 |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
 P2 is hardening. `docs/TRACKING.md` defines how these are assigned.

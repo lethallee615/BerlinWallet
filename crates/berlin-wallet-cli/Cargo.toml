@@ -26,3 +26,6 @@ fs-lock = "=0.1.10"
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+fedimint-eventlog = "=0.12.0"

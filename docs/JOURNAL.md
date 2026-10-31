@@ -1,5 +1,19 @@
 # Journal
 
+## 2026-10-31 — `watch` reports progress instead of hanging silently
+
+`watch <deposit-id>` now prints a stderr progress line immediately and every ten
+seconds. Each line names the deposit, current row state, starting event-log
+position, last observed federation position, funding txid, operation id, and
+elapsed time. The final row stays on stdout, so scripts are unaffected.
+
+The existing Ctrl+C path was rechecked against a devimint-funded deposit: the
+initial and 10 s lines appeared, SIGINT printed the interrupt hint and the
+watch-cancelled message, and the REPL returned to its prompt without killing the
+process. `watch` remains the deposit-claim wait; withdrawals use
+`send-withdraw`/`status`.
+
+The formatter is unit-tested, and the CLI test count is now seven.
 ## 2026-10-31 — The crash matrix runs in CI
 
 The crash matrix is now a deterministic test module instead of a manual
@@ -24,7 +38,7 @@ broadcast, withdrawal send, and broadcast hooks.
 
 These tests prove the app-level recovery transitions, not the federation's
 underlying exactly-once behavior; the live §27 evidence remains necessary for
-that. Tests: 111 core pass + 1 ignored, 5 CLI, 6 FFI.
+that. Tests: 111 core pass + 1 ignored, 6 CLI, 5 FFI.
 ## 2026-10-31 — Restore assertions and a balance-settlement race
 
 The restore contract is now asserted rather than only described. A small
@@ -49,7 +63,7 @@ walletv2 address in this run, but the ecash balance did not change and the
 stranded UTXO remained unspent after ten more blocks. Address reuse is not a
 re-claim; the warning's promise remains accurate.
 
-Tests: 103 core, 5 CLI, 6 FFI (including exact warning-text assertions).
+Tests: 103 core, 6 CLI, 5 FFI (including exact warning-text assertions).
 ## 2026-10-31 — Electrum is live on devimint
 
 Electrum was the last chain backend with unit coverage only. A fresh devimint
