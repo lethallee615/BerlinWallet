@@ -2677,3 +2677,39 @@ Tests in `crates/berlin-wallet-core/src/network.rs`:
 The CLI argument split (`--network` is removed before positional parsing) is
 covered by `network_flag_is_removed_before_positional_parsing`. This also fixes
 the old `init` argument bug: the chain source is `args[2]`, not `args[3]`.
+
+## 45. Adoption/watcher race on a successful deposit claim
+
+Live observation (2026-10-31, devimint v0.12.0, bitcoind backend on the same
+node the federation used):
+
+- `deposit 100000` broadcast funding tx `0d801bad…`; the wallet journal row was
+  `AddressShown` with `funding_txid` set and `funding_outpoint`/`operation_id`
+  unset.
+- The operation log contained a walletv2 `Receive` operation with
+  `outpoint = 0d801bad…:0`, `value = 100000`, `fee = 316`, and
+  `outcome = Success`.
+- `ecash-balance` was `99,577 sat`, i.e. 100,000 minus the claim fee and the
+  mintv2 operation fee. The federation had observed and claimed the deposit.
+
+Cause: `adopt_orphan_claims` and the per-deposit observer race on the same
+claim. Adoption checked only the claim-ownership map; when the requested row
+had not bound yet it inserted an `Adopted` row instead of binding the open one.
+That marked the outpoint bound, and `scan_receive_claims` filtered bound
+outpoints, so the observer could no longer close the requested row. The journal
+ended with two rows for one deposit.
+
+Fix:
+
+- `adopt_orphan_claims` matches an open requested row by address script and
+  amount before adopting. It binds or closes that row with the claim's figures
+  and only inserts an `Adopted` row when no open row matches.
+- `watch_deposit` scans all successful claims, not only unbound ones, so it can
+  close its row even when adoption won the bind.
+- `close_deposit_done_if_open` now records the operation id with the gross and
+  claim fee; a repaired row is indistinguishable from a normally bound one.
+- `list-deposits` exposes every row, including `Adopted`, so the duplicate is
+  visible instead of hidden behind a known id.
+
+Tests: `an_open_row_matches_a_claim_by_script_and_amount` and
+`closing_an_open_row_from_an_adopted_claim_records_the_operation`.

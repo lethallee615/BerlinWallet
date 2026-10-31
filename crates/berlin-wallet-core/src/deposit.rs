@@ -254,7 +254,7 @@ pub async fn watch_deposit(
     let mut scan_backoff = Duration::from_secs(1);
     let mut selected = None;
     for _ in 0..SCAN_RETRY_ATTEMPTS {
-        let claims = scan_receive_claims(client, journal, federation_id).await?;
+        let claims = scan_receive_claims_all(client, journal, federation_id).await?;
         if let Some(claim) = select_claim_for_success(claims, row.address_script.as_deref()) {
             selected = Some(claim);
             break;
@@ -269,10 +269,10 @@ pub async fn watch_deposit(
         return Ok(());
     };
     let outpoint = claim.outpoint.expect("checked above");
+    let operation_fee = operation_fee(client, claim.operation_id).await?;
 
     match journal.claim_bind(&federation_id, outpoint, id).await? {
         BindResult::Bound => {
-            let operation_fee = operation_fee(client, claim.operation_id).await?;
             journal
                 .finish_deposit(
                     id,
@@ -285,28 +285,106 @@ pub async fn watch_deposit(
                 .await?;
         }
         BindResult::TakenBy(_other) => {
-            journal.close_deposit_done(id).await?;
+            // Adoption can win the bind. The claim is still this row's claim,
+            // so close the row with the claim's figures instead of leaving it
+            // at AddressShown.
+            journal
+                .close_deposit_done_if_open(
+                    id,
+                    claim.operation_id,
+                    outpoint,
+                    claim.value,
+                    claim.fee,
+                    operation_fee,
+                )
+                .await?;
         }
     }
     Ok(())
 }
 
-/// Boot/periodic reconciliation: adopt every successful claim that no row
-/// owns, and close an open owner when adoption loses the bind.
+fn claim_matches_row(row: &DepositRow, claim: &OrphanClaim) -> bool {
+    row.amount == claim.value
+        && match (
+            row.address_script.as_deref(),
+            claim.address_script.as_deref(),
+        ) {
+            (Some(row_script), Some(claim_script)) => row_script == claim_script,
+            _ => false,
+        }
+}
+
+/// Boot/periodic reconciliation.
+///
+/// A successful claim is first matched against an open requested row by
+/// address and amount. The adoption task and the per-deposit observer race on
+/// the same claim; without this, adoption inserts an `Adopted` row and marks
+/// the outpoint bound, after which the observer's unbound-claim scan can no
+/// longer close the requested row. Matching the open row first makes the
+/// outcome independent of who wins.
+///
+/// Only claims that match no open row are adopted as new rows.
 pub async fn adopt_orphan_claims(
     client: &Client,
     journal: &Journal,
     federation_id: FederationId,
 ) -> anyhow::Result<()> {
-    for claim in scan_receive_claims(client, journal, federation_id).await? {
+    let open_rows = journal
+        .deposits_in(&[DepositState::AwaitingAddress, DepositState::AddressShown])
+        .await?;
+    let bound = journal.bound_outpoints(&federation_id).await?;
+
+    for claim in scan_receive_claims_all(client, journal, federation_id).await? {
         if claim.final_state != FinalReceiveOperationState::Success {
             continue;
         }
         let Some(outpoint) = claim.outpoint else {
             continue;
         };
-
         let operation_fee = operation_fee(client, claim.operation_id).await?;
+
+        // 1. Close the requested row this claim belongs to, even if another
+        //    row already owns the bind.
+        if let Some(row) = open_rows
+            .iter()
+            .find(|row| row.federation_id == federation_id && claim_matches_row(row, &claim))
+        {
+            match journal
+                .claim_bind(&federation_id, outpoint, &row.id)
+                .await?
+            {
+                BindResult::Bound => {
+                    journal
+                        .finish_deposit(
+                            &row.id,
+                            claim.operation_id,
+                            outpoint,
+                            claim.value,
+                            claim.fee,
+                            operation_fee,
+                        )
+                        .await?;
+                }
+                BindResult::TakenBy(_other) => {
+                    journal
+                        .close_deposit_done_if_open(
+                            &row.id,
+                            claim.operation_id,
+                            outpoint,
+                            claim.value,
+                            claim.fee,
+                            operation_fee,
+                        )
+                        .await?;
+                }
+            }
+            continue;
+        }
+
+        // 2. No open row matches: adopt an unbound claim as a new row.
+        if bound.contains(&outpoint) {
+            continue;
+        }
         match journal
             .claim_adopt_if_absent(
                 &federation_id,
@@ -325,7 +403,14 @@ pub async fn adopt_orphan_claims(
             BindResult::Bound => {}
             BindResult::TakenBy(row) => {
                 journal
-                    .close_deposit_done_if_open(&row, claim.value, claim.fee, operation_fee)
+                    .close_deposit_done_if_open(
+                        &row,
+                        claim.operation_id,
+                        outpoint,
+                        claim.value,
+                        claim.fee,
+                        operation_fee,
+                    )
                     .await?;
             }
         }
@@ -414,8 +499,13 @@ fn select_claim_for_success(
     })
 }
 
-/// Scan the operation log for walletv2 `Receive` claims whose final state is
-/// `Success` and which no deposit row has bound yet.
+/// Scan the operation log for every walletv2 `Receive` claim whose final state
+/// is `Success`, including claims already bound to a deposit row.
+///
+/// The unbound-only view used for adoption is [`scan_receive_claims`]. This
+/// all-claims view exists so an open requested row can be closed even when
+/// adoption already bound the claim to an `Adopted` row; filtering by
+/// "unbound" would make that repair impossible.
 ///
 /// - Operations are paged with `OperationLog::paginate_operations_rev`.
 /// - The scan resumes from the persisted watermark with a bounded overlap.
@@ -429,7 +519,7 @@ fn select_claim_for_success(
 ///   with a total per-scan wait budget.
 /// - `operation_id` is `ChronologicalOperationLogKey::operation_id` (the same
 ///   id carried by `ReceivePaymentEvent`).
-pub async fn scan_receive_claims(
+pub async fn scan_receive_claims_all(
     client: &Client,
     journal: &Journal,
     federation_id: FederationId,
@@ -557,10 +647,30 @@ pub async fn scan_receive_claims(
         journal.set_scan_watermark(&federation_id, newest).await?;
     }
 
+    Ok(filter_orphan_claims(raw, |_| false))
+}
+
+/// Scan for successful claims that no deposit row has bound yet.
+///
+/// The wallet uses [`scan_receive_claims_all`] for adoption and for the
+/// per-deposit observer, because an open requested row must be closable even
+/// when another row already owns the claim. This view remains for callers that
+/// only want orphan claims.
+pub async fn scan_receive_claims(
+    client: &Client,
+    journal: &Journal,
+    federation_id: FederationId,
+) -> anyhow::Result<Vec<OrphanClaim>> {
+    let claims = scan_receive_claims_all(client, journal, federation_id).await?;
     let bound = journal.bound_outpoints(&federation_id).await?;
-    Ok(filter_orphan_claims(raw, |outpoint| {
-        bound.contains(outpoint)
-    }))
+    Ok(claims
+        .into_iter()
+        .filter(|claim| {
+            claim
+                .outpoint
+                .is_some_and(|outpoint| !bound.contains(&outpoint))
+        })
+        .collect())
 }
 
 /// Fill `net_credit` for `Done` deposits whose operation fee was unavailable
@@ -593,6 +703,35 @@ pub async fn reconcile_missing_net_credits(
 mod tests {
     use super::*;
     use bitcoin::hashes::Hash as _;
+
+    #[test]
+    fn an_open_row_matches_a_claim_by_script_and_amount() {
+        let mut row = DepositRow::requested(
+            DepositId::new(),
+            FederationId::dummy(),
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(100_000),
+        );
+        row.address_script = Some(vec![0x51, 0x21]);
+        let claim = OrphanClaim {
+            final_state: FinalReceiveOperationState::Success,
+            operation_id: OperationId::new_random(),
+            outpoint: Some(outpoint(0)),
+            address: None,
+            address_script: Some(vec![0x51, 0x21]),
+            value: bitcoin::Amount::from_sat(100_000),
+            fee: bitcoin::Amount::from_sat(316),
+        };
+        assert!(claim_matches_row(&row, &claim));
+
+        let mut wrong_amount = claim.clone();
+        wrong_amount.value = bitcoin::Amount::from_sat(99_999);
+        assert!(!claim_matches_row(&row, &wrong_amount));
+
+        let mut wrong_script = claim;
+        wrong_script.address_script = Some(vec![0x52]);
+        assert!(!claim_matches_row(&row, &wrong_script));
+    }
 
     #[test]
     fn missing_operation_fee_is_not_treated_as_zero() {

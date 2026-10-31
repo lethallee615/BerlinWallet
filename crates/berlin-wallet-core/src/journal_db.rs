@@ -844,6 +844,8 @@ impl JournalBackend for DbJournal {
     async fn close_deposit_done_if_open(
         &self,
         id: &DepositId,
+        operation_id: OperationId,
+        outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
         operation_fee: Option<fedimint_core::Amount>,
@@ -857,6 +859,13 @@ impl JournalBackend for DbJournal {
                 if let Some(mut row) = get_deposit(&mut dbtx, &id).await?
                     && is_open_deposit(row.state)
                 {
+                    if row.operation_id.is_none() {
+                        row.operation_id = Some(operation_id);
+                    }
+                    if row.funding_outpoint.is_none() {
+                        row.funding_outpoint = Some(outpoint);
+                        row.funding_txid = Some(outpoint.txid);
+                    }
                     if row.net_credit.is_none() {
                         row.gross_deposited = Some(gross);
                         row.claim_fee = Some(fee);
