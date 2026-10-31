@@ -12,6 +12,7 @@ documents are kept for history and may describe superseded assumptions.
 | [`JOURNAL.md`](JOURNAL.md) | Plain-language narrative of what was built and why, including the current CLI-first MVP scope decision. |
 | [`STATUS.md`](STATUS.md) | Machine-readable snapshot: MVP row status, backend coverage, live verification log, and open work by priority. |
 | [`TRACKING.md`](TRACKING.md) | The work queue, label/milestone taxonomy, status vocabulary, and the agent workflow. |
+| [`DEVIMINT.md`](DEVIMINT.md) | Local Fedimint v0.12.0 federation setup and the deposit live-gate checklist (#14). |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries, data directory, journal format and invariants, deposit/withdrawal state machines, crash-safety windows, reorg handling, `[patch.crates-io]`, GUI gaps, unknowns. |
 | [`THREAT-MODEL.md`](THREAT-MODEL.md) | Trusted parties, what breaks if the federation/Esplora/BDK/OS/mnemonic/backups/data-directory assumptions fail, and explicit out-of-scope items. |
 | [`../SECURITY.md`](../SECURITY.md) | Reporting a vulnerability, scope, supported versions, known-weak list, advisory policy. |
@@ -41,6 +42,7 @@ documents are kept for history and may describe superseded assumptions.
 - **How the project got here / why the current scope changed:** `JOURNAL.md`.
 - **What is left, who owns it, and what is verified:** `STATUS.md` and the open
   GitHub issues; the workflow is `TRACKING.md`.
+- **Running a local federation / the #14 live gate:** `DEVIMINT.md`.
 - **Why the journal is safe/unsafe:** `ARCHITECTURE.md` §5 and §8;
   `API-VERIFICATION.md` §18, §22, §27.
 - **Deposit flow:** `ARCHITECTURE.md` §6; `crates/berlin-wallet-core/src/deposit.rs`;
