@@ -15,12 +15,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositOrigin, DepositRow, DepositState, JournalBackend,
-    WithdrawalRow, WithdrawalState, is_open_deposit, is_open_withdrawal, net_credit_with_fees,
-    now_ms,
+    OnchainSendRow, WithdrawalRow, WithdrawalState, is_open_deposit, is_open_withdrawal,
+    net_credit_with_fees, now_ms,
 };
-use crate::ops::{DepositId, WithdrawalId};
+use crate::ops::{DepositId, OnchainSendId, WithdrawalId};
 use crate::wire::FeeQuoteWire;
 
+const TAG_ONCHAIN_SEND: u8 = 0x09;
 const TAG_DEPOSIT: u8 = 0x01;
 const TAG_WITHDRAWAL: u8 = 0x02;
 const TAG_CLAIM: u8 = 0x03;
@@ -56,6 +57,23 @@ fn withdrawal_key(id: &WithdrawalId) -> Vec<u8> {
     let mut key = vec![TAG_WITHDRAWAL];
     key.extend_from_slice(id.0.as_bytes());
     key
+}
+
+fn onchain_send_key(id: &OnchainSendId) -> Vec<u8> {
+    let mut key = vec![TAG_ONCHAIN_SEND];
+    key.extend_from_slice(id.0.as_bytes());
+    key
+}
+
+async fn scan_onchain_sends(
+    dbtx: &mut DatabaseTransaction<'_, Committable>,
+) -> anyhow::Result<Vec<OnchainSendRow>> {
+    let mut rows = Vec::new();
+    let mut stream = dbtx.raw_find_by_prefix(&[TAG_ONCHAIN_SEND]).await?;
+    while let Some((_key, value)) = stream.next().await {
+        rows.push(decode::<OnchainSendRow>(&value)?);
+    }
+    Ok(rows)
 }
 
 fn federation_bytes(federation_id: &FederationId) -> [u8; 32] {
@@ -1089,6 +1107,30 @@ impl JournalBackend for DbJournal {
         let mut dbtx = self.db.begin_transaction().await;
         let rows = scan_withdrawals(&mut dbtx).await?;
         dbtx.commit_tx_result().await?;
+        Ok(rows)
+    }
+
+    async fn insert_onchain_send(&self, row: &OnchainSendRow) -> anyhow::Result<()> {
+        let this = self;
+        let row = row.clone();
+        retry_on_conflict(move || {
+            let row = row.clone();
+            async move {
+                let mut dbtx = this.db.begin_transaction().await;
+                dbtx.raw_insert_bytes(&onchain_send_key(&row.id), &encode(&row)?)
+                    .await?;
+                dbtx.commit_tx_result().await?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    async fn onchain_sends_all(&self) -> anyhow::Result<Vec<OnchainSendRow>> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let mut rows = scan_onchain_sends(&mut dbtx).await?;
+        dbtx.commit_tx_result().await?;
+        rows.sort_by_key(|row| row.created_at);
         Ok(rows)
     }
 

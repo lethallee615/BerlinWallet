@@ -11,12 +11,14 @@ use berlin_wallet_core::chain::ChainBackendConfig;
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
 };
-use berlin_wallet_core::journal::{DepositRow, DepositState, Journal, collapse_deposit_rows};
+use berlin_wallet_core::journal::{
+    DepositRow, DepositState, Journal, OnchainSendRow, collapse_deposit_rows,
+};
 use berlin_wallet_core::network::{
     NETWORK_FILE, init_network, network_from_chain_id, network_from_recorded, parse_network,
     require_recorded_network, verified_client_network,
 };
-use berlin_wallet_core::ops::{DepositId, WithdrawalId};
+use berlin_wallet_core::ops::{DepositId, OnchainSendId, WithdrawalId};
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::withdrawal::await_change_outputs;
@@ -239,6 +241,8 @@ fn print_help() {
     println!("  operation-fees <operation-id>       show operation fees");
     println!("  await-change <operation-id>         await primary change outputs");
     println!("  withdraw <address> <sat>            request + send in one step");
+    println!("  send <address> <sat> <sat/vb>       send on-chain from the BDK wallet");
+    println!("  list-onchain                        journalled sends + wallet history");
     println!("  status <id>                         print a deposit or withdrawal row");
     println!("  sync                                run one BDK Esplora sync");
     println!("  help");
@@ -550,6 +554,27 @@ async fn run(
                 let amount = parse_sat(parts.next())?;
                 command_withdraw(&client, &journal, federation_id, address, amount).await
             }
+            "send" => {
+                let address = parts
+                    .next()
+                    .ok_or_else(|| anyhow!("usage: send <address> <sat> <sat/vb>"))?;
+                let amount = parse_sat(parts.next())?;
+                let fee_rate_sat_vb: u64 = parts
+                    .next()
+                    .ok_or_else(|| anyhow!("usage: send <address> <sat> <sat/vb>"))?
+                    .parse()
+                    .context("invalid fee rate (sat/vB)")?;
+                command_send_onchain(
+                    &wallet,
+                    &journal,
+                    chain_network,
+                    address,
+                    amount,
+                    fee_rate_sat_vb,
+                )
+                .await
+            }
+            "list-onchain" => command_list_onchain(&wallet, &journal).await,
             "status" => {
                 let id = parts
                     .next()
@@ -889,6 +914,108 @@ async fn command_withdraw(
     withdrawal::send_withdrawal(client, journal, &row.id).await?;
     println!("withdrawal {} -> {address}", row.id.0);
     println!("{:#?}", journal.withdrawal(&row.id).await?);
+    Ok(())
+}
+
+async fn command_send_onchain(
+    wallet: &Arc<Mutex<BdkWallet>>,
+    journal: &Journal,
+    network: bitcoin::Network,
+    raw_address: &str,
+    amount: Amount,
+    fee_rate_sat_vb: u64,
+) -> anyhow::Result<()> {
+    let address = bitcoin::Address::from_str(raw_address).context("invalid Bitcoin address")?;
+    let address = address
+        .require_network(network)
+        .context("address is for a different network")?;
+    let fee_rate = bitcoin::FeeRate::from_sat_per_vb(fee_rate_sat_vb)
+        .ok_or_else(|| anyhow!("fee rate is too high"))?;
+
+    let mut wallet = wallet.lock().await;
+    let plan = wallet.quote_send(&address, amount, fee_rate)?;
+    let quote = &plan.quote;
+    println!("send quote:");
+    println!("  to: {}", quote.destination);
+    println!("  amount: {} sat", quote.amount.to_sat());
+    println!("  fee rate: {fee_rate_sat_vb} sat/vB");
+    println!("  fee: {} sat", quote.fee.to_sat());
+    println!("  total debit: {} sat", quote.total_debit.to_sat());
+    println!("  change: {} sat", quote.change.to_sat());
+    println!("  inputs: {}", quote.input_count);
+    println!("  txid: {}", quote.txid);
+
+    let signed = wallet.execute_send(plan).await?;
+    let row = OnchainSendRow::broadcast(
+        OnchainSendId::new(),
+        address.to_string(),
+        amount,
+        fee_rate_sat_vb,
+        signed.quote.fee,
+        signed.vsize,
+        signed.quote.change,
+        signed.txid,
+    );
+    journal.insert_onchain_send(&row).await?;
+    println!(
+        "broadcast: {} ({} vB, fee {} sat)",
+        signed.txid,
+        signed.vsize,
+        signed.quote.fee.to_sat()
+    );
+    Ok(())
+}
+
+async fn command_list_onchain(
+    wallet: &Arc<Mutex<BdkWallet>>,
+    journal: &Journal,
+) -> anyhow::Result<()> {
+    let rows = journal.onchain_sends_all().await?;
+    if rows.is_empty() {
+        println!("no journalled on-chain sends");
+    } else {
+        println!("journalled sends:");
+        for row in rows {
+            println!(
+                "  {} {} {} fee={} sat vsize={} vB change={} sat state={:?}",
+                row.id.0,
+                row.txid,
+                row.address,
+                row.fee.to_sat(),
+                row.vsize,
+                row.change.to_sat(),
+                row.state
+            );
+        }
+    }
+
+    println!("wallet transactions:");
+    let wallet = wallet.lock().await;
+    let entries = wallet.history();
+    if entries.is_empty() {
+        println!("  (none)");
+    }
+    for entry in entries {
+        let position = match (entry.height, entry.confirmations) {
+            (Some(height), Some(confirmations)) => {
+                format!("height {height} ({confirmations} conf)")
+            }
+            _ => match entry.last_seen {
+                Some(last_seen) => format!("unconfirmed (last seen {last_seen})"),
+                None => "unconfirmed".to_owned(),
+            },
+        };
+        let fee = entry
+            .fee
+            .map(|fee| format!("{} sat", fee.to_sat()))
+            .unwrap_or_else(|| "unknown".to_owned());
+        println!(
+            "  {} {position} sent={} sat received={} sat fee={fee}",
+            entry.txid,
+            entry.sent.to_sat(),
+            entry.received.to_sat()
+        );
+    }
     Ok(())
 }
 

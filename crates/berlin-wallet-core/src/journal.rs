@@ -12,7 +12,7 @@ use fedimint_eventlog::EventLogId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::ops::{DepositId, WithdrawalId};
+use crate::ops::{DepositId, OnchainSendId, WithdrawalId};
 use crate::wire::FeeQuoteWire;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,10 +253,63 @@ pub struct AdoptedClaim {
     pub operation_fee: Option<fedimint_core::Amount>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OnchainSendState {
+    /// The transaction was broadcast and recorded. Confirmation state is read
+    /// from the BDK wallet graph, not duplicated in the journal.
+    Broadcast,
+}
+
+/// Audit row for a first-class on-chain send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnchainSendRow {
+    pub id: OnchainSendId,
+    pub address: String,
+    pub amount: bitcoin::Amount,
+    pub fee_rate_sat_vb: u64,
+    pub fee: bitcoin::Amount,
+    pub vsize: u64,
+    pub change: bitcoin::Amount,
+    pub txid: bitcoin::Txid,
+    pub state: OnchainSendState,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl OnchainSendRow {
+    #[allow(clippy::too_many_arguments)]
+    pub fn broadcast(
+        id: OnchainSendId,
+        address: String,
+        amount: bitcoin::Amount,
+        fee_rate_sat_vb: u64,
+        fee: bitcoin::Amount,
+        vsize: u64,
+        change: bitcoin::Amount,
+        txid: bitcoin::Txid,
+    ) -> Self {
+        let now = now_ms();
+        Self {
+            id,
+            address,
+            amount,
+            fee_rate_sat_vb,
+            fee,
+            vsize,
+            change,
+            txid,
+            state: OnchainSendState::Broadcast,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct JournalInner {
     deposits: BTreeMap<DepositId, DepositRow>,
     withdrawals: BTreeMap<WithdrawalId, WithdrawalRow>,
+    onchain_sends: BTreeMap<OnchainSendId, OnchainSendRow>,
     /// Unique owner of each walletv2 Send operation.
     withdrawal_ops: BTreeMap<OperationId, WithdrawalId>,
     claims: BTreeMap<(FederationId, bitcoin::OutPoint), DepositId>,
@@ -385,6 +438,9 @@ pub trait JournalBackend: Send + Sync {
         states: &[WithdrawalState],
     ) -> anyhow::Result<Vec<WithdrawalRow>>;
     async fn withdrawals_all(&self) -> anyhow::Result<Vec<WithdrawalRow>>;
+    /// Append an audit row for a broadcast on-chain send.
+    async fn insert_onchain_send(&self, row: &OnchainSendRow) -> anyhow::Result<()>;
+    async fn onchain_sends_all(&self) -> anyhow::Result<Vec<OnchainSendRow>>;
     async fn open_withdrawal(
         &self,
         federation_id: &FederationId,
@@ -917,6 +973,19 @@ impl JournalBackend for MemoryJournal {
     async fn withdrawals_all(&self) -> anyhow::Result<Vec<WithdrawalRow>> {
         let inner = self.inner.lock().await;
         Ok(inner.withdrawals.values().cloned().collect())
+    }
+
+    async fn insert_onchain_send(&self, row: &OnchainSendRow) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.onchain_sends.insert(row.id.clone(), row.clone());
+        Ok(())
+    }
+
+    async fn onchain_sends_all(&self) -> anyhow::Result<Vec<OnchainSendRow>> {
+        let inner = self.inner.lock().await;
+        let mut rows: Vec<OnchainSendRow> = inner.onchain_sends.values().cloned().collect();
+        rows.sort_by_key(|row| row.created_at);
+        Ok(rows)
     }
 
     async fn open_withdrawal(
@@ -1452,6 +1521,29 @@ mod tests {
             "a successful adopted row must not be hidden behind an open request"
         );
         assert_eq!(collapsed[0].state, DepositState::Done);
+    }
+
+    #[tokio::test]
+    async fn onchain_send_rows_round_trip_in_memory() {
+        let journal = Journal::in_memory();
+        let row = OnchainSendRow::broadcast(
+            OnchainSendId::new(),
+            "bcrt1qdpejjzcmhslvkf0katf7wnjumg8qlj50rxarzj66tfl0vl8cgdtsyy7fjf".to_owned(),
+            bitcoin::Amount::from_sat(10_000),
+            2,
+            bitcoin::Amount::from_sat(300),
+            150,
+            bitcoin::Amount::from_sat(39_700),
+            "0000000000000000000000000000000000000000000000000000000000000066"
+                .parse()
+                .expect("valid txid"),
+        );
+        journal
+            .insert_onchain_send(&row)
+            .await
+            .expect("insert on-chain send");
+        let rows = journal.onchain_sends_all().await.expect("list");
+        assert_eq!(rows, vec![row]);
     }
 
     #[tokio::test]
