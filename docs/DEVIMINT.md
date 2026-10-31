@@ -250,7 +250,9 @@ test use the bitcoind backend and restart the devimint esplora afterwards
   gives a plain shell with the environment; run the prebuilt wallet binary from
   there. Exit the shell to stop the federation.
 - **Electrum live run (#24):** devimint's electrs exposes a regtest Electrum RPC
-  on `127.0.0.1:60401`; use `electrum:tcp://127.0.0.1:60401`.
+  on `127.0.0.1:60401`; use `electrum:tcp://127.0.0.1:60401`. A previous live
+  `invalidateblock` can leave the devimint esplora/electrs process defunct;
+  restart devimint (or start a fresh `dev-fed` link) before the Electrum gate.
 
 ## Common mistakes
 

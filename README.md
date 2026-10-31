@@ -59,8 +59,8 @@ This is **pre-alpha software**.
   after the CLI-first MVP.
 - The CLI-first MVP scope now includes Lightning send/receive via `lnv2` and
   three BDK chain backends. Esplora, Electrum, and bitcoind RPC are all wired
-  behind one trait; Esplora and bitcoind RPC have live runs, Electrum is
-  unit-only, and `lnv2` is registered with paid send/receive live on devimint.
+  behind one trait; Esplora, Electrum, and bitcoind RPC have live runs, and
+  `lnv2` is registered with paid send/receive live on devimint.
   A data directory created before lnv2 was registered needs a fresh join/restore
   to gain the module. See `ROADMAP.md` for the MVP checklist and
   `docs/STATUS.md` for the current snapshot.

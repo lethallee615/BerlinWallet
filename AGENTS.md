@@ -28,8 +28,9 @@ Current reality: peg-in/peg-out and ecash balance are live-tested; the combined
 Lightning (`lnv2`) is **registered**, with paid send/receive, expiry, and
 restart-adoption live-gated on devimint (§49); a pre-lnv2 client data directory
 needs a fresh join/restore to gain the module. All three BDK chain backends are
-wired behind `chain::ChainBackend`; Esplora and bitcoind RPC have live coverage
-(bitcoind's reorg path was verified on 2026-10-24), while Electrum is unit-only.
+wired behind `chain::ChainBackend`; Esplora, Electrum, and bitcoind RPC all have
+live coverage (bitcoind's reorg path was verified on 2026-10-24; Electrum's
+sync/deposit/withdrawal/restart/`chain.json` gate on 2026-10-31).
 The BDK path has a first-class on-chain send with a fee quote and history, and
 the crash matrix still has known uncovered windows. See `ROADMAP.md` for the MVP
 checklist and `docs/STATUS.md` for the current snapshot.
