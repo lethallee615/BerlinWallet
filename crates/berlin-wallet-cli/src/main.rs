@@ -327,7 +327,7 @@ fn print_help() {
     println!("  list-deposits                       list deposit rows (including adopted)");
     println!("  operations                          print recent operation-log entries");
     println!("  operation-fees <operation-id>       show operation fees");
-    println!("  await-change <operation-id>         await primary change outputs");
+    println!("  await-change <operation-id>         await primary-module ecash change outputs");
     println!("  withdraw <address> <sat>            request + send in one step");
     println!("  send <address> <sat> <sat/vb>       send on-chain from the BDK wallet");
     println!("  list-onchain                        journalled sends + wallet history");
@@ -611,7 +611,7 @@ async fn run(
                     .ok_or_else(|| anyhow!("usage: await-change <operation-id>"))?;
                 let id = OperationId::from_str(id).context("invalid operation id")?;
                 if await_change_outputs(&client, id).await? {
-                    println!("change outputs finalized");
+                    println!("ecash change outputs finalized");
                 } else {
                     println!("timed out; withdrawal remains Submitted and will be retried");
                 }
