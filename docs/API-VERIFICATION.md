@@ -2637,6 +2637,10 @@ Not verified here (no live node in this environment):
 - `bip158::FilterIter` is **not** used. `getcfilters` and the block-filter-index
   requirement were not tested, so no code depends on them.
 
+Update 2026-10-31: §51 live-ran Electrum sync, funded deposit, withdrawal,
+restart, and `chain.json` reuse. The Electrum full scan/restore bullet above is
+still not live-verified.
+
 ## 44. Network selection is explicit and fail-closed
 
 `network_from_chain_id` used to return `Network::Regtest` for any chain-id it did
@@ -3100,3 +3104,47 @@ Live gate (2026-10-31, devimint v0.12.0, bitcoind backend, `/tmp/bw-lnv2-gate`):
   federation's change/dust, and the mismatch is visible rather than hidden.
 
 Tests: 99 core, 5 CLI, 4 FFI.
+
+## 51. Electrum live gate (2026-10-31)
+
+Environment: fresh devimint v0.12.0 (`dev-fed`), electrs regtest Electrum RPC on
+`127.0.0.1:60401`, federation on bitcoind. Wallet at `7ba02b5`; data directory
+`/tmp/bw-electrum-gate`; the run was one fresh devimint session.
+
+Sequence and observations:
+
+- `init --network regtest electrum:tcp://127.0.0.1:60401` printed
+  `chain source: electrum: tcp://127.0.0.1:60401` and created
+  `chain.json` with `{"version":1,"source":"electrum:tcp://127.0.0.1:60401"}`.
+- The BDK address was funded with 0.1 BTC and one block was mined.
+- In the same REPL: `sync` printed `bdk synced`; `balance` reported
+  `confirmed: 0.10000000 BTC`; `deposit 100000` funded the walletv2 address and
+  returned after broadcast (`funding_txid=22d6d58e…`).
+- Ten blocks later a restart with **no** chain-source argument still printed
+  `chain source: electrum: tcp://127.0.0.1:60401` (the stored `chain.json`), and
+  `watch` completed the claim: deposit state `Done`, claim fee `316 sat`,
+  actual operation fee `106144 msat`, `net_credit=99577856 msat`,
+  `ecash-balance=99577856 msat`.
+- `withdraw <external-regtest-address> 50000` reached
+  `WithdrawalState::Broadcast { txid: bf1c3334… }`; one block later a restart's
+  `list-withdrawals`/`status` still showed `Broadcast` with the same txid, and
+  `bitcoin-cli gettransaction` reported `confirmations: 1`. This is the
+  federation txid reconciliation path, not a BDK scan.
+- A bare `init --network regtest` (no chain source) reopened the data directory
+  and printed the same Electrum source, proving the `chain.json` round trip.
+
+Covered by this gate: Electrum sync, funded deposit/claim, withdrawal
+broadcast + restart reconciliation, wallet restart, and chain-source
+persistence/reuse.
+
+Not covered: a reorg observed through Electrum, Electrum full scan/restore, and
+injected transient-failure behaviour. Electrum cannot force `invalidateblock`
+from the wallet side; the deterministic reorg path is the bitcoind-backend gate
+in §47 (`invalidateblock`, unconfirmed, re-mine, one confirmation), and the
+shared `BdkWallet` ancestry check is the same code path. Full scan/restore on
+Electrum remains unit/partial.
+
+One non-fatal `fm::client` warning occurred while setting the claim outcome
+(`Write-write conflict detected`); the operation still reached `Done` with the
+expected net credit. It is a client journal concurrency warning, not an Electrum
+error.

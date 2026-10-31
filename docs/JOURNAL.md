@@ -1,5 +1,27 @@
 # Journal
 
+## 2026-10-31 — Electrum is live on devimint
+
+Electrum was the last chain backend with unit coverage only. A fresh devimint
+session exposed electrs on `127.0.0.1:60401`; a wallet initialized with
+`electrum:tcp://127.0.0.1:60401` synced a 0.1 BTC funding address, funded and
+claimed a 100,000 sat deposit, and withdrew 50,000 sat to an external regtest
+address.
+
+The deposit used Electrum for the BDK sync and funding transaction. The claim
+completed at `Done` with 99,577,856 msat credited; the actual operation fee was
+106,144 msat against the fee-preview estimate. The withdrawal reached
+`Broadcast { txid: bf1c3334… }`; after a restart the row still had that txid and
+the transaction had one confirmation. Restarts with no chain-source argument
+kept using the stored `chain.json`, and a bare `init --network regtest` printed
+the Electrum source, so the persistence round trip is covered.
+
+The reorg path was not attempted through Electrum: the wallet cannot drive
+`invalidateblock`. The deterministic bitcoind reorg gate from #18/§47 remains the
+reorg evidence, and the ancestry/rebuild logic is shared above the backend. Full
+scan/restore on Electrum and injected transient failures were not re-run in this
+gate. A non-fatal `fm::client` write-write conflict warning appeared while setting
+the claim outcome; the operation still completed once with the expected credit.
 ## 2026-10-31 — Deposit fee preview before funding
 
 `request-deposit` and `deposit` now show the on-chain claim fee and the best

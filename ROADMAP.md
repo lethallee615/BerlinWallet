@@ -32,9 +32,9 @@ MVP is called done.
       handling. API-verified in `API-VERIFICATION.md` §48 and live on devimint in
       §49 (paid send/receive, expiry, restart); signet and a gateway-side routing
       failure remain open.
-- [ ] **Three chain backends** (#24). The BDK chain source can be Esplora, Electrum, or
+- [x] **Three chain backends** (#24). The BDK chain source can be Esplora, Electrum, or
       bitcoind RPC, selected by configuration, with the same reorg and persistence
-      guarantees.
+      guarantees. Electrum is live-gated in `API-VERIFICATION.md` §51.
 - [x] **Restore and backup.** Mnemonic restore, full-directory backup/import, and
       the limitations of a mnemonic-only restore are implemented and documented.
       In-flight-operation recovery remains an upstream gap; the assertions are
@@ -114,12 +114,13 @@ This is the work that must happen before “real use” is more than an aspirati
 - [x] Add configuration/CLI selection and clear errors for unreachable or
       misconfigured backends. The choice is persisted in `chain.json` and a
       backend change is never silent.
-- [ ] Test each backend against reorgs, transient failures, restore full scans,
-      and wallet restart (#24). **Esplora and bitcoind RPC have live runs; Electrum
-      is unit-only.** Electrum needs devimint's electrs (regtest Electrum RPC on
-      127.0.0.1:60401); bitcoind needs the devimint node plus a birthday height.
-      The deterministic `invalidateblock` reorg test runs on the bitcoind backend,
-      because the devimint Esplora binary panics on a live invalidate.
+- [x] Live-run Electrum on devimint's electrs (#24): sync, funded deposit,
+      withdrawal reconciliation, wallet restart, and `chain.json` round trip.
+      Electrum uses the regtest Electrum RPC on `127.0.0.1:60401`. The
+      deterministic `invalidateblock` reorg runs on the bitcoind backend
+      (#18/§47), because the wallet cannot force a reorg from Electrum and the
+      devimint Esplora binary panics on a live invalidate. Electrum full
+      scan/restore and injected transient failures remain unit/partial.
 - [x] Document the privacy and operational differences: an Electrum server and
       an Esplora server both see addresses; bitcoind RPC is a different trust
       boundary (`docs/THREAT-MODEL.md`).
