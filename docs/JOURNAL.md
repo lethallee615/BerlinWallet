@@ -1,5 +1,17 @@
 # Journal
 
+## 2026-10-31 — Quiet shutdown without hiding task failures
+
+The CLI tracing subscriber is now reloadable. On quit, after the REPL stops
+reading commands but before `Console` shutdown, it appends `fm::task=off` to the
+`EnvFilter`; the fedimint task-cancellation lifecycle messages disappear while
+`fm::task` remains visible during normal wallet operation. A live
+`RUST_LOG=info` quit with the funded deposit/output scanner present exited 0
+with no `fm::task` WARN or ERROR after the prompt.
+
+The filter is only narrowed at shutdown, so a genuine task panic during normal
+operation is still reported. This closes the last known cosmetic shutdown-noise
+class from #10.
 ## 2026-10-31 — `watch` reports progress instead of hanging silently
 
 `watch <deposit-id>` now prints a stderr progress line immediately and every ten

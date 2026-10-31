@@ -2459,6 +2459,8 @@ re-check in `send()`; this says it isn't catching it.
 - `watch` polled silently for its whole duration. FIXED (§54): the CLI prints an
   initial line and a 10 s stderr heartbeat with state, event-log positions,
   funding txid, operation id, and elapsed time. stdout remains the final row.
+- Shutdown task-cancellation noise (`fm::task` WARN/ERROR) is suppressed by a
+  reloadable filter only for the shutdown phase. FIXED (§55).
 - `sync` treated a connection refusal as fatal and killed the REPL. FIXED
   (b91ebca): connect/timeout/request errors retry with bounded backoff (3 attempts,
   250/500 ms), parse/4xx are permanent; the CLI returns to the prompt.
@@ -3282,3 +3284,32 @@ watch.
 
 Tests: 111 core pass + 1 devimint-only ignored, 7 CLI, 5 FFI. The CLI test
 `watch_progress_names_state_positions_and_funding` pins the field names.
+
+## 55. Quiet shutdown without hiding normal task errors (2026-10-31)
+
+The CLI tracing subscriber is now built as a `tracing_subscriber::registry()`
+with a reloadable `EnvFilter` and the stderr `fmt` layer. `init_tracing` keeps a
+`reload::Handle<EnvFilter, Registry>` in a `OnceLock`.
+
+After the REPL stops reading commands, `quiet_fedimint_task_logs()` appends the
+`fm::task=off` directive through that handle **before** `shutdown_tx` and
+`ClientHandle::shutdown`. This suppresses fedimint's expected
+task-cancellation lifecycle messages (`Task shut down uncleanly` and the
+output-scanner cancellation reported as a panic) without disabling `fm::task`
+while the wallet is running, so genuine task panics remain visible.
+
+Live check (devimint bitcoind data directory with a funded/open deposit, so the
+walletv2 output scanner is active):
+
+```text
+RUST_LOG=info berlin-wallet run <invite>
+> quit
+exit 0
+```
+
+No `fm::task` WARN or ERROR appeared on stderr after the prompt. The previous
+`fm::task` lines are gone; the process still exits 0 and releases the database
+lock. The existing `tracing_init_is_idempotent` test covers repeated
+initialization; the filter is only narrowed at shutdown.
+
+Tests remain 111 core pass + 1 devimint-only ignored, 7 CLI, 5 FFI.

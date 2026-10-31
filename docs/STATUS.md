@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: c086051
+Main at: 1232c61
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -41,6 +41,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
+| 2026-10-31 | `RUST_LOG=info` quit with a funded/open deposit: no `fm::task` WARN/ERROR after the prompt; exit 0 | devimint bitcoind | pass | #39, §55 |
 | 2026-10-31 | `watch` heartbeat: initial + 10s stderr lines with state/positions/funding; SIGINT returned to the prompt | devimint bitcoind | pass | #22, §54 |
 | 2026-10-31 | Fresh restore recovered 99,577,856 msat and BDK 0.09849694; empty history/warnings; new receive did not reclaim a stranded 50,000 sat deposit | bitcoind RPC | pass | #26, §52 |
 | 2026-10-31 | Electrum sync, 100,000 sat deposit -> Done (99,577,856 msat), 50,000 sat withdrawal -> Broadcast and 1 conf; restart and `chain.json` reuse | electrum tcp://127.0.0.1:60401 | pass | #24, §51 |
@@ -64,7 +65,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 |---|---|
 | P0 | — |
 | P1 | — |
-| P2 | #9, #27, #28, #29, #30, #38, #39 |
+| P2 | #9, #27, #28, #29, #30, #38 |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
 P2 is hardening. `docs/TRACKING.md` defines how these are assigned.

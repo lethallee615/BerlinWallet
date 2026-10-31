@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
@@ -167,16 +167,44 @@ async fn open_database(data_dir: &Path) -> anyhow::Result<Database> {
     open_rocksdb(&data_dir.join("fedimint.rocksdb")).await
 }
 
-/// Install a stderr tracing subscriber. `RUST_LOG` controls filtering and
-/// defaults to `info`; `try_init` makes repeated calls harmless.
+/// Reloadable stderr tracing filter. `RUST_LOG` controls filtering and defaults
+/// to `info`; the handle lets shutdown silence fedimint's task-cancellation
+/// lifecycle noise without hiding real task errors during normal operation.
+type TracingReload =
+    tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+static TRACING_RELOAD: OnceLock<TracingReload> = OnceLock::new();
+
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+    let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(filter);
+    let subscriber = tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+    if subscriber.try_init().is_ok() {
+        let _ = TRACING_RELOAD.set(reload_handle);
+    }
+}
+
+/// Silence fedimint's task-cancellation lifecycle logs for the shutdown phase.
+///
+/// `ClientHandle::shutdown` cancels the client task group; the walletv2 output
+/// scanner reports that cancellation as an ERROR even though it is expected.
+/// Only `fm::task` is disabled, and only after the REPL has stopped taking
+/// commands, so genuine task panics during normal operation stay visible.
+fn quiet_fedimint_task_logs() {
+    let Some(handle) = TRACING_RELOAD.get() else {
+        return;
+    };
+    let Ok(directive) = "fm::task=off".parse::<tracing_subscriber::filter::Directive>() else {
+        return;
+    };
+    let _ = handle.modify(|filter| {
+        *filter = filter.clone().add_directive(directive);
+    });
 }
 
 /// Resolve the chain source for `data_dir`.
@@ -683,6 +711,7 @@ async fn run(
         }
     }
 
+    quiet_fedimint_task_logs();
     let _ = shutdown_tx.send(true);
     deposit_watchers.wait_all().await;
     // Drop the module handle before the client is unwrapped; it may hold a
