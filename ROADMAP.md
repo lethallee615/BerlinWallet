@@ -166,11 +166,12 @@ This is the work that must happen before “real use” is more than an aspirati
 - Deposit requests preview the claim fee and the walletv2 + mintv2 operation
   fee. The quote is fee-consensus only; the actual can include change/dust and
   is reconciled and displayed after the claim.
-- Resolve the 224 msat withdrawal quote/charge mismatch and make the quote
-  reconstruct the actual debit.
-- Investigate `change_outpoint_range`: the named txids were not observed on
-  chain. `await-change` must either verify real outpoints or be treated as an
-  advisory wait.
+- [x] Resolve the withdrawal quote/charge mismatch: `send_fee_quote` now gets
+  the value plus the on-chain fee, so the quote reconstructs the actual debit
+  (`API-VERIFICATION.md` §38).
+- [x] Correct `change_outpoint_range`: it is a fedimint ecash output range, not
+  Bitcoin txids; the wait is an ecash-change wait, not an on-chain check
+  (`API-VERIFICATION.md` §37).
 - [x] `watch` prints progress on stderr and keeps stdout for the final row;
   live heartbeat/SIGINT check in `API-VERIFICATION.md` §54.
 

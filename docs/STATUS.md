@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: 66568ce
+Main at: 30a1737
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -42,6 +42,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
+| 2026-10-31 | 50,000 sat withdrawal: chain 228 sat + federation 101,600 msat; total debit 50,329,600 msat matched the balance delta; change range identified as ecash change | devimint bitcoind | pass | #28/#29, §37/§38 |
 | 2026-10-31 | Legacy mnemonic migrated to age; encrypted backup/restore reopened with wallet and backup passphrases; wrong passphrase rejected | local CLI | pass | #27, §56 |
 | 2026-10-31 | `RUST_LOG=info` quit with a funded/open deposit: no `fm::task` WARN/ERROR after the prompt; exit 0 | devimint bitcoind | pass | #39, §55 |
 | 2026-10-31 | `watch` heartbeat: initial + 10s stderr lines with state/positions/funding; SIGINT returned to the prompt | devimint bitcoind | pass | #22, §54 |
@@ -67,7 +68,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 |---|---|
 | P0 | — |
 | P1 | — |
-| P2 | #9, #28, #29, #30, #38 |
+| P2 | #9, #30, #38 |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
 P2 is hardening. `docs/TRACKING.md` defines how these are assigned.

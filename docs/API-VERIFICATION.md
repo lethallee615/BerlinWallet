@@ -2433,29 +2433,69 @@ esplora cannot survive it, so every reorg test needs a manual restart.
 Restart recipe in §40: `--jsonrpc-import`; `--daemon-dir` and `--blocks-dir` must
 include the `regtest` component; `--cookie user:pass` (not `--daemon-auth`).
 
-## 37. walletv2 operation meta — change_outpoint_range is unverifiable
+## 37. walletv2 change_outpoint_range is federated ecash change (corrected)
 
-Status: upstream finding, no workaround needed.
+Status: resolved; the earlier "phantom Bitcoin txid" interpretation was a
+category error.
 
-`Receive`/`Send` operation meta carries `change_outpoint_range.txid` values that
-are never broadcast: not in the mempool, not in any block (scanned 240..265 via
-`getblock`). The index range also exceeds the real tx's output count — 1..12 on a
-2-output tx, 0..59 on a deposit.
+`SendMeta`/`ReceiveMeta::change_outpoint_range` is a `fedimint_core::OutPointRange`
+(`fedimint-core/src/lib.rs:474-550`):
 
-Evidence: `aa5f12f0…` and `3c7acb29…` absent from all blocks; the real change is
-confirmed but in a different tx (`4c107818…` vout 0).
+```rust
+pub struct OutPointRange {
+    pub txid: TransactionId, // fedimint_core::TransactionId (SHA-256), not bitcoin::Txid
+    idx_range: IdxRange,
+}
+```
 
-`await-change` still reports "change outputs finalized", so it is not verifying
-the outpoints it names. Since the wait exists to guarantee change is journaled
-before `set_broadcast`, a phantom txid is a correctness gap, not cosmetics.
+Its iterator yields `fedimint_core::OutPoint` values. The matching wait,
+`Client::await_primary_bitcoin_module_output(operation_id, out_point)`
+(`fedimint-client/src/client.rs:1253`) waits for the primary Bitcoin module's
+**ecash output**, not a Bitcoin transaction confirmation.
 
-## 38. Withdrawal quote vs charged fee mismatch (224 msat)
+Therefore these txids are not expected in the Bitcoin mempool or blocks. The
+range indexes the mintv2 ecash outputs created as change by the federation
+transaction. The on-chain withdrawal txid is a different value.
 
-`send_fee_quote` reported `input: 1500msat` + `output: 100900msat` = 102,400;
-`operation-fees` reported 102,624 actually charged. The debit reconciles exactly
-as value + on-chain fee + 102,624, so accounting is internally consistent — the
-*quote* is what doesn't reconstruct the charge. The PLAN has a quote-drift
-re-check in `send()`; this says it isn't catching it.
+Live 2026-10-31 withdrawal: the `Send` meta range was
+`txid=8f5d99cba150aac1c2c10805eede233c1a8f345408a21357bb480821213caea1`,
+indices 1..5; the actual on-chain withdrawal txid was
+`14c96662e8bf72c7df18264f9a3c9cc1a991182fd00d585b8af95b929c83c4eb`.
+That difference is expected, not a phantom transaction.
+
+The `await-change` wait is correct for its purpose (ensuring the ecash change
+outputs are journaled before `Broadcast`). It is not an on-chain verification
+step, and no downgrade is needed. The test
+`withdrawal::tests::change_outpoint_range_is_federated_ecash_change` pins the
+type relationship. Source links:
+<https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-core/src/lib.rs#L474-L550>
+and
+<https://github.com/fedimint/fedimint/blob/v0.12.0/fedimint-client/src/client.rs#L1253>.
+
+## 38. Withdrawal quote vs charged fee mismatch (resolved)
+
+Root cause: `WalletClientModule::send_fee_quote(amount)` expects the **wallet
+output amount including the on-chain miner fee**, because `send` creates a
+wallet output worth `value + fee` (`fedimint-walletv2-client/src/lib.rs:270-297,
+399-405`). The withdrawal code quoted only `value`, so the wallet-output fee and
+the mintv2 change/dust were under-estimated.
+
+Fix: both `request_withdrawal` and the pre-send re-quote use
+`funded_withdrawal_amount(value, chain_fee) = value + chain_fee`. Test:
+`withdrawal::tests::quote_uses_the_wallet_output_amount_including_the_chain_fee`.
+
+Live 2026-10-31 (devimint bitcoind backend):
+
+- value `50,000 sat`, on-chain `send_fee` `228 sat`;
+- federation `FeeQuote`: input `900 msat`, output `100,400 msat`, dust `300 msat`
+  = `101,600 msat`;
+- quoted total debit: `50,000,000 + 228,000 + 101,600 = 50,329,600 msat`;
+- ecash balance before/after: `556,707,840 -> 506,378,240 msat`, delta
+  `50,329,600 msat`;
+- `operation-fees` for the same operation returned `101,600 msat`.
+
+The quote now reconstructs the observed debit exactly. The prior 224 msat
+mismatch was this missing gross-up.
 
 ## 39. Observability gaps
 

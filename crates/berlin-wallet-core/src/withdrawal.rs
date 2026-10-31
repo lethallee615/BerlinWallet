@@ -37,7 +37,12 @@ pub async fn request_withdrawal(
     // and net debit and require explicit confirmation before send_withdrawal.
     let module = client.get_first_module::<WalletClientModule>()?;
     let chain_fee = module.send_fee().await?;
-    let quote = module.send_fee_quote(value).await?;
+    // `send_fee_quote` takes the value of the wallet output, which includes the
+    // on-chain miner fee in `send`. Quoting the recipient value alone
+    // under-estimates the wallet output fee and the mintv2 change/dust.
+    let quote = module
+        .send_fee_quote(funded_withdrawal_amount(value, chain_fee))
+        .await?;
     journal
         .set_withdrawal_quote(&row.id, chain_fee, (&quote).into())
         .await?;
@@ -66,6 +71,13 @@ const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 /// retries instead of blocking forever.
 const CHANGE_OUTPUT_TIMEOUT: Duration = Duration::from_secs(20);
 const SEND_SCAN_PAGE: usize = 256;
+
+/// The wallet output funded by a withdrawal includes the on-chain miner fee.
+/// `WalletClientModule::send_fee_quote` must be asked about this gross amount,
+/// not just the recipient value.
+fn funded_withdrawal_amount(value: bitcoin::Amount, chain_fee: bitcoin::Amount) -> bitcoin::Amount {
+    value + chain_fee
+}
 
 /// One walletv2 Send operation discovered in the operation log.
 #[derive(Debug, Clone)]
@@ -274,7 +286,14 @@ pub async fn find_sent_operation(
 
 /// Wait for the primary module change outputs of a successful send before
 /// declaring Broadcast. Without this, a crash immediately after the send final
-/// state can leave the change notes uncredited.
+/// state can leave the ecash change notes uncredited.
+///
+/// `SendMeta::change_outpoint_range` is a fedimint [`OutPointRange`]
+/// (`fedimint_core::TransactionId` plus output indices), **not** a Bitcoin
+/// transaction id. The change is the mintv2 ecash change from the federation
+/// transaction; it is intentionally not expected to exist on the Bitcoin chain.
+/// `await_primary_bitcoin_module_output` resolves each ecash output in the
+/// federation's primary-module output log.
 ///
 /// Returns `false` if the bounded wait expires; the caller must leave the
 /// withdrawal `Submitted` so reconciliation can retry.
@@ -422,7 +441,9 @@ pub async fn send_withdrawal(
         (Some(fee), Some(quote)) => (fee, FeeQuote::from(quote)),
         _ => {
             let fee = module.send_fee().await?;
-            let quote = module.send_fee_quote(value).await?;
+            let quote = module
+                .send_fee_quote(funded_withdrawal_amount(value, fee))
+                .await?;
             journal
                 .set_withdrawal_quote(id, fee, (&quote).into())
                 .await?;
@@ -430,7 +451,9 @@ pub async fn send_withdrawal(
         }
     };
     let fresh_fee = module.send_fee().await?;
-    let fresh_quote = module.send_fee_quote(value).await?;
+    let fresh_quote = module
+        .send_fee_quote(funded_withdrawal_amount(value, fresh_fee))
+        .await?;
     if fresh_fee != expected_fee || fresh_quote != expected_quote {
         journal
             .set_withdrawal_quote(id, fresh_fee, (&fresh_quote).into())
@@ -606,6 +629,60 @@ mod tests {
         ));
 
         assert!(validate_withdrawal_value(dust_limit, dust_limit).is_ok());
+    }
+
+    #[test]
+    fn change_outpoint_range_is_federated_ecash_change() {
+        let range: fedimint_core::OutPointRange = serde_json::from_value(serde_json::json!({
+            "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+            "idx_range": {"start": 1, "end": 5}
+        }))
+        .expect("OutPointRange");
+        let start: fedimint_core::OutPoint = range.start_out_point();
+        assert_eq!(start.txid, range.txid());
+        assert_eq!(range.out_idx_iter().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn live_withdrawal_quote_reconciles_with_the_final_operation_fee() {
+        use fedimint_core::module::{AmountUnit, Amounts};
+
+        let value = bitcoin::Amount::from_sat(50_000);
+        let chain_fee = bitcoin::Amount::from_sat(228);
+        let quote = FeeQuote {
+            input: Amounts::new_bitcoin_msats(900),
+            output: Amounts::new_bitcoin_msats(100_400),
+            dust: Amounts::new_bitcoin_msats(300),
+        };
+        let operation_fee = quote
+            .total()
+            .get(&AmountUnit::BITCOIN)
+            .copied()
+            .expect("BTC quote");
+        assert_eq!(
+            operation_fee,
+            fedimint_core::Amount::from_msats(101_600),
+            "quoted federation fee must equal the observed operation fee"
+        );
+        let total_debit = fedimint_core::Amount::from_sats(value.to_sat())
+            + fedimint_core::Amount::from_sats(chain_fee.to_sat())
+            + operation_fee;
+        assert_eq!(
+            total_debit,
+            fedimint_core::Amount::from_msats(50_329_600),
+            "quoted debit must equal the observed balance delta"
+        );
+    }
+
+    #[test]
+    fn quote_uses_the_wallet_output_amount_including_the_chain_fee() {
+        assert_eq!(
+            funded_withdrawal_amount(
+                bitcoin::Amount::from_sat(10_000),
+                bitcoin::Amount::from_sat(234),
+            ),
+            bitcoin::Amount::from_sat(10_234)
+        );
     }
 
     #[test]

@@ -1,5 +1,24 @@
 # Journal
 
+## 2026-10-31 — Withdrawal quote and change semantics corrected
+
+Two long-standing withdrawal questions are resolved.
+
+The 224 msat quote/charge mismatch was a gross-up bug: walletv2's
+`send_fee_quote` expects the wallet output amount **including the on-chain miner
+fee**, but the withdrawal code passed only the recipient value. Both quote paths
+now pass `value + chain_fee`, and a regression test pins the gross-up. A live
+devimint withdrawal reconciled exactly: 50,000 sat + 228 sat on-chain + 101,600
+msat federation = 50,329,600 msat, which matched both `operation-fees` and the
+observed ecash balance delta.
+
+`change_outpoint_range` was not a set of phantom Bitcoin txids. It is a
+`fedimint_core::OutPointRange` (fedimint transaction id plus output indices) for
+the mintv2 ecash change. `await_primary_bitcoin_module_output` waits for those
+federation outputs; they are not expected on the Bitcoin chain. The live send
+range used a fedimint txid distinct from the actual on-chain withdrawal txid.
+The wait is an ecash-change wait, not an on-chain confirmation, and now has a
+type-proof test and corrected docs.
 ## 2026-10-31 — The mnemonic and backups are encrypted
 
 The mnemonic file is now an age passphrase-encrypted blob. New wallets prompt for
