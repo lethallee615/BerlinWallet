@@ -656,6 +656,7 @@ dependencies = [
  "fedimint-client",
  "fedimint-connectors",
  "fedimint-core",
+ "fedimint-eventlog",
  "fedimint-walletv2-client",
  "fs-lock",
  "libc",

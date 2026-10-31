@@ -2456,8 +2456,9 @@ re-check in `send()`; this says it isn't catching it.
 
 ## 39. Observability gaps
 
-- `watch` polls silently for its whole duration. A hang is indistinguishable from
-  progress. Needs a heartbeat or an initial "awaiting claim, position N" line.
+- `watch` polled silently for its whole duration. FIXED (§54): the CLI prints an
+  initial line and a 10 s stderr heartbeat with state, event-log positions,
+  funding txid, operation id, and elapsed time. stdout remains the final row.
 - `sync` treated a connection refusal as fatal and killed the REPL. FIXED
   (b91ebca): connect/timeout/request errors retry with bounded backoff (3 attempts,
   250/500 ms), parse/4xx are permanent; the CLI returns to the prompt.
@@ -3211,7 +3212,7 @@ An earlier run of the same gate exposed the settlement bug: recovery logged
 balance before the recovered-notes output state machine ran. The active-state
 wait in `recover_client` fixed it; the final run above is the post-fix result.
 
-Tests: 103 core, 5 CLI, 6 FFI.
+Tests: 103 core, 6 CLI, 5 FFI.
 
 
 ## 53. Automated crash/restart matrix (2026-10-31)
@@ -3245,4 +3246,39 @@ replace the live evidence that the federation/walletv2 issued or broadcast the
 underlying operation once (§27); they prove the recovery path cannot create a
 second row, second claim owner, or second broadcast transition.
 
-Tests: 111 core pass + 1 devimint-only ignored, 5 CLI, 6 FFI.
+Tests: 111 core pass + 1 devimint-only ignored, 6 CLI, 5 FFI.
+
+## 54. `watch` heartbeat and cancellation (2026-10-31)
+
+The CLI `watch <deposit-id>` now emits progress to **stderr** while stdout keeps
+the final machine-readable row. It prints an initial line and a heartbeat every
+10 seconds:
+
+```text
+watch <id> (deposit): elapsed=0s state=AddressShown event_position=EventLogId(30) federation_event_position=EventLogId(30) last_observed_position=EventLogId(30) funding_txid=7ac2e975… operation_id=<none>
+watch <id> (deposit): elapsed=10s state=AddressShown event_position=EventLogId(30) federation_event_position=EventLogId(30) last_observed_position=EventLogId(30) funding_txid=7ac2e975… operation_id=<none>
+```
+
+- `state` is the current journal row state.
+- `event_position` is the starting federation event-log cursor.
+- `federation_event_position` / `last_observed_position` is the last persisted
+  cursor (`next_position` or `position`); it advances when an Aborted event is
+  consumed.
+- `funding_txid` and `operation_id` identify the deposit and claim when known.
+- The final line is also on stderr; `print_deposit` remains on stdout.
+
+Ctrl+C already cancels the foreground `watch` from #10. Live smoke on devimint
+(bitcoind backend):
+
+- Initial line at `elapsed=0s` and a second at `elapsed=10s`, both naming the
+  deposit, state, positions, and funding txid.
+- SIGINT printed the interrupt hint and
+  `watch cancelled; the background observer (or the 60 s adoption pass) keeps the row updated`,
+  then returned to the `berlin-wallet>` prompt without killing the process.
+
+`watch` remains the deposit-claim wait; withdrawal send/status use
+`send-withdraw`/`status`. The heartbeat infrastructure is not a new withdrawal
+watch.
+
+Tests: 111 core pass + 1 devimint-only ignored, 7 CLI, 5 FFI. The CLI test
+`watch_progress_names_state_positions_and_funding` pins the field names.

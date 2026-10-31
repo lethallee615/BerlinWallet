@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use berlin_wallet_core::backup::{backup_data_dir, import_data_dir};
@@ -37,6 +37,7 @@ use fedimint_walletv2_client::WalletClientModule;
 use tokio::sync::{Mutex, watch};
 
 const DEFAULT_ESPLORA_URL: &str = "http://127.0.0.1:3002";
+const WATCH_HEARTBEAT: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -232,7 +233,9 @@ fn print_help() {
     println!("  request-deposit <sat>               request a deposit address");
     println!("  fund-deposit <deposit-id>           fund an address-ready deposit");
     println!("  deposit <sat>                       request + fund in one step");
-    println!("  watch <deposit-id>                  await the deposit's claim");
+    println!(
+        "  watch <deposit-id>                  await the deposit's claim (progress on stderr)"
+    );
     println!("  request-withdraw <address> <sat>    create a withdrawal row");
     println!("  send-withdraw <withdrawal-id>       quote + send an existing row");
     println!("  cancel-deposit <deposit-id>         cancel an open deposit row");
@@ -1010,11 +1013,70 @@ async fn command_watch(
         .position
         .ok_or_else(|| anyhow!("deposit has no event-log position"))?;
     let module = client.get_first_module::<WalletClientModule>()?;
-    deposit::watch_deposit(client, journal, module.inner(), id, federation_id, position).await?;
+    let started = Instant::now();
+
+    // Progress belongs on stderr: stdout is the machine-readable final row.
+    eprintln!("{}", format_watch_progress(&row, started.elapsed()));
+
+    let watch =
+        deposit::watch_deposit(client, journal, module.inner(), id, federation_id, position);
+    tokio::pin!(watch);
+
+    let mut heartbeat = tokio::time::interval(WATCH_HEARTBEAT);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await; // consume the immediate first tick
+
+    loop {
+        tokio::select! {
+            result = &mut watch => {
+                result?;
+                break;
+            }
+            _ = heartbeat.tick() => {
+                if let Some(row) = journal.deposit(id).await? {
+                    eprintln!("{}", format_watch_progress(&row, started.elapsed()));
+                }
+            }
+        }
+    }
+
     if let Some(row) = journal.deposit(id).await? {
+        eprintln!(
+            "watch {} (deposit): finished elapsed={}s state={:?}",
+            row.id.0,
+            started.elapsed().as_secs(),
+            row.state
+        );
         print_deposit(&row);
     }
     Ok(())
+}
+
+fn format_watch_progress(row: &DepositRow, elapsed: Duration) -> String {
+    let federation_position = row.next_position.or(row.position);
+    let event_position = row
+        .position
+        .map(|position| format!("{position:?}"))
+        .unwrap_or_else(|| "<none>".to_owned());
+    let federation_position = federation_position
+        .map(|position| format!("{position:?}"))
+        .unwrap_or_else(|| "<none>".to_owned());
+    format!(
+        "watch {} (deposit): elapsed={}s state={:?} event_position={} \
+         federation_event_position={} last_observed_position={} funding_txid={} operation_id={}",
+        row.id.0,
+        elapsed.as_secs(),
+        row.state,
+        event_position,
+        federation_position,
+        federation_position,
+        row.funding_txid
+            .map(|txid| txid.to_string())
+            .unwrap_or_else(|| "<none>".to_owned()),
+        row.operation_id
+            .map(|operation_id| operation_id.fmt_full().to_string())
+            .unwrap_or_else(|| "<none>".to_owned()),
+    )
 }
 
 async fn command_withdraw(
@@ -1302,6 +1364,35 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("A new deposit request does not recover it."))
         );
+    }
+
+    #[test]
+    fn watch_progress_names_state_positions_and_funding() {
+        let mut row = DepositRow::requested(
+            DepositId("watch-progress".to_owned()),
+            fedimint_core::config::FederationId::dummy(),
+            fedimint_eventlog::EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(10_000),
+        );
+        row.state = DepositState::AddressShown;
+        row.funding_txid = Some(
+            "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .expect("txid"),
+        );
+        row.next_position = Some(fedimint_eventlog::EventLogId::LOG_START.next());
+
+        let line = format_watch_progress(&row, Duration::from_secs(10));
+        assert!(line.contains("watch watch-progress (deposit)"));
+        assert!(line.contains("elapsed=10s"));
+        assert!(line.contains("state=AddressShown"));
+        assert!(line.contains("event_position=EventLogId(0)"));
+        assert!(line.contains("federation_event_position=EventLogId(1)"));
+        assert!(line.contains("last_observed_position=EventLogId(1)"));
+        assert!(line.contains(
+            "funding_txid=1111111111111111111111111111111111111111111111111111111111111111"
+        ));
+        assert!(line.contains("operation_id=<none>"));
     }
 
     #[test]

@@ -48,8 +48,9 @@ MVP is called done.
       claim fee, the walletv2 + mintv2 operation-fee estimate, and the estimated
       net before the user commits funds. The actual fee is recorded and a
       mismatch is visible; see `API-VERIFICATION.md` §50.
-- [ ] **Watch progress output** (#22). `watch` reports meaningful progress/heartbeat
-      information instead of polling silently.
+- [x] **Watch progress output** (#22). `watch` reports an initial stderr line
+      and a 10 s heartbeat with state, event-log positions, funding txid,
+      operation id, and elapsed time; `API-VERIFICATION.md` §54.
 
 ## Now — hygiene and documentation
 
@@ -168,8 +169,8 @@ This is the work that must happen before “real use” is more than an aspirati
 - Investigate `change_outpoint_range`: the named txids were not observed on
   chain. `await-change` must either verify real outpoints or be treated as an
   advisory wait.
-- Give `watch` progress/heartbeat output; a silent hang is currently
-  indistinguishable from work.
+- [x] `watch` prints progress on stderr and keeps stdout for the final row;
+  live heartbeat/SIGINT check in `API-VERIFICATION.md` §54.
 
 ### Dependency and supply-chain work
 
