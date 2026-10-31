@@ -24,15 +24,15 @@ In scope:
 - Restore/backup, crash safety, deposit fee preview, and `watch` progress.
 
 Current reality: peg-in/peg-out and ecash balance are live-tested; the combined
-`deposit` path is under investigation (#14: a funded row can stall in
-`AddressShown`, and the federation may not observe the funding transaction).
-Lightning (`lnv2`) is **not implemented or registered**. All three BDK chain
-backends are wired behind `chain::ChainBackend`; Esplora and bitcoind RPC have
-live coverage (bitcoind's reorg path was verified on 2026-10-24), while Electrum
-is unit-only. The BDK path can reveal addresses and fund deposits, but a
-first-class arbitrary on-chain send is not built yet, and the crash matrix still
-has known uncovered windows. See `ROADMAP.md` for the MVP checklist and
-`docs/STATUS.md` for the current snapshot.
+`deposit` path is fixed (adoption/watcher race) and was live-gated on 2026-10-31.
+Lightning (`lnv2`) is **registered**, with paid send/receive, expiry, and
+restart-adoption live-gated on devimint (§49); a pre-lnv2 client data directory
+needs a fresh join/restore to gain the module. All three BDK chain backends are
+wired behind `chain::ChainBackend`; Esplora and bitcoind RPC have live coverage
+(bitcoind's reorg path was verified on 2026-10-24), while Electrum is unit-only.
+The BDK path has a first-class on-chain send with a fee quote and history, and
+the crash matrix still has known uncovered windows. See `ROADMAP.md` for the MVP
+checklist and `docs/STATUS.md` for the current snapshot.
 
 ## Crate layout
 
@@ -52,6 +52,7 @@ berlin_wallet/                  # workspace root
       src/chain/persist.rs      # chain.json resolution (never-silent backend switch)
       src/deposit.rs            # deposit request/address/funding/watch/adoption
       src/withdrawal.rs         # quote/send/reconcile/adoption
+      src/lightning.rs          # lnv2 send/receive, quotes, adoption, expiry
       src/journal.rs            # row types, state enums, Journal trait
       src/journal_db.rs         # versioned DB journal, tags, atomic transitions
       src/sync.rs               # BDK, fedimint, and adoption tasks
@@ -160,7 +161,9 @@ Compile-verified against the real crates; see `docs/API-VERIFICATION-FIRST-PASS.
 **fedimint-wallet-client 0.12.0**: `WalletClientModule::allocate_deposit_address_pooled()`, `allocate_deposit_address_expert_only()`, `safe_allocate_deposit_address()`, `peg_in(PegInRequest)`, `withdraw()`, `get_withdraw_fees()`, `send_fee_quote()`, `max_withdrawable_amount()`, `subscribe_deposit()`, `subscribe_withdraw_updates()`, `create_withdraw_output()`, `WalletClientInit` (`= WalletClientInit(pub Option<DynBitcoindRpc>)`).
 - `PegOutFees` = `fedimint_wallet_client::common::PegOutFees`
 
-**fedimint-mintv2-client 0.12.0**: `MintClientInit`/`MintClientModule`; v1 `fedimint-mint-client` is not registered. The live federation exposes `lnv2`/`meta`/`mintv2`/`walletv2`; `lnv2` is in MVP scope but is not registered yet.
+**fedimint-mintv2-client 0.12.0**: `MintClientInit`/`MintClientModule`; v1 `fedimint-mint-client` is not registered. The live federation exposes `lnv2`/`meta`/`mintv2`/`walletv2`.
+
+**fedimint-lnv2-client 0.12.0**: register `LightningClientInit::default()` (it discovers federation gateways; no per-client URL). `LightningClientModule::{send, receive, await_final_send_operation_state, await_final_receive_operation_state, get_invoice_send_status, select_gateway, list_gateways, routing_info, send_fee_quote, receive_fee_quote, spendable_amount}`; `FinalSendOperationState::{Success, Refunded, Failure}`; `FinalReceiveOperationState::{Expired, Claimed, Failure}`; `LightningOperationMeta::{Send, Receive, LnurlReceive}`; events `payment-send`, `payment-send-update`, `payment-receive`. Source-verified §48; live gate §49. Existing client DBs need a fresh join to gain the module.
 
 **bdk_wallet 3.2.0**: `Wallet::create()` (→ `CreateParams`), `Wallet::load()` (→ `LoadParams`), `reveal_next_address()`, `next_unused_address()`, `list_unspent()`, `get_utxo()`, `get_tx()`, `build_tx()`, `create_psbt()` (requires `bdk-tx` + `--cfg bdk_wallet_unstable`), `sign_with_signers()`, `finalize_psbt()`, `take_staged()`, `apply_update()`, `balance()`, `calculate_fee()`, `insert_txout()`, `start_sync_with_revealed_spks()`, `start_full_scan()` (restore), `apply_update_events()` (`WalletEvent::TxConfirmed`), `WalletPersister`/`PersistedWallet` (`PersistedWallet::create(&mut P, CreateParams)` / `PersistedWallet::load(&mut P, LoadParams)`; rusqlite or bdk_file_store).
 - `Update` = `bdk_wallet::Update` (crate root — **not** `bdk_wallet::chain::Update`)

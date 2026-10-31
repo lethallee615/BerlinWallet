@@ -12,6 +12,10 @@ pub struct WithdrawalId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct OnchainSendId(pub String);
 
+/// Client-generated id for one Lightning send or receive.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct LightningId(pub String);
+
 impl DepositId {
     pub fn new() -> Self {
         Self(uuid::Uuid::now_v7().to_string())
@@ -30,6 +34,12 @@ impl OnchainSendId {
     }
 }
 
+impl LightningId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::now_v7().to_string())
+    }
+}
+
 impl Default for DepositId {
     fn default() -> Self {
         Self::new()
@@ -43,6 +53,12 @@ impl Default for WithdrawalId {
 }
 
 impl Default for OnchainSendId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for LightningId {
     fn default() -> Self {
         Self::new()
     }

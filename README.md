@@ -53,15 +53,17 @@ This is **pre-alpha software**.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 93 core tests, 5 CLI tests, and 4 FFI tests.
+- The current test suite is 97 core tests, 5 CLI tests, and 4 FFI tests.
 - There is **no mainnet operational testing** recorded in this repository and no
   independent security audit. The desktop GUI and mobile app are deferred until
   after the CLI-first MVP.
 - The CLI-first MVP scope now includes Lightning send/receive via `lnv2` and
   three BDK chain backends. Esplora, Electrum, and bitcoind RPC are all wired
   behind one trait; Esplora and bitcoind RPC have live runs, Electrum is
-  unit-only, and `lnv2` is not registered. See `ROADMAP.md` for the MVP checklist
-  and `docs/STATUS.md` for the current snapshot.
+  unit-only, and `lnv2` is registered with paid send/receive live on devimint.
+  A data directory created before lnv2 was registered needs a fresh join/restore
+  to gain the module. See `ROADMAP.md` for the MVP checklist and
+  `docs/STATUS.md` for the current snapshot.
 
 ### Do not use this yet for
 

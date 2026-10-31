@@ -15,13 +15,14 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositOrigin, DepositRow, DepositState, JournalBackend,
-    OnchainSendRow, WithdrawalRow, WithdrawalState, is_open_deposit, is_open_withdrawal,
-    net_credit_with_fees, now_ms,
+    LightningRow, LightningState, OnchainSendRow, WithdrawalRow, WithdrawalState, is_open_deposit,
+    is_open_withdrawal, net_credit_with_fees, now_ms,
 };
-use crate::ops::{DepositId, OnchainSendId, WithdrawalId};
+use crate::ops::{DepositId, LightningId, OnchainSendId, WithdrawalId};
 use crate::wire::FeeQuoteWire;
 
 const TAG_ONCHAIN_SEND: u8 = 0x09;
+const TAG_LIGHTNING: u8 = 0x0A;
 const TAG_DEPOSIT: u8 = 0x01;
 const TAG_WITHDRAWAL: u8 = 0x02;
 const TAG_CLAIM: u8 = 0x03;
@@ -72,6 +73,33 @@ async fn scan_onchain_sends(
     let mut stream = dbtx.raw_find_by_prefix(&[TAG_ONCHAIN_SEND]).await?;
     while let Some((_key, value)) = stream.next().await {
         rows.push(decode::<OnchainSendRow>(&value)?);
+    }
+    Ok(rows)
+}
+
+fn lightning_key(id: &LightningId) -> Vec<u8> {
+    let mut key = vec![TAG_LIGHTNING];
+    key.extend_from_slice(id.0.as_bytes());
+    key
+}
+
+async fn get_lightning(
+    dbtx: &mut DatabaseTransaction<'_, Committable>,
+    id: &LightningId,
+) -> anyhow::Result<Option<LightningRow>> {
+    match dbtx.raw_get_bytes(&lightning_key(id)).await? {
+        Some(bytes) => Ok(Some(decode::<LightningRow>(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+async fn scan_lightning(
+    dbtx: &mut DatabaseTransaction<'_, Committable>,
+) -> anyhow::Result<Vec<LightningRow>> {
+    let mut rows = Vec::new();
+    let mut stream = dbtx.raw_find_by_prefix(&[TAG_LIGHTNING]).await?;
+    while let Some((_key, value)) = stream.next().await {
+        rows.push(decode::<LightningRow>(&value)?);
     }
     Ok(rows)
 }
@@ -1131,6 +1159,49 @@ impl JournalBackend for DbJournal {
         let mut rows = scan_onchain_sends(&mut dbtx).await?;
         dbtx.commit_tx_result().await?;
         rows.sort_by_key(|row| row.created_at);
+        Ok(rows)
+    }
+
+    async fn insert_lightning(&self, row: &LightningRow) -> anyhow::Result<()> {
+        let this = self;
+        let row = row.clone();
+        retry_on_conflict(move || {
+            let row = row.clone();
+            async move {
+                let mut dbtx = this.db.begin_transaction().await;
+                dbtx.raw_insert_bytes(&lightning_key(&row.id), &encode(&row)?)
+                    .await?;
+                dbtx.commit_tx_result().await?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    async fn update_lightning(&self, row: &LightningRow) -> anyhow::Result<()> {
+        self.insert_lightning(row).await
+    }
+
+    async fn lightning(&self, id: &LightningId) -> anyhow::Result<Option<LightningRow>> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let row = get_lightning(&mut dbtx, id).await?;
+        dbtx.commit_tx_result().await?;
+        Ok(row)
+    }
+
+    async fn lightning_all(&self) -> anyhow::Result<Vec<LightningRow>> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let mut rows = scan_lightning(&mut dbtx).await?;
+        dbtx.commit_tx_result().await?;
+        rows.sort_by_key(|row| row.created_at);
+        Ok(rows)
+    }
+
+    async fn lightning_pending(&self) -> anyhow::Result<Vec<LightningRow>> {
+        let mut dbtx = self.db.begin_transaction().await;
+        let mut rows = scan_lightning(&mut dbtx).await?;
+        dbtx.commit_tx_result().await?;
+        rows.retain(|row| row.state == LightningState::Pending);
         Ok(rows)
     }
 

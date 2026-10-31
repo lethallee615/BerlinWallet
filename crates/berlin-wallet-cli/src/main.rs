@@ -12,13 +12,14 @@ use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
 };
 use berlin_wallet_core::journal::{
-    DepositRow, DepositState, Journal, OnchainSendRow, collapse_deposit_rows,
+    DepositRow, DepositState, Journal, LightningRow, OnchainSendRow, collapse_deposit_rows,
 };
+use berlin_wallet_core::lightning;
 use berlin_wallet_core::network::{
     NETWORK_FILE, init_network, network_from_chain_id, network_from_recorded, parse_network,
     require_recorded_network, verified_client_network,
 };
-use berlin_wallet_core::ops::{DepositId, OnchainSendId, WithdrawalId};
+use berlin_wallet_core::ops::{DepositId, LightningId, OnchainSendId, WithdrawalId};
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::withdrawal::await_change_outputs;
@@ -243,6 +244,12 @@ fn print_help() {
     println!("  withdraw <address> <sat>            request + send in one step");
     println!("  send <address> <sat> <sat/vb>       send on-chain from the BDK wallet");
     println!("  list-onchain                        journalled sends + wallet history");
+    println!("  ln-send <invoice> [gateway]         pay a Bolt11 invoice via lnv2");
+    println!("  ln-receive <sat> [expiry] [gateway] [description...]");
+    println!("                                      create an lnv2 invoice");
+    println!("  ln-status <id>                      print one lightning row");
+    println!("  ln-list                             list lightning rows");
+    println!("  ln-gateways                         list the federation's vetted gateways");
     println!("  status <id>                         print a deposit or withdrawal row");
     println!("  sync                                run one BDK Esplora sync");
     println!("  help");
@@ -575,6 +582,89 @@ async fn run(
                 .await
             }
             "list-onchain" => command_list_onchain(&wallet, &journal).await,
+            "ln-send" => {
+                let invoice = parts
+                    .next()
+                    .ok_or_else(|| anyhow!("usage: ln-send <invoice> [gateway]"))?;
+                let gateway = parts.next().map(lightning::parse_gateway).transpose()?;
+                let (row, quote) =
+                    lightning::prepare_send(&client, &journal, federation_id, invoice, gateway)
+                        .await?;
+                println!("ln send quote:");
+                println!("  amount: {} msat", quote.amount_msat);
+                println!("  gateway: {}", quote.gateway);
+                println!("  gateway fee: {} msat", quote.gateway_fee_msat);
+                println!("  federation fee: {} msat", quote.federation_fee_msat);
+                println!("  total debit: {} msat", quote.total_debit_msat);
+                println!("  row: {}", row.id.0);
+                let row = lightning::execute_send(&client, &journal, &row.id).await?;
+                print_lightning(&row);
+                Ok(())
+            }
+            "ln-receive" => {
+                let amount = parse_sat(parts.next())?;
+                let expiry = parts
+                    .next()
+                    .map(|value| value.parse::<u32>().context("invalid expiry seconds"))
+                    .transpose()?
+                    .unwrap_or(3600);
+                let gateway = parts.next().map(lightning::parse_gateway).transpose()?;
+                let description = parts.collect::<Vec<_>>().join(" ");
+                let (row, quote) = lightning::request_receive(
+                    &client,
+                    &journal,
+                    federation_id,
+                    fedimint_core::Amount::from_sats(amount.to_sat()),
+                    expiry,
+                    description,
+                    gateway,
+                )
+                .await?;
+                println!("ln receive quote:");
+                println!("  amount: {} msat", quote.amount_msat);
+                println!("  gateway: {}", quote.gateway);
+                println!("  gateway fee: {} msat", quote.gateway_fee_msat);
+                println!("  federation fee: {} msat", quote.federation_fee_msat);
+                println!("  net: {} msat", quote.net_msat);
+                println!("  expiry: {} s", quote.expiry_secs);
+                println!("invoice: {}", row.invoice.as_deref().unwrap_or("<none>"));
+                println!("row: {}", row.id.0);
+                print_lightning(&row);
+                Ok(())
+            }
+            "ln-status" => {
+                let id = parts
+                    .next()
+                    .ok_or_else(|| anyhow!("usage: ln-status <id>"))?;
+                let id = LightningId(id.to_owned());
+                let row = lightning::refresh_row(&client, &journal, &id).await?;
+                print_lightning(&row);
+                if let Some(invoice) = &row.invoice {
+                    println!("  invoice: {invoice}");
+                }
+                Ok(())
+            }
+            "ln-list" => {
+                for row in journal.lightning_all().await? {
+                    let row = if row.state == berlin_wallet_core::journal::LightningState::Pending
+                        && row.operation_id.is_some()
+                    {
+                        lightning::refresh_row(&client, &journal, &row.id)
+                            .await
+                            .unwrap_or(row)
+                    } else {
+                        row
+                    };
+                    print_lightning(&row);
+                }
+                Ok(())
+            }
+            "ln-gateways" => {
+                for gateway in lightning::list_gateways(&client).await? {
+                    println!("{gateway}");
+                }
+                Ok(())
+            }
             "status" => {
                 let id = parts
                     .next()
@@ -1035,6 +1125,29 @@ fn net_credit_display(net_credit: Option<fedimint_core::Amount>) -> String {
     match net_credit {
         Some(net_credit) => format!("{} msat", net_credit.msats),
         None => "pending (operation fee not available yet)".to_owned(),
+    }
+}
+
+fn print_lightning(row: &LightningRow) {
+    println!(
+        "{} {:?} {:?} {} msat state={:?} op={:?} payment_hash={:?} preimage={:?}",
+        row.id.0,
+        row.kind,
+        row.origin,
+        row.amount_msat,
+        row.state,
+        row.operation_id,
+        row.payment_hash,
+        row.preimage
+    );
+    if let Some(gateway) = &row.gateway {
+        println!("  gateway: {gateway}");
+    }
+    if let Some(fee) = row.gateway_fee_msat {
+        println!("  gateway fee: {fee} msat");
+    }
+    if let Some(err) = &row.last_error {
+        println!("  error: {err}");
     }
 }
 

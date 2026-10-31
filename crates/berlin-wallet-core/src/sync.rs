@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, broadcast::error::TryRecvError, watch};
 use crate::bdk::BdkWallet;
 use crate::deposit;
 use crate::journal::{DepositState, Journal};
+use crate::lightning;
 use crate::ops::DepositId;
 use crate::withdrawal;
 
@@ -71,6 +72,20 @@ pub async fn adoption_task(
                     tracing::warn!(
                         ?err,
                         "withdrawal Send adoption failed; will retry next tick"
+                    );
+                }
+                if let Err(err) =
+                    lightning::adopt_lightning_operations(client_ref, &journal, federation_id).await
+                {
+                    tracing::warn!(
+                        ?err,
+                        "lightning operation adoption failed; will retry next tick"
+                    );
+                }
+                if let Err(err) = lightning::refresh_pending(client_ref, &journal).await {
+                    tracing::warn!(
+                        ?err,
+                        "lightning pending-state refresh failed; will retry next tick"
                     );
                 }
             }
