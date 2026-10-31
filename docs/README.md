@@ -10,6 +10,8 @@ documents are kept for history and may describe superseded assumptions.
 |---|---|
 | [`../README.md`](../README.md) | What the wallet is, pre-alpha status, “do not use yet” limits, build prerequisites, crate layout, license. |
 | [`JOURNAL.md`](JOURNAL.md) | Plain-language narrative of what was built and why, including the current CLI-first MVP scope decision. |
+| [`STATUS.md`](STATUS.md) | Machine-readable snapshot: MVP row status, backend coverage, live verification log, and open work by priority. |
+| [`TRACKING.md`](TRACKING.md) | The work queue, label/milestone taxonomy, status vocabulary, and the agent workflow. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries, data directory, journal format and invariants, deposit/withdrawal state machines, crash-safety windows, reorg handling, `[patch.crates-io]`, GUI gaps, unknowns. |
 | [`THREAT-MODEL.md`](THREAT-MODEL.md) | Trusted parties, what breaks if the federation/Esplora/BDK/OS/mnemonic/backups/data-directory assumptions fail, and explicit out-of-scope items. |
 | [`../SECURITY.md`](../SECURITY.md) | Reporting a vulnerability, scope, supported versions, known-weak list, advisory policy. |
@@ -37,6 +39,8 @@ documents are kept for history and may describe superseded assumptions.
 ## Where to look for a specific topic
 
 - **How the project got here / why the current scope changed:** `JOURNAL.md`.
+- **What is left, who owns it, and what is verified:** `STATUS.md` and the open
+  GitHub issues; the workflow is `TRACKING.md`.
 - **Why the journal is safe/unsafe:** `ARCHITECTURE.md` §5 and §8;
   `API-VERIFICATION.md` §18, §22, §27.
 - **Deposit flow:** `ARCHITECTURE.md` §6; `crates/berlin-wallet-core/src/deposit.rs`;

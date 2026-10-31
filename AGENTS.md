@@ -2,12 +2,15 @@
 
 ## Read first
 
-Every new session must read this file and [`docs/JOURNAL.md`](docs/JOURNAL.md)
-before changing code, docs, or the roadmap. `AGENTS.md` holds current scope and
-working rules; the journal explains how the project got here. Neither replaces
-the source or `docs/API-VERIFICATION.md` for current API behavior.
+Every new session must read this file, [`docs/STATUS.md`](docs/STATUS.md), and
+[`docs/JOURNAL.md`](docs/JOURNAL.md) before changing code, docs, or the roadmap.
+`AGENTS.md` holds current scope and working rules; `STATUS.md` is the dated
+snapshot and the open queue lives in GitHub Issues; the journal explains how the
+project got here. [`docs/TRACKING.md`](docs/TRACKING.md) defines the labels,
+milestones, status vocabulary, and the agent protocol. None of these replaces the
+source or `docs/API-VERIFICATION.md` for current API behavior.
 
-## Current scope (2026-10-22)
+## Current scope (2026-10-30)
 
 The near-term product is a **CLI-first MVP**. Desktop GUI and mobile are deferred
 until after the MVP.
@@ -20,13 +23,16 @@ In scope:
 - Three BDK chain backends: Esplora, Electrum, and bitcoind RPC.
 - Restore/backup, crash safety, deposit fee preview, and `watch` progress.
 
-Current reality: peg-in/peg-out and ecash balance are live-tested. Lightning
-(`lnv2`) is **not implemented or registered**. All three BDK chain backends are
-wired behind `chain::ChainBackend`, but only Esplora has live coverage; Electrum
-and bitcoind RPC have unit coverage and no live run yet. The BDK path can reveal
-addresses and fund deposits, but a first-class arbitrary on-chain send is not
-built yet, and the crash matrix still has known uncovered windows. See
-`ROADMAP.md` for the MVP checklist.
+Current reality: peg-in/peg-out and ecash balance are live-tested; the combined
+`deposit` path is under investigation (#14: a funded row can stall in
+`AddressShown`, and the federation may not observe the funding transaction).
+Lightning (`lnv2`) is **not implemented or registered**. All three BDK chain
+backends are wired behind `chain::ChainBackend`; Esplora and bitcoind RPC have
+live coverage (bitcoind's reorg path was verified on 2026-10-24), while Electrum
+is unit-only. The BDK path can reveal addresses and fund deposits, but a
+first-class arbitrary on-chain send is not built yet, and the crash matrix still
+has known uncovered windows. See `ROADMAP.md` for the MVP checklist and
+`docs/STATUS.md` for the current snapshot.
 
 ## Crate layout
 

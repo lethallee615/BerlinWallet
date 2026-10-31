@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/lethallee615/BerlinWallet/security/policy
+    about: Do not open a public issue for a vulnerability. Read SECURITY.md first.
+  - name: Documentation index
+    url: https://github.com/lethallee615/BerlinWallet/blob/main/docs/README.md
+    about: Architecture, API verification, journal, roadmap, and status.
+  - name: How work is tracked
+    url: https://github.com/lethallee615/BerlinWallet/blob/main/docs/TRACKING.md
+    about: Labels, milestones, status vocabulary, and the agent workflow.

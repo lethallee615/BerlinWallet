@@ -1,0 +1,70 @@
+name: Feature or task
+description: A scoped unit of work with a testable definition of done.
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing or wrong today, and who is affected?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: The smallest change that solves the problem. Name the crate/module if known.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable statements. Include the gate (unit, live, audit) for each.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence plan
+      description: What will be attached when this closes? PR, test names, live run, doc section.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - core
+        - cli
+        - ffi
+        - chain
+        - build
+        - ci
+        - docs
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "P0: funds at risk or the primary flow is broken"
+        - "P1: MVP blocker"
+        - "P2: later hardening"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This is part of the CLI-first MVP (ROADMAP.md).
+        - label: This needs a live devimint or Mutinynet run before it can close.
+        - label: This is blocked by an upstream Fedimint or BDK change.

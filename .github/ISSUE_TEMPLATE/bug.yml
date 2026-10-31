@@ -1,0 +1,82 @@
+name: Bug report
+description: Something is broken, unsafe, or differs from the documented behavior.
+title: "bug: "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include seed words, invite codes, RPC credentials, or API tokens.
+        For a security vulnerability, use SECURITY.md instead of a public issue.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The exact command and the observed state. Quote the output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What the source, docs, or roadmap says should happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduce
+      description: Steps, data-dir state, federation, chain backend, and build commit.
+      placeholder: |
+        1. cargo run -- ...
+        2. deposit 1000
+        3. status <id>
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        Commit, backend, txid, relevant log lines, `status` output, and any
+        journal row. Use 4-space indented code blocks.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - core
+        - cli
+        - ffi
+        - chain
+        - build
+        - ci
+        - docs
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "P0: funds at risk or the primary flow is broken"
+        - "P1: MVP blocker"
+        - "P2: later hardening"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: verification
+    attributes:
+      label: Verification
+      options:
+        - label: This needs a live devimint or Mutinynet run before it can close.
+        - label: This reproduces on a fresh data directory.
