@@ -129,14 +129,16 @@ This is the work that must happen before “real use” is more than an aspirati
 
 ### Encryption at rest and encrypted backups
 
-- Encrypt the mnemonic at rest, or store the seed in a platform keystore, with a
-  documented recovery path. The current `<data-dir>/mnemonic` is plaintext.
-- Define an authenticated encrypted backup format (or use `age`/`gpg` with a
-  documented, tested procedure) and include a version/format identifier.
-- Decide whether database encryption is required for `fedimint.rocksdb` and
-  `bdk.sqlite`, or whether full-disk encryption is the only supported boundary.
-- Test backup/import across crashes, WAL/SHM sidecars, RocksDB sidecars, and
-  stale backups. A backup is not useful if it cannot be restored.
+- [x] Encrypt the mnemonic at rest with an age passphrase and document the
+  recovery path. Legacy plaintext is migrated on first passphrase load.
+- [x] Define an authenticated, versioned age backup archive (`.berlin-wallet-backup.json`
+  format/version inside the encrypted tar).
+- [x] Full-disk encryption is the supported boundary for the live
+  `fedimint.rocksdb` and `bdk.sqlite`; application-level DB encryption is not
+  claimed.
+- [x] Test encrypted backup/import with wrong passphrases, tampering, WAL/SHM and
+  RocksDB sidecars, stale temporaries, existing destinations, and plaintext
+  source refusal. See `API-VERIFICATION.md` §56.
 
 ### State-machine and integration tests
 
@@ -267,11 +269,12 @@ These are not implemented today. See `docs/ARCHITECTURE.md` §11.
 
 ## Open decisions
 
-- Seed encryption design and recovery UX (passphrase, OS keystore, both?).
-- Backup encryption format and whether it becomes an application feature or stays
-  an operator procedure.
-- Whether database-level encryption is required in addition to full-disk
-  encryption.
+- ~~Seed encryption design and recovery UX~~ — resolved: age passphrase, atomic
+  encrypted mnemonic, documented legacy migration.
+- ~~Backup encryption format~~ — resolved: age-encrypted tar with a versioned
+  manifest and separate backup passphrase.
+- ~~Database-level encryption~~ — resolved: full-disk encryption is the live
+  database boundary; backups are application-encrypted.
 - How to select and configure the three chain backends, and which one becomes the
   default for each network.
 - `lnv2` gateway/lightning requirements, liquidity assumptions, and trust model.

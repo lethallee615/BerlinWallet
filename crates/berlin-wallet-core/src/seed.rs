@@ -11,27 +11,99 @@ use fedimint_core::module::registry::ModuleRegistry;
 use fedimint_derive_secret::{ChildId, DerivableSecret};
 use rand::{CryptoRng, RngCore};
 
+/// The age binary header. The mnemonic file is either this format or a legacy
+/// plaintext BIP39 phrase; see [`load_or_create_mnemonic`].
+const AGE_MAGIC: &[u8] = b"age-encryption.org/v1";
+
 /// Load the wallet mnemonic from `path`, creating and persisting a fresh
-/// 12-word BIP39 mnemonic if the file does not exist.
-pub fn load_or_create_mnemonic(path: &Path) -> anyhow::Result<Mnemonic> {
+/// encrypted 12-word BIP39 mnemonic if the file does not exist.
+///
+/// A legacy plaintext mnemonic is accepted once and immediately re-written in
+/// the encrypted age format with the supplied passphrase. An empty passphrase
+/// is rejected.
+pub fn load_or_create_mnemonic(path: &Path, passphrase: &str) -> anyhow::Result<Mnemonic> {
+    anyhow::ensure!(
+        !passphrase.is_empty(),
+        "wallet passphrase must not be empty"
+    );
+
     if path.exists() {
-        let phrase = std::fs::read_to_string(path)?;
-        Mnemonic::parse(phrase.trim())
-            .map_err(|err| anyhow::anyhow!("invalid mnemonic in {}: {err}", path.display()))
-    } else {
-        let mnemonic = Mnemonic::generate(12)
-            .map_err(|err| anyhow::anyhow!("could not generate mnemonic: {err}"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let bytes = std::fs::read(path)?;
+        if is_encrypted_mnemonic(&bytes) {
+            let plaintext = decrypt_bytes(passphrase, &bytes).map_err(|err| {
+                anyhow::anyhow!(
+                    "could not decrypt mnemonic in {} (wrong passphrase or corrupt file): {err:#}",
+                    path.display()
+                )
+            })?;
+            let phrase = String::from_utf8(plaintext)
+                .map_err(|_| anyhow::anyhow!("decrypted mnemonic is not UTF-8"))?;
+            return Mnemonic::parse(phrase.trim())
+                .map_err(|err| anyhow::anyhow!("invalid mnemonic in {}: {err}", path.display()));
         }
-        std::fs::write(path, mnemonic.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(mnemonic)
+
+        // Legacy plaintext from before at-rest encryption. Migrate it on this
+        // successful load; the caller supplied the new passphrase.
+        let phrase = String::from_utf8(bytes)
+            .map_err(|_| anyhow::anyhow!("legacy mnemonic in {} is not UTF-8", path.display()))?;
+        let mnemonic = Mnemonic::parse(phrase.trim())
+            .map_err(|err| anyhow::anyhow!("invalid mnemonic in {}: {err}", path.display()))?;
+        tracing::warn!(
+            path = %path.display(),
+            "legacy plaintext mnemonic encrypted with the supplied passphrase"
+        );
+        write_mnemonic_atomic(path, &mnemonic, passphrase)?;
+        return Ok(mnemonic);
     }
+
+    let mnemonic = Mnemonic::generate(12)
+        .map_err(|err| anyhow::anyhow!("could not generate mnemonic: {err}"))?;
+    write_mnemonic_atomic(path, &mnemonic, passphrase)?;
+    Ok(mnemonic)
+}
+
+/// Whether a mnemonic file is in the encrypted age format.
+pub fn is_encrypted_mnemonic(bytes: &[u8]) -> bool {
+    bytes.starts_with(AGE_MAGIC)
+}
+
+fn write_mnemonic_atomic(path: &Path, mnemonic: &Mnemonic, passphrase: &str) -> anyhow::Result<()> {
+    let encrypted = encrypt_bytes(passphrase, mnemonic.to_string().as_bytes())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension(format!("tmp-{}", uuid::Uuid::now_v7()));
+    std::fs::write(&temp, encrypted)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&temp, path)?;
+    Ok(())
+}
+
+fn encrypt_bytes(passphrase: &str, plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use age::secrecy::SecretString;
+
+    let encryptor = age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_owned()));
+    let mut output = Vec::new();
+    let mut writer = encryptor.wrap_output(&mut output)?;
+    writer.write_all(plaintext)?;
+    writer.finish()?;
+    Ok(output)
+}
+
+fn decrypt_bytes(passphrase: &str, ciphertext: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use age::secrecy::SecretString;
+
+    let decryptor = age::Decryptor::new_buffered(ciphertext)
+        .map_err(|err| anyhow::anyhow!("not an age file: {err}"))?;
+    let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_owned()));
+    let mut reader = decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity))?;
+    let mut plaintext = Vec::new();
+    reader.read_to_end(&mut plaintext)?;
+    Ok(plaintext)
 }
 
 /// BIP39 seed (64 bytes, empty passphrase) used for the BDK BIP32/BIP84
@@ -150,6 +222,53 @@ mod tests {
         let second = client_identity(&root, federation_id).expect("identity");
         assert_eq!(first, second);
         assert_eq!(first.len(), 64);
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "berlin-wallet-seed-{}-{name}",
+            uuid::Uuid::now_v7()
+        ))
+    }
+
+    #[test]
+    fn encrypted_mnemonic_round_trips_and_rejects_a_wrong_passphrase() {
+        let path = temp_path("mnemonic");
+        let first = load_or_create_mnemonic(&path, "correct horse").expect("create");
+        let bytes = std::fs::read(&path).expect("read");
+        assert!(is_encrypted_mnemonic(&bytes));
+        assert!(
+            !bytes
+                .windows(first.to_string().len())
+                .any(|window| window == first.to_string().as_bytes()),
+            "the plaintext phrase must not appear in the file"
+        );
+
+        let second = load_or_create_mnemonic(&path, "correct horse").expect("reload");
+        assert_eq!(second.to_string(), first.to_string());
+        assert!(load_or_create_mnemonic(&path, "wrong pass").is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_plaintext_mnemonic_is_migrated_on_load() {
+        let path = temp_path("legacy");
+        let mnemonic = Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .expect("valid mnemonic");
+        std::fs::write(&path, mnemonic.to_string()).expect("write legacy");
+        let loaded = load_or_create_mnemonic(&path, "new pass").expect("migrate");
+        assert_eq!(loaded.to_string(), mnemonic.to_string());
+        let bytes = std::fs::read(&path).expect("read");
+        assert!(is_encrypted_mnemonic(&bytes));
+        assert_eq!(
+            load_or_create_mnemonic(&path, "new pass")
+                .expect("reload")
+                .to_string(),
+            mnemonic.to_string()
+        );
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

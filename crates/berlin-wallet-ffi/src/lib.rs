@@ -235,14 +235,14 @@ impl PegWallet {
         })
     }
 
-    /// Create/load the mnemonic and record the network choice. This is
-    /// local-only and fast; joining or restoring is a separate async call.
-    pub fn init(&self, network: String) -> Result<InitView> {
+    /// Create/load the encrypted mnemonic and record the network choice. This
+    /// is local-only and fast; joining or restoring is a separate async call.
+    pub fn init(&self, network: String, passphrase: String) -> Result<InitView> {
         self.ensure_open()?;
         std::fs::create_dir_all(&self.data_dir)?;
         let network = init_network(&self.data_dir, parse_network(&network)?)?;
         let mnemonic_path = self.data_dir.join("mnemonic");
-        seed::load_or_create_mnemonic(&mnemonic_path)?;
+        seed::load_or_create_mnemonic(&mnemonic_path, &passphrase)?;
         Ok(InitView {
             data_dir: self.data_dir.display().to_string(),
             mnemonic_path: mnemonic_path.display().to_string(),
@@ -251,14 +251,19 @@ impl PegWallet {
     }
 
     /// Join (or open) a federation using this data directory.
-    pub async fn join(&self, invite_code: String, chain_source: String) -> Result<WalletInfo> {
+    pub async fn join(
+        &self,
+        invite_code: String,
+        chain_source: String,
+        passphrase: String,
+    ) -> Result<WalletInfo> {
         self.ensure_open()?;
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
         }
         std::fs::create_dir_all(&self.data_dir)?;
         let recorded = require_recorded_network(&self.data_dir)?;
-        let mnemonic = seed::load_or_create_mnemonic(&self.data_dir.join("mnemonic"))?;
+        let mnemonic = seed::load_or_create_mnemonic(&self.data_dir.join("mnemonic"), &passphrase)?;
         let seed = seed::mnemonic_seed(&mnemonic);
         let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
         let invite = InviteCode::from_str(&invite_code).context("invalid invite code")?;
@@ -306,9 +311,13 @@ impl PegWallet {
     /// the data directory already contains a joined client.
     /// `chain_source` `None` means "use the one recorded in `chain.json`".
     /// Passing a value changes it; the change is logged, never silent.
-    pub async fn open(&self, chain_source: Option<String>) -> Result<WalletInfo> {
+    pub async fn open(
+        &self,
+        chain_source: Option<String>,
+        passphrase: String,
+    ) -> Result<WalletInfo> {
         self.ensure_open()?;
-        self.open_existing(chain_source, None).await
+        self.open_existing(chain_source, None, passphrase).await
     }
 
     /// Restore a fresh data directory from the mnemonic. This performs the
@@ -318,6 +327,7 @@ impl PegWallet {
         invite_code: String,
         chain_source: String,
         network: String,
+        passphrase: String,
     ) -> Result<RestoreView> {
         self.ensure_open()?;
         if self.inner.lock().await.is_some() {
@@ -334,7 +344,7 @@ impl PegWallet {
         if self.data_dir.join(BDK_DB_FILE).exists() {
             return Err(err("restore requires a fresh data dir (bdk.sqlite exists)"));
         }
-        let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path)?;
+        let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path, &passphrase)?;
         let seed = seed::mnemonic_seed(&mnemonic);
         let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
         let invite = InviteCode::from_str(&invite_code).context("invalid invite code")?;
@@ -410,32 +420,42 @@ impl PegWallet {
     /// The invite is still required to verify/open the client.
     pub async fn restore_backup(
         &self,
-        source_dir: String,
+        source_file: String,
         invite_code: String,
         chain_source: Option<String>,
+        backup_passphrase: String,
+        wallet_passphrase: String,
     ) -> Result<WalletInfo> {
         self.ensure_open()?;
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
         }
-        let source = PathBuf::from(source_dir);
+        let source = PathBuf::from(source_file);
         let target = self.data_dir.clone();
-        tokio::task::spawn_blocking(move || backup::import_data_dir(&target, &source))
-            .await
-            .map_err(|e| err(format!("backup import task failed: {e}")))??;
+        tokio::task::spawn_blocking(move || {
+            backup::import_data_dir(&target, &source, &backup_passphrase)
+        })
+        .await
+        .map_err(|e| err(format!("backup import task failed: {e}")))??;
         let invite = InviteCode::from_str(&invite_code).context("invalid invite code")?;
-        self.open_existing(chain_source, Some(invite.federation_id()))
-            .await
+        self.open_existing(
+            chain_source,
+            Some(invite.federation_id()),
+            wallet_passphrase,
+        )
+        .await
     }
 
     /// Full-directory backup. Fails loudly if the client DB is live.
-    pub async fn backup(&self, destination_dir: String) -> Result<()> {
+    pub async fn backup(&self, destination_file: String, backup_passphrase: String) -> Result<()> {
         self.ensure_open()?;
         let source = self.data_dir.clone();
-        let destination = PathBuf::from(destination_dir);
-        tokio::task::spawn_blocking(move || backup::backup_data_dir(&source, &destination))
-            .await
-            .map_err(|e| err(format!("backup task failed: {e}")))??;
+        let destination = PathBuf::from(destination_file);
+        tokio::task::spawn_blocking(move || {
+            backup::backup_data_dir(&source, &destination, &backup_passphrase)
+        })
+        .await
+        .map_err(|e| err(format!("backup task failed: {e}")))??;
         Ok(())
     }
 
@@ -773,6 +793,7 @@ impl PegWallet {
         &self,
         chain_source: Option<String>,
         expected_federation: Option<FederationId>,
+        passphrase: String,
     ) -> Result<WalletInfo> {
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
@@ -784,7 +805,7 @@ impl PegWallet {
                 mnemonic_path.display()
             )));
         }
-        let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path)?;
+        let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path, &passphrase)?;
         let seed = seed::mnemonic_seed(&mnemonic);
         let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
         let recorded = require_recorded_network(&self.data_dir)?;
@@ -1013,7 +1034,7 @@ mod tests {
         let wallet = PegWallet::new(std::env::temp_dir().to_string_lossy().into_owned());
         wallet.shutdown().await.expect("first shutdown");
         let error = wallet
-            .init("regtest".into())
+            .init("regtest".into(), "pass".into())
             .expect_err("init after shutdown");
         assert!(error.to_string().contains("create a new PegWallet"));
         let error = wallet
@@ -1022,11 +1043,25 @@ mod tests {
             .expect_err("balance after shutdown");
         assert!(error.to_string().contains("create a new PegWallet"));
         let error = wallet
-            .open(Some("http://127.0.0.1:1".to_owned()))
+            .open(Some("http://127.0.0.1:1".to_owned()), "pass".into())
             .await
             .expect_err("open after shutdown");
         assert!(error.to_string().contains("create a new PegWallet"));
         wallet.shutdown().await.expect("idempotent shutdown");
+    }
+
+    #[test]
+    fn init_encrypts_the_mnemonic_and_requires_the_passphrase() {
+        let dir =
+            std::env::temp_dir().join(format!("berlin-wallet-ffi-init-{}", uuid::Uuid::now_v7()));
+        let wallet = PegWallet::new(dir.to_string_lossy().into_owned());
+        wallet
+            .init("regtest".into(), "wallet pass".into())
+            .expect("init");
+        let bytes = std::fs::read(dir.join("mnemonic")).expect("mnemonic");
+        assert!(seed::is_encrypted_mnemonic(&bytes));
+        assert!(wallet.init("regtest".into(), "wrong".into()).is_err());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]

@@ -98,6 +98,7 @@ from the devimint shell.
 
 ```bash
 export BERLIN_WALLET_DATA_DIR=/tmp/bw-gate-14
+export BERLIN_WALLET_PASSPHRASE=devimint-wallet-pass
 export RUST_LOG=debug
 rm -rf "$BERLIN_WALLET_DATA_DIR"
 ./target/debug/berlin-wallet init \
@@ -115,7 +116,8 @@ $FM_BTC_CLIENT generatetoaddress 1 \
 ```
 
 Using `$FM_BITCOIN_RPC_URL` is deliberate: the CLI and the federation must observe
-the same chain. A different node is the first thing to suspect when a confirmed
+the same chain. The passphrase is prompted if the env var is unset; backups use
+`BERLIN_WALLET_BACKUP_PASSPHRASE` and a destination file (an age archive). A different node is the first thing to suspect when a confirmed
 deposit is invisible to the federation.
 
 ## 4. Run and deposit

@@ -921,11 +921,12 @@ not perform a full gap scan; a restored wallet with unknown historical addresses
 
 `crates/berlin-wallet-cli` (binary `berlin-wallet`) is a manual-run harness:
 
-- `init` — create/open the BIP39 mnemonic and SQLite BDK wallet, print a regtest address/balance.
+- `init --network <net>` — create/open the age-encrypted BIP39 mnemonic and SQLite BDK wallet,
+  print a regtest address/balance; prompts for a wallet passphrase (env for automation).
 - `join <invite>` — build a client, print federation id, client identity, wallet network, and minimum withdrawal.
-- `backup <destination-dir>` / `restore-backup <source-dir>` — full data-directory tree copy
-  (`mnemonic`, `bdk.sqlite` + `-wal`/`-shm`, `fedimint.rocksdb` and sidecars); non-blocking DB lock
-  check; app must be stopped; encryption is external.
+- `backup <destination-file>` / `restore-backup <source-file>` — age-encrypted tar of the full data
+  directory (`mnemonic`, `bdk.sqlite` + `-wal`/`-shm`, `fedimint.rocksdb` and sidecars); separate
+  backup passphrase; non-blocking DB lock check; app must be stopped.
 - `restore <invite> [esplora-url] [expected-fed-id] [expected-client-identity]` — recover on a fresh
   data dir, assert identity/federation, then full-scan BDK.
 - `run <invite> [esplora-url]` — interactive session with `balance`, `ecash-balance`, `address`,
@@ -2002,27 +2003,27 @@ The UI must make this prominent, not a footnote.
 
 ### 31.2 App-level backup decision
 
-Decision: **documented full-directory copy** (not an in-app encrypted archive yet). Fedimint backup
-APIs are deprecated; the app owns the artifact. The CLI implements:
+Decision: **age-encrypted archive** (see §56). Fedimint backup APIs are deprecated; the app owns
+the artifact. The CLI implements:
 
 ```text
-berlin-wallet backup <destination-dir>
-berlin-wallet restore-backup <source-dir>
+berlin-wallet backup <destination-file>
+berlin-wallet restore-backup <source-file>
 ```
 
-- `backup` copies the **entire data directory tree**, not a file list, so SQLite `bdk.sqlite-wal` /
-  `-shm` and all `fedimint.rocksdb` files/sidecars are included. It physically cannot lose recent
-  BDK WAL commits. It refuses a non-empty destination and must run with the app stopped.
-- **Lock check:** before copying, `backup` takes a non-blocking try-lock on the same advisory lock
+- `backup` packages the **entire data directory tree**, not a file list, into a tar inside an age
+  passphrase-encrypted file, so SQLite `bdk.sqlite-wal` / `-shm` and all `fedimint.rocksdb`
+  files/sidecars are included. It refuses an existing destination and must run with the app stopped.
+- **Lock check:** before reading, `backup` takes a non-blocking try-lock on the same advisory lock
   fedimint-rocksdb uses (`source/fedimint.rocksdb`.with_extension(`.db.lock`) →
   `source/fedimint.db.lock`). If held, it exits nonzero:
-  `database is locked (...); stop the wallet before running backup`. This was verified against a
-  live `run` process.
-- `restore-backup` requires an empty data dir and copies the whole tree back.
-- **Encryption:** the backup is **unencrypted by design**; the operator must use `age`/`gpg` or
-  equivalent. The mnemonic is inside the archive — treat the archive as key material.
-- After import, start normally with `run`; **do not call `restore`**. The retained client DB is what
-  preserves the walletv2 scanner/index state and the operation log.
+  `database is locked (...); stop the wallet before running backup`.
+- `restore-backup` requires an empty data dir and decrypts/validates the archive before renaming the
+  tree into place.
+- **Encryption:** age passphrase encryption provides an authenticated, versioned container; the
+  backup passphrase is separate from the wallet passphrase. The archive is key material.
+- After import, start normally with `run` and the wallet passphrase; **do not call `restore`**. The
+  retained client DB preserves the walletv2 scanner/index state and the operation log.
 - **A journal-only export is not a recovery backup** and does not fix stranded deposits. The
   scanner/address-index state lives in the client DB.
 
@@ -2149,13 +2150,14 @@ read-only Esplora client.
 ```rust
 PegWallet::new(data_dir: String) -> Arc<PegWallet>;
 
-init() -> Result<InitView>;                                  // mnemonic only, local
-open(esplora_url: String) -> Result<WalletInfo>;              // existing DB, no invite
-join(invite_code: String, esplora_url: String) -> Result<WalletInfo>; // fresh join only
-restore(invite_code: String, esplora_url: String) -> Result<RestoreView>; // fresh dir
-restore_backup(source_dir: String, invite_code: String, esplora_url: String)
-    -> Result<WalletInfo>;                                    // retained client DB
-backup(destination_dir: String) -> Result<()>;                // async
+init(network: String, passphrase: String) -> Result<InitView>; // mnemonic only, local
+open(chain_source: Option<String>, passphrase: String) -> Result<WalletInfo>; // existing DB
+join(invite_code: String, chain_source: String, passphrase: String) -> Result<WalletInfo>;
+restore(invite_code: String, chain_source: String, network: String, passphrase: String)
+    -> Result<RestoreView>;                                    // fresh dir
+restore_backup(source_file: String, invite_code: String, chain_source: Option<String>,
+               backup_passphrase: String, wallet_passphrase: String) -> Result<WalletInfo>;
+backup(destination_file: String, backup_passphrase: String) -> Result<()>; // async
 shutdown() -> Result<()>;                                     // stop tasks/client, release locks
 
 request_deposit(amount_sat: u64) -> Result<DepositView>;
@@ -2208,12 +2210,13 @@ must re-display and re-confirm.
 
 ### 33.2.1 Open/shutdown contract
 
-- `init()` only creates/loads the mnemonic.
-- `open(esplora_url)` is the no-invite path for an existing client DB (`ClientBuilder::open` via
-  `open_existing_client`); use it on app restart.
-- `join(invite, esplora_url)` is fresh-join only and errors if a client config already exists.
-- `restore` is mnemonic-only fresh recovery; `restore_backup` imports the full directory and opens
-  the retained client DB (verifying the invite's federation id).
+- `init(network, passphrase)` only creates/loads the age-encrypted mnemonic.
+- `open(chain_source, passphrase)` is the no-invite path for an existing client DB
+  (`ClientBuilder::open` via `open_existing_client`); use it on app restart.
+- `join(invite, chain_source, passphrase)` is fresh-join only and errors if a client config already
+  exists.
+- `restore` is mnemonic-only fresh recovery; `restore_backup` decrypts/imports the age archive and
+  opens the retained client DB (verifying the invite's federation id).
 - `shutdown()` is **terminal for that instance**: it sets a closed flag, takes the state, sends the
   watch shutdown signal, waits up to 5 s per task and aborts stragglers, then consumes `ClientHandle`
   via `ClientHandle::shutdown` to stop the executor/task group. Every other method after shutdown
@@ -2520,8 +2523,8 @@ The `blk*.dat` path fails even with the correct `regtest` subdirectory;
 Restore recovers client identity and balances exactly, but 0.12.0 does not resume
 in-flight operations and there is no public re-claim path: a fresh restore produces
 an empty operation log and an in-flight deposit is stranded. Hence the recovery
-story is "mnemonic + client data directory", and backup is unencrypted by design
-(age/gpg it).
+story is "mnemonic + client data directory"; the mnemonic and full-directory backup are
+age-encrypted (the live databases rely on full-disk encryption).
 
 Still open: a reorg that orphans a *credited deposit* — whether the watermark or
 `net_credit` can double-count. The BDK side is now proven correct, so this test is
@@ -2679,8 +2682,9 @@ The error is resolvable without reintroducing a silent fallback:
   directory. A different network needs a fresh directory.
 
 The FFI follows the same rule and is a breaking signature change, as agreed:
-`PegWallet::init(network: String)`, `PegWallet::restore(invite_code,
-chain_source, network: String)`, and `InitView` gains `network`. `join` and
+`PegWallet::init(network: String, passphrase: String)`, `PegWallet::restore(invite_code,
+chain_source, network: String, passphrase: String)`, and `InitView` gains `network`; the
+passphrase is the at-rest mnemonic passphrase (§56). `join` and
 `open` do not take a network; they require the recorded file and verify it, so
 an app cannot skip the choice. `WalletState` carries the verified
 `bitcoin::Network`.
@@ -3313,3 +3317,73 @@ lock. The existing `tracing_init_is_idempotent` test covers repeated
 initialization; the filter is only narrowed at shutdown.
 
 Tests remain 111 core pass + 1 devimint-only ignored, 7 CLI, 5 FFI.
+
+## 56. Encrypted mnemonic and encrypted backups (2026-10-31)
+
+### Mnemonic at rest
+
+- `seed::load_or_create_mnemonic(path, passphrase)` writes an **age** file using
+  `age::Encryptor::with_user_passphrase` (age 0.12.1, passphrase mode; scrypt +
+  ChaCha20-Poly1305, authenticated). The file starts with
+  `age-encryption.org/v1`; mode `0600`; writes are atomic (sibling temp + rename).
+- The wallet passphrase is **not** a BIP39 passphrase. The BIP39 seed still uses
+  the empty passphrase; this passphrase only protects the mnemonic at rest.
+- A legacy plaintext mnemonic is parsed once, re-written encrypted with the
+  supplied passphrase, and a WARN is emitted. `backup` refuses a source that is
+  still legacy plaintext until the wallet is run/init once with a passphrase.
+- Wrong passphrases and corrupt files fail with a clear decryption error.
+- The CLI prompts for a new/confirmed passphrase on `init`, and for the existing
+  passphrase on `run`/`join`/`restore`. Automation can set
+  `BERLIN_WALLET_PASSPHRASE` (`BERLIN_WALLET_BACKUP_PASSPHRASE` for archives).
+- The FFI requires the passphrase on `init`, `join`, `open`, `restore`,
+  `restore_backup`, and `backup`; it does not prompt.
+
+### Encrypted backup format
+
+`backup_data_dir(source, destination_file, passphrase)` produces a single age
+passphrase-encrypted tar. Inside the authenticated archive is
+`.berlin-wallet-backup.json`:
+
+```json
+{"format":"berlin-wallet-backup","version":1,"created_at":...}
+```
+
+The tar contains the whole directory, including the encrypted mnemonic,
+`chain.json`, `bdk.sqlite` + `-wal`/`-shm`, and `fedimint.rocksdb`. The command
+holds the fedimint DB lock and writes a uniquely named sibling tar/age temp; it
+renames only the complete archive into place. It refuses an existing
+destination. `import_data_dir` decrypts to a sibling temporary tar, validates
+every tar path (no absolute paths, `..`, links, or special files), verifies the
+manifest version/format and required files, extracts to a sibling temporary
+directory, and only then renames it into an empty target. Wrong passphrases,
+tampering, bad manifests, and partial imports leave the target untouched; stale
+temp files/directories are ignored.
+
+The live `fedimint.rocksdb` and `bdk.sqlite` files are **not**
+application-encrypted. Full-disk encryption (LUKS/FileVault/BitLocker) is the
+supported boundary for the live data directory; the age backup protects the
+archive itself. This is a deliberate trade-off, not a claim of DB-level
+encryption.
+
+### Live CLI check
+
+Source copied from the existing devimint data directory (`/tmp/bw-lnv2-gate` to
+`/tmp/bw-encryption-source`):
+
+- `init --network regtest` with `BERLIN_WALLET_PASSPHRASE=wallet-pass` migrated
+  the legacy plaintext mnemonic; the file then began `age-encryption.org/v1`.
+- The same command with the wrong passphrase failed:
+  `could not decrypt mnemonic ... Decryption failed`.
+- `backup /tmp/bw-encryption-backup.age` with
+  `BERLIN_WALLET_BACKUP_PASSPHRASE=backup-pass` produced a 1.5 MB mode-0600 age
+  file.
+- `restore-backup` into `/tmp/bw-encryption-restored` with the backup passphrase
+  restored the tree; the mnemonic was still the 252-byte age file.
+- `init --network regtest` on the restored directory with the wallet passphrase
+  opened successfully.
+
+Tests: 119 core pass + 1 devimint-only ignored, 7 CLI, 6 FFI. Core coverage
+includes encrypted mnemonic round trip/wrong passphrase/plaintext migration,
+backup/import with WAL/SHM and RocksDB sidecars, tampering, wrong passphrase,
+stale temp files/dirs, existing-archive refusal, plaintext-source refusal, and
+locked-DB refusal.

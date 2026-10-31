@@ -31,7 +31,7 @@ withdrawal moves it back out, subject to the federation's send and the chain.
 | Party | Trust assumption | What it can see |
 |---|---|---|
 | User | Trusted to keep the device, OS, mnemonic, and backups safe. | Everything. |
-| Local OS / LUKS | Trusted while running; LUKS is assumed to protect the disk only while locked. | The plaintext data directory and process memory once unlocked. |
+| Local OS / LUKS | Trusted while running; LUKS is assumed to protect the disk only while locked. | The decrypted mnemonic/seed and the plaintext live databases in process/disk once unlocked. |
 | BDK and the Rust dependency graph | Trusted code execution. No independent verification of signing or chain logic. | Whatever the process can see. |
 | Esplora server | Trusted for chain height, block hashes, transactions, UTXOs, and broadcast. | Every address/script the BDK wallet reveals, plus IP/timing; can link the wallet's on-chain history. |
 | Fedimint federation | Trusted as a threshold custodian for the peg. | Deposit/withdrawal addresses, amounts, timing, and the ecash operations it processes. |
@@ -93,7 +93,7 @@ The trust boundary differs by backend:
 - **bitcoind RPC** — your own node, or a node you are trusting with a wallet's
   query pattern. No third party sees the script set, but the node can still lie,
   and the RPC credentials live in `chain.json` at mode 0600 alongside the
-  plaintext mnemonic.
+  age-encrypted mnemonic.
 
 A single chain source creates a single linkability point: using one endpoint for
 the wallet's whole history lets that operator correlate the wallet's addresses —
@@ -129,8 +129,8 @@ licenses and advisory ignores; it does not prove the code is safe.
 LUKS/full-disk encryption protects the data directory at rest only while the
 volume is locked. Once the OS is running and the volume is unlocked:
 
-- the mnemonic file is readable by the user and by any process that can read the
-  data directory;
+- the encrypted mnemonic file is readable, but the wallet has decrypted it and
+  holds the seed in process memory;
 - the wallet process has the BIP39 seed and signing keys in memory;
 - the federation client has its root secret and database open;
 - malware, a compromised host, or a malicious FFI caller can read or manipulate
@@ -140,36 +140,40 @@ There is no hardware wallet, secure enclave, memory zeroization guarantee, or
 anti-keylogging layer. A locked screen is not a security boundary against a
 compromised OS.
 
-### The mnemonic in plaintext at rest
+### The mnemonic at rest
 
-`<data-dir>/mnemonic` is plaintext, mode `0600` on Unix. Anyone who can read it
-can derive both the BDK keys and the Fedimint root secret. This includes:
+`<data-dir>/mnemonic` is age-encrypted with the wallet passphrase, mode `0600` on
+Unix. An attacker who obtains the file alone must guess the passphrase; the same
+mnemonic can derive both the BDK keys and the Fedimint root secret. The live
+process necessarily holds the decrypted seed in memory, and a compromised
+running OS can read it. Losing the passphrase (with no backup key) loses the
+mnemonic; the passphrase is not recoverable from the federation.
 
-- another local user/process with read access (including root);
-- disk snapshots/backups;
-- a stolen unlocked or decrypted disk;
-- a data-directory backup copied to another machine.
+A legacy plaintext mnemonic is accepted once and migrated to ciphertext when the
+wallet is next run with a passphrase. Until that migration, it has the old
+plaintext exposure.
 
-The mnemonic is the common root for both wallets; compromising it compromises
-both balances. Encryption at rest is a roadmap item, not a current property.
+### Encrypted backups
 
-### Unencrypted backups
+`backup_data_dir` writes one age-encrypted tar (a separate backup passphrase)
+containing the **whole data directory**, the encrypted mnemonic, `bdk.sqlite`
+plus WAL/SHM sidecars, and the RocksDB directory. The archive has an
+authenticated manifest with format/version and is written via a temp file and
+rename; import decrypts to temp, validates paths/manifest, and renames into an
+empty target. Wrong passphrases and tampering fail authentication.
 
-`backup_data_dir` copies the **whole data directory**, including the mnemonic,
-`bdk.sqlite` plus WAL/SHM sidecars, and the RocksDB directory. The archive is not
-encrypted by the application. It:
+The archive still:
 
-- is as sensitive as the mnemonic;
-- can be read by anyone who obtains it;
+- is sensitive key material; losing the backup passphrase loses it;
 - may be stale or inconsistent if the operator ignores the "stop the wallet"
   rule;
 - passes the fedimint lock check but does not take a global BDK/RocksDB snapshot
   across both databases.
 
-Encrypt backups externally (`age`, `gpg`, an encrypted volume) until an
-authenticated, versioned encrypted archive exists. A backup failure can lose
-history or in-flight operations; a restored full directory is required to
-preserve the client operation log and scanner state.
+The live RocksDB/SQLite files are not application-encrypted; full-disk
+encryption is the supported boundary for the running data directory. A backup
+failure can lose history or in-flight operations; a restored full directory is
+required to preserve the client operation log and scanner state.
 
 ### Single-open data directory
 
@@ -217,13 +221,12 @@ is outside the wallet core's defense.
   design.
 - Federation governance, guardian compromise thresholds, and the legal or
   operational solvency of a federation.
-- Hardware wallets, multisig on the BDK side, secure elements, and password-based
-  seed encryption.
+- Hardware wallets, multisig on the BDK side, secure elements, and protection of
+  the decrypted seed while the process is running.
 - Mainnet operational security, monitoring, incident response, and exchange/
   custody integration.
 - Recovery from a compromised device after the seed has been exposed.
 - Multi-federation management and cross-federation privacy.
-- Encryption of backups by this application (the operator must do it).
 - Security of third-party Esplora, Fedimint, BDK, Rust, or platform code beyond
   the pinned versions and the tests in this repo.
 - Regulatory, tax, accounting, and legal compliance.
