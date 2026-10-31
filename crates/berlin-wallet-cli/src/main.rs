@@ -233,6 +233,7 @@ fn print_help() {
     println!("  cancel-deposit <deposit-id>         cancel an open deposit row");
     println!("  cancel-withdraw <withdrawal-id>     cancel a Quoting row");
     println!("  list-withdrawals                    list withdrawal rows");
+    println!("  list-deposits                       list deposit rows (including adopted)");
     println!("  operations                          print recent operation-log entries");
     println!("  operation-fees <operation-id>       show operation fees");
     println!("  await-change <operation-id>         await primary change outputs");
@@ -484,6 +485,21 @@ async fn run(
                     println!("change outputs finalized");
                 } else {
                     println!("timed out; withdrawal remains Submitted and will be retried");
+                }
+                Ok(())
+            }
+            "list-deposits" => {
+                for row in journal.deposits_all().await? {
+                    println!(
+                        "{} {:?} {:?} {} funding_txid={:?} op={:?} net_credit={:?}",
+                        row.id.0,
+                        row.origin,
+                        row.state,
+                        row.amount,
+                        row.funding_txid,
+                        row.operation_id,
+                        row.net_credit
+                    );
                 }
                 Ok(())
             }

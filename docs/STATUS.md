@@ -1,7 +1,7 @@
 # Project status
 
-Last updated: 2026-10-30
-Main at: d795885
+Last updated: 2026-10-31
+Main at: bf0ca2e
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -18,7 +18,7 @@ actually stands.
 | ID | Requirement | Status | Issues | Evidence |
 |---|---|---|---|---|
 | onchain-send | Arbitrary on-chain send with fee control and a recorded result | in-progress | #18 | Address reveal and balance exist; no send path |
-| peg-in-out | walletv2 deposit/claim and withdrawal/send | at-risk | #14 | `API-VERIFICATION.md` §25, §27; JOURNAL 2026-10-24 |
+| peg-in-out | walletv2 deposit/claim and withdrawal/send | live | — | `API-VERIFICATION.md` §25, §27, §45; live gate 2026-10-31 |
 | ecash-balance | mintv2 balance distinct from the BDK balance | live | — | `API-VERIFICATION.md` §25 |
 | lightning | lnv2 send/receive | todo | #19, #23 | Not registered or API-verified |
 | chain-backends | Esplora, Electrum, bitcoind RPC behind one contract | in-progress | #24 | Esplora live; bitcoind live reorg; Electrum unit only |
@@ -41,6 +41,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
+| 2026-10-31 | 100,000 sat deposit -> row `Done`, 99,577,856 msat credited; restart did not double credit | bitcoind RPC | pass | #14, §45 |
 | 2026-10-30 | Combined `deposit` stays in `AddressShown` | bitcoind RPC | fail | #14 |
 | 2026-10-26 | Orphaned-checkpoint rebuild names its scan floor | bitcoind RPC | pass | PR #13; JOURNAL 2026-10-25 |
 | 2026-10-24 | 10-block reorg over a credited deposit | bitcoind RPC | pass | JOURNAL 2026-10-24; §41 |
@@ -51,7 +52,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 
 | Priority | Issues |
 |---|---|
-| P0 | #14 |
+| P0 | — |
 | P1 | #10, #18, #19, #21, #23, #24, #25, #26 |
 | P2 | #9, #22, #27, #28, #29, #30 |
 

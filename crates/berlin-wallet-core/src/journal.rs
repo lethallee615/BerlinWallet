@@ -311,6 +311,8 @@ pub trait JournalBackend: Send + Sync {
     async fn close_deposit_done_if_open(
         &self,
         id: &DepositId,
+        operation_id: OperationId,
+        outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
         operation_fee: Option<fedimint_core::Amount>,
@@ -686,6 +688,8 @@ impl JournalBackend for MemoryJournal {
     async fn close_deposit_done_if_open(
         &self,
         id: &DepositId,
+        operation_id: OperationId,
+        outpoint: bitcoin::OutPoint,
         gross: bitcoin::Amount,
         fee: bitcoin::Amount,
         operation_fee: Option<fedimint_core::Amount>,
@@ -704,6 +708,13 @@ impl JournalBackend for MemoryJournal {
             DepositState::AwaitingAddress | DepositState::AddressShown
         ) {
             return Ok(());
+        }
+        if row.operation_id.is_none() {
+            row.operation_id = Some(operation_id);
+        }
+        if row.funding_outpoint.is_none() {
+            row.funding_outpoint = Some(outpoint);
+            row.funding_txid = Some(outpoint.txid);
         }
         if row.net_credit.is_none() {
             row.gross_deposited = Some(gross);
@@ -1282,6 +1293,51 @@ mod tests {
             row.state,
             DepositState::AwaitingAddress,
             "recording the funded output must not claim or advance the row"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_an_open_row_from_an_adopted_claim_records_the_operation() {
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+        let row = journal
+            .insert_deposit(&DepositRow::requested(
+                DepositId::new(),
+                federation_id,
+                EventLogId::LOG_START,
+                bitcoin::Amount::from_sat(100_000),
+            ))
+            .await
+            .expect("insert");
+        let operation_id = OperationId::new_random();
+
+        journal
+            .close_deposit_done_if_open(
+                &row.id,
+                operation_id,
+                bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x77; 32]), 0),
+                bitcoin::Amount::from_sat(100_000),
+                bitcoin::Amount::from_sat(316),
+                None,
+            )
+            .await
+            .expect("close from adopted claim");
+
+        let row = journal.deposit(&row.id).await.unwrap().unwrap();
+        assert_eq!(row.state, DepositState::Done);
+        assert_eq!(
+            row.operation_id,
+            Some(operation_id),
+            "the operation id must be recorded even when adoption won the bind"
+        );
+        assert_eq!(
+            row.gross_deposited,
+            Some(bitcoin::Amount::from_sat(100_000))
+        );
+        assert_eq!(row.claim_fee, Some(bitcoin::Amount::from_sat(316)));
+        assert_eq!(
+            row.net_credit, None,
+            "an unknown operation fee must stay pending, not become zero"
         );
     }
 

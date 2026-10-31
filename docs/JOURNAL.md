@@ -4,6 +4,29 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-31 — Adoption and the watcher stop racing on a deposit claim
+
+The live gate for #14 succeeded at the federation layer: a 100,000 sat deposit
+produced a walletv2 Receive operation with the expected outpoint and outcome
+`Success`, and the ecash balance rose by 99,577 sat. The requested journal row
+still said `AddressShown`.
+
+`adopt_orphan_claims` and the per-deposit observer both act on the same
+successful claim. Adoption only checked the claim-ownership map, so when the
+requested row had not bound yet it inserted an `Adopted` row. That marked the
+outpoint bound; the observer's scan filtered bound outpoints, so it could no
+longer close the requested row. The result was two rows for one deposit: a
+correct `Adopted` row and a stranded `Requested` one.
+
+Adoption now matches an open requested row by address script and amount first,
+binds or closes that row with the claim's figures, and only creates an
+`Adopted` row when no open row matches. `close_deposit_done_if_open` records the
+operation id as well as the gross and claim fee, so the repaired row is
+auditable. The observer scans all claims, not only unbound ones, so it can close
+its row even when adoption won the bind. `list-deposits` prints every row,
+including `Adopted`, because the previous CLI could not show the row that had
+taken the claim.
+
 ## 2026-10-30 — A funded deposit is followed in the background
 
 `deposit` and `fund-deposit` used to broadcast the funding transaction and
