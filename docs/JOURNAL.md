@@ -1,5 +1,30 @@
 # Journal
 
+## 2026-10-31 — The crash matrix runs in CI
+
+The crash matrix is now a deterministic test module instead of a manual
+Mutinynet checklist. Each test performs a partial operation, drops the journal,
+reopens the same database, and asserts the exactly-once transition.
+
+The CI suite covers address-shown before funding, funding broadcast before
+claim, a restart during confirmation, a restart after `Done`, the
+`send()`-before-operation-id window via boot adoption, the final-send-state
+before `Broadcast`, and a change-output timeout that leaves the row `Submitted`
+for the next reconciliation. The confirmation test replays the claim after
+restart and proves one binding, one `Done` row, and one credit; a later row
+cannot steal the outpoint.
+
+One window cannot be reproduced with the in-memory journal: the real network
+broadcast happens before BDK persistence and the journal's `funding_txid` write.
+That test is explicitly `#[ignore]`d as devimint-only, and the list lives in
+`crash_matrix::DEVIMINT_ONLY_WINDOWS` so CI fails if the exception is removed
+from the documented matrix. The live `fault::crash_point` hooks gained
+`after_deposit_address` and `after_deposit_done` alongside the existing deposit
+broadcast, withdrawal send, and broadcast hooks.
+
+These tests prove the app-level recovery transitions, not the federation's
+underlying exactly-once behavior; the live §27 evidence remains necessary for
+that. Tests: 111 core pass + 1 ignored, 5 CLI, 6 FFI.
 ## 2026-10-31 — Restore assertions and a balance-settlement race
 
 The restore contract is now asserted rather than only described. A small

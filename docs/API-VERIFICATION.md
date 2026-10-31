@@ -1512,6 +1512,9 @@ The row now equals the real credited delta. The CLI `status`/`watch` output rend
 
 ## 27. Crash/restart matrix (Mutinynet)
 
+The deterministic CI matrix is now in §53; these Mutinynet notes remain the
+live evidence, and §53 marks the one window that still needs devimint.
+
 Data dir `/tmp/opencode/berlin-join`; all rows/journal/client state in RocksDB. "Kill" means
 `SIGKILL`/`abort`, then a fresh process reopens the same DB. `BERLIN_WALLET_CRASH_POINT` is a
 debug-only fault injection: `fault.rs` is gated by `#[cfg(debug_assertions)]` and is a no-op in
@@ -3209,3 +3212,37 @@ balance before the recovered-notes output state machine ran. The active-state
 wait in `recover_client` fixed it; the final run above is the post-fix result.
 
 Tests: 103 core, 5 CLI, 6 FFI.
+
+
+## 53. Automated crash/restart matrix (2026-10-31)
+
+The deterministic matrix lives in `crates/berlin-wallet-core/src/crash_matrix.rs`
+and runs as part of `cargo test --workspace` (no federation required). Each test
+performs a partial operation, drops the `Journal` (the process crash), reopens
+the same `Database`, and asserts the exactly-once invariant.
+
+| Window | Deterministic test | Assertion after restart |
+|---|---|---|
+| Address shown before funding | `address_shown_before_funding_survives_restart` | `AddressShown`, no funding txid, one open row; a retry reuses it; cancel releases the slot. |
+| Funding broadcast before claim | `funding_broadcast_before_claim_survives_restart_without_rebroadcast` | The recorded funding txid is still present; the retry path returns it rather than rebuilding. |
+| Crash during confirmation | `confirmation_restart_claims_exactly_once` | `claim_bind` is idempotent for the owner; a replay of `finish_deposit` leaves one `Done` row, one `net_credit`, and one bound outpoint; a later row cannot steal the outpoint. |
+| Crash after `Done` | `crash_after_done_keeps_one_credit_and_releases_the_slot` | One `Done` row and credit; no open row; a new deposit is accepted. |
+| After `send()` before operation id | `send_after_send_before_operation_id_is_adopted_without_resend` | The boot adoption binds the existing `Quoting` row by `custom_meta.id`/operation id; one row, no second send; repeated adoption dedups. |
+| Final send state before `Broadcast` | `final_send_state_before_broadcast_restart_sets_broadcast_once` | The row is `Submitted` with the operation id and is retried; `set_broadcast` is idempotent and releases the slot. |
+| Change-output finalization timeout | `change_output_timeout_keeps_submitted_for_retry` | A timed-out change wait leaves `Submitted`; the reconciliation query still finds it; a later retry writes `Broadcast` once. |
+| Broadcast before BDK/journal persistence | `after_broadcast_before_bdk_and_journal_persistence` (`#[ignore]`) | **Devimint-only and currently uncovered.** The network broadcast precedes both BDK persistence and the journal's `funding_txid` write; the in-memory journal cannot reproduce that boundary. The deterministic suite starts once the txid exists. The adjacent post-persistence live window is §27.2; this narrower boundary has no live test yet. |
+
+`fault::crash_point` hooks remain the live-process counterpart:
+`after_deposit_address`, `after_deposit_broadcast`, `after_deposit_done`,
+`after_send`, and `after_broadcast`. The ignored test is listed in
+`crash_matrix::DEVIMINT_ONLY_WINDOWS`; the CI matrix asserts that the list is
+explicit so a future uncovered window cannot be added silently. The narrow
+broadcast-before-persistence window remains a documented live gap, not a
+CI-proven guarantee.
+
+The journal tests prove the app-level exactly-once transitions. They do not
+replace the live evidence that the federation/walletv2 issued or broadcast the
+underlying operation once (§27); they prove the recovery path cannot create a
+second row, second claim owner, or second broadcast transition.
+
+Tests: 111 core pass + 1 devimint-only ignored, 5 CLI, 6 FFI.

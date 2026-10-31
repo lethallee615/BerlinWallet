@@ -131,9 +131,11 @@ pub async fn run_address_task(
         }
     };
 
-    journal
+    let result = journal
         .set_deposit_address_if(id, address.into_unchecked(), DepositState::AwaitingAddress)
-        .await
+        .await?;
+    crate::fault::crash_point("after_deposit_address");
+    Ok(result)
 }
 
 /// Idempotently fund a deposit from the BDK wallet.
@@ -307,6 +309,7 @@ pub async fn watch_deposit(
                 .await?;
         }
     }
+    crate::fault::crash_point("after_deposit_done");
     Ok(())
 }
 
