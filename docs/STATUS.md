@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: b9262d8
+Main at: cbfe516
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -24,7 +24,7 @@ actually stands.
 | chain-backends | Esplora, Electrum, bitcoind RPC behind one contract | in-progress | #24 | Esplora live; bitcoind live reorg; Electrum unit only |
 | restore-backup | Mnemonic restore, full-directory backup, documented limits | done | #26 | `API-VERIFICATION.md` §28–§31; `docs/ARCHITECTURE.md` §8.1 |
 | crash-safety | Documented crash windows survive restart | in-progress | #25 | `API-VERIFICATION.md` §27; matrix is manual |
-| fee-preview | Claim and mintv2 operation fee before funding | todo | #21 | Only known after the claim |
+| fee-preview | Claim and mintv2 operation fee before funding | live | — | `API-VERIFICATION.md` §50; devimint 2026-10-31 |
 | watch-progress | `watch` reports progress instead of polling silently | todo | #22 | Silent polling |
 
 ## Backend coverage
@@ -41,6 +41,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
+| 2026-10-31 | 100,000 sat deposit preview: claim 316 sat, operation estimate 100,100 msat; actual 103,072 msat, net 99,580,928 msat | bitcoind RPC | pass | #21, §50 |
 | 2026-10-31 | lnv2 paid send 1,000 sat -> `Succeeded`, LND invoice `SETTLED` | devimint | pass | #23, §49 |
 | 2026-10-31 | lnv2 paid receive 50,000 sat -> `Claimed` | devimint | pass | #23, §49 |
 | 2026-10-31 | lnv2 receive paid while offline, then restart -> `Claimed` | devimint | pass | #23, §49 |
@@ -59,7 +60,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #21, #24, #25, #26 |
+| P1 | #24, #25, #26 |
 | P2 | #9, #22, #27, #28, #29, #30, #38, #39 |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.

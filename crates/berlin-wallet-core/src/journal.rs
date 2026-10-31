@@ -120,7 +120,15 @@ pub struct DepositRow {
     pub funding_outpoint: Option<bitcoin::OutPoint>,
     pub funding_txid: Option<bitcoin::Txid>,
     pub quoted_fee: Option<bitcoin::Amount>,
+    /// Best available federation operation-fee estimate at request time, in
+    /// msat (walletv2 input + mintv2 output fee consensuses). This is a
+    /// preview; the actual fee is reconciled from the operation.
+    #[serde(default)]
+    pub quoted_operation_fee: Option<fedimint_core::Amount>,
     pub claim_fee: Option<bitcoin::Amount>,
+    /// Actual federation operation fee reported by `Client::get_operation_fees`.
+    #[serde(default)]
+    pub operation_fee: Option<fedimint_core::Amount>,
     pub gross_deposited: Option<bitcoin::Amount>,
     pub net_credit: Option<fedimint_core::Amount>,
     pub last_error: Option<String>,
@@ -150,7 +158,9 @@ impl DepositRow {
             funding_outpoint: None,
             funding_txid: None,
             quoted_fee: None,
+            quoted_operation_fee: None,
             claim_fee: None,
+            operation_fee: None,
             gross_deposited: None,
             net_credit: None,
             last_error: None,
@@ -809,6 +819,9 @@ impl JournalBackend for MemoryJournal {
             row.funding_outpoint = Some(outpoint);
             row.gross_deposited = Some(gross);
             row.claim_fee = Some(fee);
+            if operation_fee.is_some() {
+                row.operation_fee = operation_fee;
+            }
             if row.net_credit.is_none() || operation_fee.is_some() {
                 row.net_credit = net_credit_with_fees(gross, fee, operation_fee);
             }
@@ -863,7 +876,9 @@ impl JournalBackend for MemoryJournal {
             funding_outpoint: Some(outpoint),
             funding_txid: Some(outpoint.txid),
             quoted_fee: None,
+            quoted_operation_fee: None,
             claim_fee: Some(claim.fee),
+            operation_fee: claim.operation_fee,
             gross_deposited: Some(claim.value),
             net_credit: net_credit_with_fees(claim.value, claim.fee, claim.operation_fee),
             last_error: None,
@@ -907,6 +922,9 @@ impl JournalBackend for MemoryJournal {
             row.funding_outpoint = Some(outpoint);
             row.funding_txid = Some(outpoint.txid);
         }
+        if row.operation_fee.is_none() {
+            row.operation_fee = operation_fee;
+        }
         if row.net_credit.is_none() {
             row.gross_deposited = Some(gross);
             row.claim_fee = Some(fee);
@@ -930,11 +948,13 @@ impl JournalBackend for MemoryJournal {
             ..
         } = &mut *inner;
         if let Some(row) = deposits.get_mut(id) {
-            if row.state == DepositState::Done
-                && row.net_credit.is_none()
-                && let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee)
-            {
-                row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
+            if row.state == DepositState::Done {
+                row.operation_fee = Some(operation_fee);
+                if row.net_credit.is_none()
+                    && let (Some(gross), Some(fee)) = (row.gross_deposited, row.claim_fee)
+                {
+                    row.net_credit = net_credit_with_fees(gross, fee, Some(operation_fee));
+                }
                 row.updated_at = now_ms();
             }
             refresh_pending_net_credit(pending_net_credit, row);
@@ -1502,6 +1522,64 @@ mod tests {
                 .is_empty(),
             "filling net_credit must remove the pending index entry"
         );
+    }
+
+    #[tokio::test]
+    async fn deposit_fee_quote_and_actual_are_both_recorded() {
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+        let mut row = DepositRow::requested(
+            DepositId::new(),
+            federation_id,
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(100_000),
+        );
+        row.quoted_fee = Some(bitcoin::Amount::from_sat(316));
+        row.quoted_operation_fee = Some(fedimint_core::Amount::from_msats(100_100));
+        let row = journal.insert_deposit(&row).await.expect("insert");
+        let outpoint = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x56; 32]), 0);
+
+        journal
+            .finish_deposit(
+                &row.id,
+                OperationId::new_random(),
+                outpoint,
+                bitcoin::Amount::from_sat(100_000),
+                bitcoin::Amount::from_sat(316),
+                Some(fedimint_core::Amount::from_msats(106_144)),
+            )
+            .await
+            .expect("finish");
+
+        let row = journal.deposit(&row.id).await.unwrap().unwrap();
+        assert_eq!(row.claim_fee, Some(bitcoin::Amount::from_sat(316)));
+        assert_eq!(
+            row.operation_fee,
+            Some(fedimint_core::Amount::from_msats(106_144))
+        );
+        assert_eq!(
+            row.net_credit,
+            Some(fedimint_core::Amount::from_msats(
+                100_000_000 - 316_000 - 106_144
+            ))
+        );
+    }
+
+    #[test]
+    fn old_deposit_rows_without_fee_preview_fields_still_load() {
+        let row = DepositRow::requested(
+            DepositId::new(),
+            FederationId::dummy(),
+            EventLogId::LOG_START,
+            bitcoin::Amount::from_sat(100_000),
+        );
+        let mut value = serde_json::to_value(&row).expect("serialize");
+        let object = value.as_object_mut().expect("object");
+        object.remove("quoted_operation_fee");
+        object.remove("operation_fee");
+        let decoded: DepositRow = serde_json::from_value(value).expect("deserialize old row");
+        assert_eq!(decoded.quoted_operation_fee, None);
+        assert_eq!(decoded.operation_fee, None);
     }
 
     #[tokio::test]

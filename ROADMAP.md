@@ -23,8 +23,8 @@ MVP is called done.
       a recorded result. Live on devimint, including a reorg; the signet run is
       tracked as #38.
 - [x] **Peg-in and peg-out.** `walletv2` deposit/claim and withdrawal/send work
-      end to end on devimint and Mutinynet. The combined `deposit` path is
-      currently at risk (#14).
+      end to end on devimint and Mutinynet. The combined `deposit` path is fixed
+      (#14).
 - [x] **Ecash balance.** The mintv2 BTC balance is readable and represented
       distinctly from the BDK on-chain balance.
 - [x] **Lightning send/receive via `lnv2`** (#23). Invoices can be paid and received
@@ -43,8 +43,10 @@ MVP is called done.
       without double credit, double send, lost credit, or a stale open row. The
       existing matrix is a start; the narrow broadcast/persist windows and
       credited-deposit reorg need coverage.
-- [ ] **Fee preview at request-deposit** (#21). The deposit flow shows the on-chain
-      claim fee and the mintv2 operation fee before the user commits funds.
+- [x] **Fee preview at request-deposit** (#21). The deposit flow shows the on-chain
+      claim fee, the walletv2 + mintv2 operation-fee estimate, and the estimated
+      net before the user commits funds. The actual fee is recorded and a
+      mismatch is visible; see `API-VERIFICATION.md` §50.
 - [ ] **Watch progress output** (#22). `watch` reports meaningful progress/heartbeat
       information instead of polling silently.
 
@@ -156,9 +158,9 @@ This is the work that must happen before “real use” is more than an aspirati
 
 ### Fee and status correctness
 
-- Preview the mintv2 operation fee at deposit request time, not only in the
-  post-claim `net_credit`. The current UI cannot show the full round-trip cost
-  before funding.
+- Deposit requests preview the claim fee and the walletv2 + mintv2 operation
+  fee. The quote is fee-consensus only; the actual can include change/dust and
+  is reconciled and displayed after the claim.
 - Resolve the 224 msat withdrawal quote/charge mismatch and make the quote
   reconstruct the actual debit.
 - Investigate `change_outpoint_range`: the named txids were not observed on

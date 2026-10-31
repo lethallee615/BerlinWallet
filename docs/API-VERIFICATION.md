@@ -3045,3 +3045,58 @@ Not exercised: a gateway that fails after funding (refund/forfeit path), a
 gateway with exhausted inbound/outbound liquidity, multiple concurrent invoices,
 LNURL, and signet. The expired paths exercise failure handling but not a
 gateway-side routing failure.
+
+## 50. Deposit fee preview (2026-10-31)
+
+The preview is computed from the federation's client configs, not guessed:
+
+- `fedimint_walletv2_common::config::WalletClientConfig` has a public
+  `fee_consensus: FeeConsensus` (`modules/fedimint-walletv2-common/src/config.rs:215`).
+  Its `FeeConsensus` (`:136`) has a public `fee(Amount) -> Amount`; the base is
+  100 sat plus `parts_per_million`.
+- `fedimint_mintv2_common::config::MintClientConfig` has a public
+  `fee_consensus: FeeConsensus` (`modules/fedimint-mintv2-common/src/config.rs:45`);
+  its `FeeConsensus` (`:70`) has `fee(Amount) -> Amount`, base 100 msat plus
+  `parts_per_million`. `fedimint-mintv2-common` is now a direct dependency of
+  `berlin-wallet-core`.
+- `client::wallet_client_config` and `client::mint_client_config` read them with
+  `ClientConfig::get_first_module_by_kind::<T>(KIND)`. In 0.12.0 that returns
+  `(ModuleInstanceId, &T)`; the helpers clone the config.
+- `client::deposit_operation_fee_estimate` applies both consensuses to the gross
+  deposit and sums them. This models the claim transaction's walletv2 input and
+  mintv2 output. It remains labelled an estimate: the live federation's actual
+  operation fee also includes change/dust, which the fee consensus does not
+  expose.
+
+`request_deposit` calls `WalletClientModule::receive_fee()` for the on-chain
+claim fee and stores it with the operation estimate before inserting the row.
+`fund_deposit` re-quotes the claim fee at broadcast time. After the claim,
+`Client::get_operation_fees` supplies the actual BTC fee; it is stored in
+`DepositRow.operation_fee` instead of only being used transiently for
+`net_credit`. Both new row fields (`quoted_operation_fee`, `operation_fee`) are
+`#[serde(default)]`, so pre-#21 rows load with `None` and display the quote as
+unavailable.
+
+CLI behaviour:
+
+- `request-deposit` and `deposit` print the quote before funding:
+  `deposit preview:`, amount, on-chain claim fee, operation-fee estimate, and
+  estimated net.
+- If the operation quote is unavailable the line says
+  `operation fee: unavailable (reconciled after claim)` rather than showing zero.
+- `status`/`watch` print the quoted estimate, the actual fee, and a mismatch line
+  when they differ. The actual fee is authoritative.
+
+Live gate (2026-10-31, devimint v0.12.0, bitcoind backend, `/tmp/bw-lnv2-gate`):
+
+- `deposit 100000` previewed claim fee `316 sat`, operation-fee estimate
+  `100100 msat`, and estimated net `99583900 msat`.
+- The claim completed with claim fee `316 sat`, actual operation fee
+  `103072 msat`, net credit `99580928 msat`; `status` printed
+  `operation fee mismatch: quoted 100100 msat, actual 103072 msat`.
+- A first attempt that summed only the mintv2 output consensus quoted
+  `100 msat` against a `104096 msat` actual. That is why the preview now includes
+  the walletv2 input consensus; the remaining few-thousand-msat gap is the
+  federation's change/dust, and the mismatch is visible rather than hidden.
+
+Tests: 99 core, 5 CLI, 4 FFI.
