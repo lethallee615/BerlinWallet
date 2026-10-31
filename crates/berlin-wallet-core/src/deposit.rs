@@ -94,7 +94,14 @@ pub async fn request_deposit(
     }
 
     let position = client.get_next_event_log_id().await;
-    let row = DepositRow::requested(DepositId::new(), federation_id, position, amount);
+    let mut row = DepositRow::requested(DepositId::new(), federation_id, position, amount);
+    if let Ok(module) = client.get_first_module::<WalletClientModule>() {
+        match module.receive_fee().await {
+            Ok(fee) => row.quoted_fee = Some(fee),
+            Err(err) => tracing::warn!(?err, "could not quote the on-chain claim fee"),
+        }
+    }
+    row.quoted_operation_fee = crate::client::deposit_operation_fee_estimate(client, amount).await;
     journal.insert_deposit(&row).await
 }
 

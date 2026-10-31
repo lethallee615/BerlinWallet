@@ -855,6 +855,7 @@ async fn command_request_deposit(
         "deposit {} state={:?} address={:?} (address write: {applied:?})",
         row.id.0, row.state, row.address
     );
+    print_deposit_preview(&row);
     Ok(())
 }
 
@@ -940,6 +941,7 @@ async fn command_deposit(
     );
 
     if row.address.is_some() {
+        print_deposit_preview(&row);
         let txid = {
             let mut wallet = wallet.lock().await;
             deposit::fund_deposit(journal, module.inner(), &mut wallet, &row.id).await?
@@ -1151,9 +1153,62 @@ fn print_lightning(row: &LightningRow) {
     }
 }
 
+fn print_deposit_preview(row: &DepositRow) {
+    println!("deposit preview:");
+    println!("  amount: {} sat", row.amount.to_sat());
+    match row.quoted_fee {
+        Some(fee) => println!("  claim fee (on-chain): {} sat", fee.to_sat()),
+        None => println!("  claim fee (on-chain): unavailable"),
+    }
+    match row.quoted_operation_fee {
+        Some(fee) => println!(
+            "  operation fee (mintv2 + walletv2 input): {} msat (estimate)",
+            fee.msats
+        ),
+        None => println!("  operation fee: unavailable (reconciled after claim)"),
+    }
+    if let (Some(claim), Some(operation)) = (row.quoted_fee, row.quoted_operation_fee) {
+        let gross_msat = row.amount.to_sat().saturating_mul(1_000);
+        let net_msat = gross_msat
+            .saturating_sub(claim.to_sat().saturating_mul(1_000))
+            .saturating_sub(operation.msats);
+        println!(
+            "  estimated net: {net_msat} msat ({} sat)",
+            net_msat / 1_000
+        );
+    }
+}
+
+fn print_deposit_actuals(row: &DepositRow) {
+    if let Some(quote) = row.quoted_operation_fee {
+        println!("operation fee (quoted estimate): {} msat", quote.msats);
+    }
+    if let Some(actual) = row.operation_fee {
+        println!("operation fee (actual): {} msat", actual.msats);
+    }
+    if let (Some(quote), Some(actual)) = (row.quoted_operation_fee, row.operation_fee)
+        && quote != actual
+    {
+        println!(
+            "operation fee mismatch: quoted {} msat, actual {} msat",
+            quote.msats, actual.msats
+        );
+    }
+    if let (Some(quote), Some(actual)) = (row.quoted_fee, row.claim_fee)
+        && quote != actual
+    {
+        println!(
+            "claim fee mismatch: quoted {} sat, actual {} sat",
+            quote.to_sat(),
+            actual.to_sat()
+        );
+    }
+}
+
 fn print_deposit(row: &DepositRow) {
     println!("{row:#?}");
     println!("net_credit: {}", net_credit_display(row.net_credit));
+    print_deposit_actuals(row);
     if row.funding_txid.is_some()
         && matches!(
             row.state,

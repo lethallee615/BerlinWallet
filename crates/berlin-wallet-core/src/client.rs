@@ -7,6 +7,8 @@ use fedimint_core::invite_code::InviteCode;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_lnv2_client::LightningClientInit as Lnv2ClientInit;
 use fedimint_mintv2_client::MintClientInit as Mintv2ClientInit;
+use fedimint_mintv2_common::KIND as MINT_V2_KIND;
+use fedimint_mintv2_common::config::MintClientConfig;
 use fedimint_walletv2_client::WalletClientInit;
 use fedimint_walletv2_common::KIND as WALLET_V2_KIND;
 use fedimint_walletv2_common::config::WalletClientConfig;
@@ -161,6 +163,35 @@ pub async fn wallet_client_config(client: &Client) -> anyhow::Result<WalletClien
     let (_, wallet_config) =
         config.get_first_module_by_kind::<WalletClientConfig>(WALLET_V2_KIND)?;
     Ok(wallet_config.clone())
+}
+
+/// The mintv2 client config, including its fee consensus.
+pub async fn mint_client_config(client: &Client) -> anyhow::Result<MintClientConfig> {
+    let config = client.config().await;
+    let (_, mint_config) = config.get_first_module_by_kind::<MintClientConfig>(MINT_V2_KIND)?;
+    Ok(mint_config.clone())
+}
+
+/// Best available federation operation-fee preview for a deposit of `amount`.
+///
+/// The claim transaction has a walletv2 input and a mintv2 output, so the
+/// estimate sums both fee consensuses. It is still labelled an estimate: the
+/// exact fee is read from `Client::get_operation_fees` after the claim and may
+/// differ by rounding or dust.
+pub async fn deposit_operation_fee_estimate(
+    client: &Client,
+    amount: bitcoin::Amount,
+) -> Option<fedimint_core::Amount> {
+    let wallet = wallet_client_config(client).await.ok()?;
+    let mint = mint_client_config(client).await.ok()?;
+    let gross = fedimint_core::Amount::from_sats(amount.to_sat());
+    Some(fedimint_core::Amount::from_msats(
+        wallet
+            .fee_consensus
+            .fee(gross)
+            .msats
+            .saturating_add(mint.fee_consensus.fee(gross).msats),
+    ))
 }
 
 /// Minimum on-chain withdrawal value in sats, as enforced by the federation's

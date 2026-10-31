@@ -686,6 +686,7 @@ dependencies = [
  "fedimint-lnv2-client",
  "fedimint-lnv2-common",
  "fedimint-mintv2-client",
+ "fedimint-mintv2-common",
  "fedimint-rocksdb",
  "fedimint-walletv2-client",
  "fedimint-walletv2-common",

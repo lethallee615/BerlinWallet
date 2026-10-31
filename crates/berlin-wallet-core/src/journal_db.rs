@@ -798,6 +798,9 @@ impl JournalBackend for DbJournal {
                     row.funding_outpoint = Some(outpoint);
                     row.gross_deposited = Some(gross);
                     row.claim_fee = Some(fee);
+                    if operation_fee.is_some() {
+                        row.operation_fee = operation_fee;
+                    }
                     if row.net_credit.is_none() || operation_fee.is_some() {
                         row.net_credit = net_credit_with_fees(gross, fee, operation_fee);
                     }
@@ -870,7 +873,9 @@ impl JournalBackend for DbJournal {
                     funding_outpoint: Some(outpoint),
                     funding_txid: Some(outpoint.txid),
                     quoted_fee: None,
+                    quoted_operation_fee: None,
                     claim_fee: Some(claim.fee),
+                    operation_fee: claim.operation_fee,
                     gross_deposited: Some(claim.value),
                     net_credit: net_credit_with_fees(claim.value, claim.fee, claim.operation_fee),
                     last_error: None,
@@ -911,6 +916,9 @@ impl JournalBackend for DbJournal {
                     if row.funding_outpoint.is_none() {
                         row.funding_outpoint = Some(outpoint);
                         row.funding_txid = Some(outpoint.txid);
+                    }
+                    if row.operation_fee.is_none() {
+                        row.operation_fee = operation_fee;
                     }
                     if row.net_credit.is_none() {
                         row.gross_deposited = Some(gross);

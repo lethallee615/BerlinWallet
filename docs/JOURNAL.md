@@ -1,5 +1,32 @@
 # Journal
 
+## 2026-10-31 — Deposit fee preview before funding
+
+`request-deposit` and `deposit` now show the on-chain claim fee and the best
+available federation operation-fee estimate before any BTC moves. The estimate
+sums the walletv2 input fee and the mintv2 output fee from the federation's
+client configs; it is explicitly labelled an estimate.
+
+The first implementation used only the mintv2 consensus and quoted 100 msat
+against a live actual of 104,096 msat. That was technically the mintv2 output
+fee but not the full claim cost, so the preview now includes the walletv2 input
+consensus too. On the final live gate the quote was 100,100 msat and the actual
+was 103,072 msat. The remaining gap is change/dust inside the federation
+transaction, which the fee consensus does not expose. The actual is stored and
+`status` prints the mismatch instead of replacing the quote with a silent
+"actual" or treating an unknown fee as zero.
+
+The journal gained `quoted_operation_fee` and `operation_fee`. Previously the
+operation fee was only a temporary value used to compute `net_credit`; it is now
+recorded. Both fields are `#[serde(default)]`, so older deposit rows load with
+`None` and the CLI says the quote is unavailable. The FFI `DepositView` exposes
+the quoted claim fee, quoted operation fee, and actual operation fee additively.
+
+Live gate: 100,000 sat deposit on devimint's bitcoind backend. Previewed claim
+fee 316 sat, operation estimate 100,100 msat, estimated net 99,583,900 msat.
+Actual: claim fee 316 sat, operation fee 103,072 msat, net credit 99,580,928
+msat; the mismatch was printed. Tests are 99 core, 5 CLI, and 4 FFI.
+
 This is a plain-language record of what Berlin Wallet is, what was built, and why.
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.

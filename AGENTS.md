@@ -79,6 +79,7 @@ Versions below are verified against the crates.io sparse index + the committed `
 |---|---|---|
 | `fedimint-client` | `=0.12.0` | federation client, `Client`, `ClientBuilder` |
 | `fedimint-mintv2-client` | `=0.12.0` | ecash mintv2 module (`MintClientInit`) — primary BTC module; v1 `fedimint-mint-client` is not registered |
+| `fedimint-mintv2-common` | `=0.12.0` | `MintClientConfig.fee_consensus` for the deposit fee preview |
 | `fedimint-walletv2-client` | `=0.12.0` | walletv2 receive/send module (`WalletClientInit`, `WalletClientModule`) |
 | `fedimint-client-module` | `=0.12.0` | `ClientModule` trait, `ClientModuleInit` |
 | `fedimint-connectors` | `=0.12.0` | `ConnectorRegistry` |
