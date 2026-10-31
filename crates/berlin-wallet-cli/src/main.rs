@@ -10,7 +10,7 @@ use berlin_wallet_core::chain::ChainBackendConfig;
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
 };
-use berlin_wallet_core::journal::{DepositRow, Journal};
+use berlin_wallet_core::journal::{DepositRow, DepositState, Journal};
 use berlin_wallet_core::network::client_network;
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
@@ -18,8 +18,8 @@ use berlin_wallet_core::sync;
 use berlin_wallet_core::withdrawal::await_change_outputs;
 use berlin_wallet_core::{deposit, withdrawal};
 use bitcoin::{Amount, Network};
-use fedimint_client::Client;
 use fedimint_client::RootSecret;
+use fedimint_client::{Client, ClientHandleArc};
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::core::OperationId;
 use fedimint_core::db::Database;
@@ -277,8 +277,15 @@ async fn run(
         client.clone(),
         journal.clone(),
         federation_id,
-        shutdown_rx,
+        shutdown_rx.clone(),
     ));
+    let deposit_watchers = sync::DepositWatchers::new();
+    let resumed = deposit_watchers
+        .resume(&client, &journal, federation_id, shutdown_rx.clone())
+        .await?;
+    if resumed > 0 {
+        println!("resumed {resumed} funded deposit watcher(s)");
+    }
 
     let module = client.get_first_module::<WalletClientModule>()?;
     println!("federation id: {federation_id}");
@@ -343,11 +350,29 @@ async fn run(
                 let id = parts
                     .next()
                     .ok_or_else(|| anyhow!("usage: fund-deposit <deposit-id>"))?;
-                command_fund_deposit(&client, &journal, &wallet, &DepositId(id.to_owned())).await
+                command_fund_deposit(
+                    &client,
+                    &journal,
+                    &wallet,
+                    federation_id,
+                    &deposit_watchers,
+                    shutdown_tx.subscribe(),
+                    &DepositId(id.to_owned()),
+                )
+                .await
             }
             "deposit" => {
                 let amount = parse_sat(parts.next())?;
-                command_deposit(&client, &journal, &wallet, federation_id, amount).await
+                command_deposit(
+                    &client,
+                    &journal,
+                    &wallet,
+                    federation_id,
+                    &deposit_watchers,
+                    shutdown_tx.subscribe(),
+                    amount,
+                )
+                .await
             }
             "watch" => {
                 let id = parts
@@ -451,6 +476,7 @@ async fn run(
     }
 
     let _ = shutdown_tx.send(true);
+    deposit_watchers.wait_all().await;
     Ok(())
 }
 
@@ -543,15 +569,32 @@ async fn command_request_deposit(
 }
 
 async fn command_fund_deposit(
-    client: &Client,
+    client: &ClientHandleArc,
     journal: &Journal,
     wallet: &Arc<Mutex<BdkWallet>>,
+    federation_id: fedimint_core::config::FederationId,
+    watchers: &sync::DepositWatchers,
+    shutdown: watch::Receiver<bool>,
     id: &DepositId,
 ) -> anyhow::Result<()> {
     let module = client.get_first_module::<WalletClientModule>()?;
-    let mut wallet = wallet.lock().await;
-    let txid = deposit::fund_deposit(journal, module.inner(), &mut wallet, id).await?;
+    let txid = {
+        let mut wallet = wallet.lock().await;
+        deposit::fund_deposit(journal, module.inner(), &mut wallet, id).await?
+    };
     println!("funding txid: {txid}");
+    if watchers.spawn(
+        client.clone(),
+        journal.clone(),
+        federation_id,
+        id.clone(),
+        shutdown,
+    ) {
+        println!(
+            "watching deposit {} in the background; `status {}` or `watch {}` to follow",
+            id.0, id.0, id.0
+        );
+    }
     Ok(())
 }
 
@@ -586,10 +629,12 @@ async fn command_send_withdraw(
 }
 
 async fn command_deposit(
-    client: &Client,
+    client: &ClientHandleArc,
     journal: &Journal,
     wallet: &Arc<Mutex<BdkWallet>>,
     federation_id: fedimint_core::config::FederationId,
+    watchers: &sync::DepositWatchers,
+    shutdown: watch::Receiver<bool>,
     amount: Amount,
 ) -> anyhow::Result<()> {
     let row = deposit::request_deposit(client, journal, federation_id, amount).await?;
@@ -605,9 +650,23 @@ async fn command_deposit(
     );
 
     if row.address.is_some() {
-        let mut wallet = wallet.lock().await;
-        let txid = deposit::fund_deposit(journal, module.inner(), &mut wallet, &row.id).await?;
+        let txid = {
+            let mut wallet = wallet.lock().await;
+            deposit::fund_deposit(journal, module.inner(), &mut wallet, &row.id).await?
+        };
         println!("funding txid: {txid}");
+        if watchers.spawn(
+            client.clone(),
+            journal.clone(),
+            federation_id,
+            row.id.clone(),
+            shutdown,
+        ) {
+            println!(
+                "watching deposit {} in the background; `status {}` or `watch {}` to follow",
+                row.id.0, row.id.0, row.id.0
+            );
+        }
     } else {
         println!("address not ready; rerun/retry later");
     }
@@ -680,6 +739,19 @@ fn net_credit_display(net_credit: Option<fedimint_core::Amount>) -> String {
 fn print_deposit(row: &DepositRow) {
     println!("{row:#?}");
     println!("net_credit: {}", net_credit_display(row.net_credit));
+    if row.funding_txid.is_some()
+        && matches!(
+            row.state,
+            DepositState::AwaitingAddress | DepositState::AddressShown
+        )
+    {
+        println!(
+            "hint: funded but not claimed. `run` keeps a watcher alive for this row; \
+             if it stays here, run `watch {}` and check that the federation sees the \
+             funding transaction.",
+            row.id.0
+        );
+    }
 }
 
 fn parse_sat(value: Option<&str>) -> anyhow::Result<Amount> {

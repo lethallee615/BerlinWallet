@@ -4,6 +4,38 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-30 — A funded deposit is followed in the background
+
+`deposit` and `fund-deposit` used to broadcast the funding transaction and
+return, leaving the row at `AddressShown` until someone ran `watch`. That is now
+a background observer: a funded row is tracked from the moment the funding
+transaction exists, the observer is resumed from the journal on the next
+`run`/`open`, and shutdown drains it before a client handle is consumed.
+
+The observer is not the claim. `fedimint-walletv2-client` runs its own output
+scanner and claims a received output autonomously; `await_receive` only reports
+the result. The observer calls it, binds the claim to the row, and exits when the
+row is terminal. A per-row active set keeps one observer per deposit, and
+`DepositWatchers::wait_all` drains the handles so the FFI `Arc::try_unwrap` check
+does not see a lingering client reference.
+
+Three gaps made the original report (#14) hard to read, and are closed:
+
+- The funded outpoint is recorded from the transaction that was just built, not
+  only when a claim binds. A funded row is observable immediately and restart
+  recovery does not depend on a chain scan.
+- An amount that does not cover the federation's claim fee is refused before
+  broadcast. Upstream `receive_output` returns `None` in that case without
+  logging, so the deposit would have been spent and silently never claimed.
+- A funded row still unclaimed after five minutes emits a WARN naming the
+  deposit, address, amount, and funding txid. That does not prove the federation
+  failed to observe the transaction; it names the condition the old code hid.
+
+What this does not fix: if the federation never sees the funding transaction
+(wrong node, dead observer, or an unclaimable output), the deposit still does not
+complete. The WARN and the recorded outpoint make that state legible; the live
+gate for #14 still has to establish which layer is failing.
+
 ## 2026-10-25 — The rebuild log names its scan floor
 
 When the stored BDK checkpoint is orphaned, the wallet rebuilds and full-scans.

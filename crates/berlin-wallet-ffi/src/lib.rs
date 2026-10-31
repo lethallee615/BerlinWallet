@@ -190,6 +190,7 @@ struct WalletState {
     federation_id: FederationId,
     client_identity: String,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    watchers: sync::DepositWatchers,
 }
 
 /// One FFI object. `new` only stores the data dir; `init` creates/loads the
@@ -281,6 +282,7 @@ impl PegWallet {
             federation_id,
             client_identity,
             tasks: Vec::new(),
+            watchers: sync::DepositWatchers::new(),
         };
         self.install_state(state).await?;
         self.wallet_info().await
@@ -356,6 +358,7 @@ impl PegWallet {
             federation_id,
             client_identity: client_identity.clone(),
             tasks: Vec::new(),
+            watchers: sync::DepositWatchers::new(),
         };
         self.install_state(state).await?;
         Ok(RestoreView {
@@ -427,6 +430,11 @@ impl PegWallet {
             return Ok(());
         };
 
+        // The observers hold client handles. Let them exit before the
+        // `Arc::try_unwrap` below, otherwise shutdown reports a lingering
+        // reference even though nothing is actually running.
+        state.watchers.wait_all().await;
+
         for mut task in state.tasks {
             if tokio::time::timeout(Duration::from_secs(5), &mut task)
                 .await
@@ -493,6 +501,23 @@ impl PegWallet {
         )
         .await?;
         drop(bdk);
+        // Fund returns as soon as the transaction is broadcast. The watcher
+        // follows the row to a terminal state in the background, the same way
+        // the CLI does, and is resumed from the journal on the next `open`.
+        if let Some(shutdown) = self
+            .shutdown
+            .lock()
+            .ok()
+            .and_then(|sender| sender.as_ref().map(watch::Sender::subscribe))
+        {
+            state.watchers.spawn(
+                state.client.clone(),
+                state.journal.clone(),
+                state.federation_id,
+                DepositId(deposit_id.clone()),
+                shutdown,
+            );
+        }
         let row = state
             .journal
             .deposit(&DepositId(deposit_id))
@@ -690,6 +715,12 @@ impl PegWallet {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let client = state.client.clone();
         let journal = state.journal.clone();
+        let federation_id = state.federation_id;
+        let watchers = state.watchers.clone();
+        let resumed = watchers
+            .resume(&client, &journal, federation_id, shutdown_rx.clone())
+            .await?;
+        let _ = resumed;
         let bdk = state.bdk.clone();
         state.tasks = vec![
             tokio::spawn(sync::bdk_chain_task(bdk, shutdown_rx.clone())),
@@ -701,7 +732,7 @@ impl PegWallet {
             tokio::spawn(sync::adoption_task(
                 client,
                 journal,
-                state.federation_id,
+                federation_id,
                 shutdown_rx,
             )),
         ];
@@ -758,6 +789,7 @@ impl PegWallet {
             federation_id,
             client_identity,
             tasks: Vec::new(),
+            watchers: sync::DepositWatchers::new(),
         };
         self.install_state(state).await?;
         self.wallet_info().await
