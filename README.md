@@ -53,7 +53,7 @@ This is **pre-alpha software**.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 112 core tests (111 run + 1 devimint-only ignored), 7 CLI tests, and 5 FFI tests.
+- The current test suite is 120 core tests (119 run + 1 devimint-only ignored), 7 CLI tests, and 6 FFI tests.
 - There is **no mainnet operational testing** recorded in this repository and no
   independent security audit. The desktop GUI and mobile app are deferred until
   after the CLI-first MVP.
@@ -70,15 +70,19 @@ This is **pre-alpha software**.
 - **Large amounts.** The code is unaudited, the dependency graph is pinned to a
   pre-release Fedimint generation, and several upstream edge cases are still
   open.
-- **Your only copy of a seed.** The mnemonic is stored in plaintext at
-  `<data-dir>/mnemonic` with mode `0600`. Backups are full-directory copies and
-  are unencrypted. A mnemonic alone does not recover a fresh client's operation
-  log or an in-flight deposit; the recovery artifact is the mnemonic **plus the
-  client data directory**.
-- **An untrusted device.** Anyone who can read the data directory or the mnemonic
-  can spend the on-chain funds and the ecash. LUKS protects the disk only while
-  the device is off or the volume is locked; it does not protect a compromised
-  running OS.
+- **Your only copy of a seed or passphrase.** The mnemonic is age-encrypted at
+  `<data-dir>/mnemonic` with a wallet passphrase (mode `0600`); backups are
+  single age-encrypted archives with a separate backup passphrase. Losing either
+  passphrase loses that layer. A mnemonic alone does not recover a fresh
+  client's operation log or an in-flight deposit; the recovery artifact is the
+  mnemonic **plus the client data directory** (or an encrypted backup plus both
+  passphrases).
+- **An untrusted device.** The mnemonic ciphertext and encrypted backups are
+  safe to read without their passphrases, but the live RocksDB/SQLite files are
+  not application-encrypted; full-disk encryption is the supported boundary for
+  those. Once the wallet is running, the unlocked process has the seed and ecash
+  keys in memory. LUKS protects the disk only while the device is off or the
+  volume is locked; it does not protect a compromised running OS.
 - **A production custody or payments service.** The federation is custodial by
   construction, the Esplora server is trusted for chain observations, and the
   FFI/GUI/operational layer is not complete.
@@ -170,11 +174,15 @@ keeps stdout for the final row. Use `quit` to shut down; it stops the client and
 releases the lock.
 
 ```bash
+export BERLIN_WALLET_PASSPHRASE='choose-a-strong-wallet-passphrase'
 cargo run -p berlin-wallet-cli -- init --network regtest
 ```
 
-It creates or opens `<data-dir>/bdk.sqlite` and related state.
-`BERLIN_WALLET_DATA_DIR` overrides the default `.berlin-wallet` directory.
+It creates or opens `<data-dir>/bdk.sqlite` and related state; the mnemonic is
+encrypted with the wallet passphrase. `BERLIN_WALLET_DATA_DIR` overrides the
+default `.berlin-wallet` directory. Interactive runs prompt for the passphrase;
+automation can use the environment variable instead. Backups use a separate
+`BERLIN_WALLET_BACKUP_PASSPHRASE`.
 
 ## Crate layout
 
@@ -189,7 +197,7 @@ crates/
     src/journal.rs             row types, state enums, Journal trait
     src/journal_db.rs          versioned DB journal, tags, atomic transitions
     src/sync.rs                BDK, fedimint, and adoption tasks
-    src/backup.rs              full data-directory backup/import
+    src/backup.rs              age-encrypted full-directory backup/import
     src/seed.rs                BIP39, canonical root secret, client identity
     src/network.rs             chain-id -> `bitcoin::Network` + recorded choice
     src/sqlite.rs              hand-written SQLite `Database` backend (mobile)

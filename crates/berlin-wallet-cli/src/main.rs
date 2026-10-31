@@ -51,14 +51,16 @@ async fn main() -> anyhow::Result<()> {
     if command == Some("backup") {
         let destination = args
             .get(2)
-            .ok_or_else(|| anyhow!("usage: berlin-wallet backup <destination-dir>"))?;
-        return backup_data_dir(&data_dir, Path::new(destination));
+            .ok_or_else(|| anyhow!("usage: berlin-wallet backup <destination-file>"))?;
+        let passphrase = new_passphrase("backup")?;
+        return backup_data_dir(&data_dir, Path::new(destination), &passphrase);
     }
     if command == Some("restore-backup") {
         let source = args
             .get(2)
-            .ok_or_else(|| anyhow!("usage: berlin-wallet restore-backup <source-dir>"))?;
-        return import_data_dir(&data_dir, Path::new(source));
+            .ok_or_else(|| anyhow!("usage: berlin-wallet restore-backup <source-file>"))?;
+        let passphrase = existing_passphrase("backup")?;
+        return import_data_dir(&data_dir, Path::new(source), &passphrase);
     }
 
     std::fs::create_dir_all(&data_dir)?;
@@ -69,7 +71,17 @@ async fn main() -> anyhow::Result<()> {
             mnemonic_path.display()
         );
     }
-    let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path)?;
+    let passphrase = if command == Some("init")
+        || !mnemonic_path.exists()
+        || std::fs::read(&mnemonic_path)
+            .map(|bytes| !seed::is_encrypted_mnemonic(&bytes))
+            .unwrap_or(false)
+    {
+        new_passphrase("wallet")?
+    } else {
+        existing_passphrase("wallet")?
+    };
+    let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path, &passphrase)?;
     let seed = seed::mnemonic_seed(&mnemonic);
     let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
     match command {
@@ -92,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
                 data_dir.join(NETWORK_FILE).display()
             );
             println!("data dir: {}", data_dir.display());
-            println!("mnemonic: {}", mnemonic_path.display());
+            println!("mnemonic: {} (encrypted)", mnemonic_path.display());
             println!("bdk db: {}", data_dir.join(BDK_DB_FILE).display());
             println!(
                 "fedimint db: {}",
@@ -165,6 +177,48 @@ async fn main() -> anyhow::Result<()> {
 
 async fn open_database(data_dir: &Path) -> anyhow::Result<Database> {
     open_rocksdb(&data_dir.join("fedimint.rocksdb")).await
+}
+
+fn passphrase_env(kind: &str) -> &'static str {
+    match kind {
+        "backup" => "BERLIN_WALLET_BACKUP_PASSPHRASE",
+        _ => "BERLIN_WALLET_PASSPHRASE",
+    }
+}
+
+fn checked_passphrase(value: String, kind: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(!value.is_empty(), "{kind} passphrase must not be empty");
+    Ok(value)
+}
+
+/// Read a passphrase for an existing wallet or backup, from the environment in
+/// automation or from the terminal otherwise.
+fn existing_passphrase(kind: &str) -> anyhow::Result<String> {
+    if let Ok(value) = std::env::var(passphrase_env(kind)) {
+        return checked_passphrase(value, kind);
+    }
+    checked_passphrase(
+        rpassword::prompt_password(format!("{kind} passphrase: "))?,
+        kind,
+    )
+}
+
+/// Read and confirm a new wallet or backup passphrase. The environment form is
+/// intended for automation and does not prompt a second time.
+fn new_passphrase(kind: &str) -> anyhow::Result<String> {
+    if let Ok(value) = std::env::var(passphrase_env(kind)) {
+        return checked_passphrase(value, kind);
+    }
+    let first = checked_passphrase(
+        rpassword::prompt_password(format!("New {kind} passphrase: "))?,
+        kind,
+    )?;
+    let second = checked_passphrase(
+        rpassword::prompt_password(format!("Confirm {kind} passphrase: "))?,
+        kind,
+    )?;
+    anyhow::ensure!(first == second, "{kind} passphrases do not match");
+    Ok(first)
 }
 
 /// Reloadable stderr tracing filter. `RUST_LOG` controls filtering and defaults
@@ -241,12 +295,13 @@ fn print_help() {
     println!("                                      mainnet|testnet|signet|regtest");
     println!("  join <invite> [--network <net>]     join a federation and print its config");
     println!(
-        "  backup <dest-dir>                   copy mnemonic + client DB + BDK DB (app stopped)"
+        "  backup <dest-file>                   encrypted age archive of mnemonic + client DB + BDK DB"
     );
-    println!(
-        "  restore-backup <src-dir>            import a full directory backup into an empty data dir"
-    );
+    println!("  restore-backup <src-file>            decrypt an archive into an empty data dir");
     println!("  restore --network <net> <invite> [chain-source] [fed] [identity]");
+    println!();
+    println!("  Wallet and backup passphrases are prompted; in automation set");
+    println!("  BERLIN_WALLET_PASSPHRASE and BERLIN_WALLET_BACKUP_PASSPHRASE.");
     println!("                                      recover on a fresh data dir + full BDK scan");
     println!("  run <invite> [chain-source]         interactive manual-run session");
     println!();
@@ -1485,10 +1540,11 @@ mod tests {
                 .as_nanos()
         ));
         let source = base.join("source");
-        let backup = base.join("backup");
+        let backup = base.join("backup.age");
         let imported = base.join("imported");
         std::fs::create_dir_all(source.join("fedimint.rocksdb")).unwrap();
-        std::fs::write(source.join("mnemonic"), b"test mnemonic").unwrap();
+        berlin_wallet_core::seed::load_or_create_mnemonic(&source.join("mnemonic"), "wallet pass")
+            .unwrap();
         std::fs::write(source.join("fedimint.rocksdb/CURRENT"), b"rocks").unwrap();
 
         let seed = [0x42u8; 64];
@@ -1511,8 +1567,8 @@ mod tests {
         std::fs::write(source.join("bdk.sqlite-wal"), b"wal").unwrap();
         std::fs::write(source.join("bdk.sqlite-shm"), b"shm").unwrap();
 
-        backup_data_dir(&source, &backup).expect("backup");
-        import_data_dir(&imported, &backup).expect("import");
+        backup_data_dir(&source, &backup, "backup pass").expect("backup");
+        import_data_dir(&imported, &backup, "backup pass").expect("import");
 
         assert!(imported.join("bdk.sqlite-wal").is_file());
         assert!(imported.join("bdk.sqlite-shm").is_file());
@@ -1560,9 +1616,10 @@ mod tests {
                 .as_nanos()
         ));
         let source = base.join("source");
-        let backup = base.join("backup");
+        let backup = base.join("backup.age");
         std::fs::create_dir_all(source.join("fedimint.rocksdb")).unwrap();
-        std::fs::write(source.join("mnemonic"), b"test mnemonic").unwrap();
+        berlin_wallet_core::seed::load_or_create_mnemonic(&source.join("mnemonic"), "wallet pass")
+            .unwrap();
         std::fs::write(source.join(BDK_DB_FILE), b"bdk").unwrap();
         std::fs::write(source.join("fedimint.rocksdb/CURRENT"), b"rocks").unwrap();
 
@@ -1575,7 +1632,8 @@ mod tests {
             .unwrap();
         let _lock = fs_lock::FileLock::new_try_exclusive(lock_file).unwrap();
 
-        let err = backup_data_dir(&source, &backup).expect_err("locked backup must fail");
+        let err =
+            backup_data_dir(&source, &backup, "backup pass").expect_err("locked backup must fail");
         assert!(err.to_string().contains("database is locked"), "{err:#}");
         std::fs::remove_dir_all(base).ok();
     }

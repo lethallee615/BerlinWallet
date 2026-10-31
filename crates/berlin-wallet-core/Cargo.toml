@@ -15,6 +15,7 @@ name = "berlin_wallet_core"
 
 [dependencies]
 anyhow = "=1.0.98"
+age = "=0.12.1"
 async-trait = "=0.1.88"
 fedimint-client = "=0.12.0"
 fs-lock = "=0.1.10"
@@ -44,6 +45,7 @@ rand = "0.8"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tar = "=0.4.46"
 thiserror = "=2.0.18"
 tokio = { version = "1", features = ["full"] }
 tracing = "=0.1.44"

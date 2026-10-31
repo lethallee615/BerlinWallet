@@ -18,7 +18,7 @@ state machine, not the UI:
    broadcast, reorg rescan and DB swap, keychain index preservation.
 5. `crates/berlin-wallet-core/src/client.rs` — join/open/recover, module
    registration, database partitions.
-6. `crates/berlin-wallet-core/src/backup.rs` — lock check and full-tree copy.
+6. `crates/berlin-wallet-core/src/backup.rs` — lock check, age archive, and manifest/import validation.
 
 Audit **`crates/berlin-wallet-ffi` second**: the `PegWallet` boundary, async
 lifetime/shutdown behavior, error flattening, and whether a host can observe or
@@ -29,15 +29,16 @@ where it demonstrates a core/FFI defect.
 
 Use `docs/THREAT-MODEL.md`. For this audit, assume:
 
-- The local OS/process is trusted while running; the mnemonic is plaintext and
-  the data directory is readable by that process.
+- The local OS/process is trusted while running; the mnemonic is age-encrypted
+  at rest but decrypted into that process, and the live databases are readable.
 - The Esplora server is Byzantine for chain observations. A single server can
   lie, withhold, or censor.
 - The federation is a threshold custodian and may halt, censor, or rug. Its
   operation log is the authority for walletv2 final states.
 - The network/FFI host may be malicious outside the documented boundary.
-- No hardware wallet, encrypted seed, encrypted backup, or independent chain
-  source exists.
+- No hardware wallet or independent chain source exists. The mnemonic and
+  backups are passphrase-encrypted; live database files rely on full-disk
+  encryption.
 
 ## 3. Invariants to try to break
 
@@ -177,12 +178,18 @@ the final inode; the next external/internal derivation index never regresses.
 
 ### I8. Backup/restore and single-process ownership
 
-**Claim:** a backup is a complete tree copy (mnemonic, BDK SQLite + WAL/SHM,
-RocksDB), refuses a live fedimint DB, and restores into an empty target.
+**Claim:** a backup is a complete age-encrypted tar (encrypted mnemonic, BDK
+SQLite + WAL/SHM, RocksDB), refuses a live fedimint DB, is authenticated and
+versioned, and restores into an empty target.
 
-**Where:** `backup_data_dir`, `import_data_dir`, `fedimint.db.lock`,
-`copy_dir`, CLI tests `data_dir_backup_round_trips_bdk_state_and_sidecars` and
-`backup_refuses_a_locked_database`.
+**Where:** `backup_data_dir`, `import_data_dir`, `fedimint.db.lock`, the
+`.berlin-wallet-backup.json` manifest, and the core/CLI backup tests
+(`encrypted_backup_round_trips_sidecars_and_chain_source`,
+`wrong_passphrase_and_tampering_leave_destination_untouched`,
+`import_requires_an_empty_target_and_ignores_stale_temporary_dirs`,
+`backup_refuses_a_live_database_and_ignores_stale_archive_temps`,
+`backup_does_not_overwrite_an_existing_archive`,
+`backup_refuses_a_legacy_plaintext_mnemonic`, and the CLI round-trip tests).
 
 **Try to break:**
 
@@ -232,8 +239,8 @@ These should be treated as audit findings until proven otherwise:
 - Mutinynet deposit/withdrawal round trip (§25).
 - Crash/restart matrix with debug fault injection (§27).
 - Mnemonic restore and retained client DB behavior (§28–§31).
-- Full-directory backup/import with live lock failure and WAL/SHM coverage
-  (§31, CLI tests).
+- Age-encrypted full-directory backup/import with live lock failure, WAL/SHM
+  coverage, wrong-passphrase/tamper handling, and stale temporaries (§31, §56).
 - devimint/live reorg checks (§35) and the transient sync behavior (§34).
 
 ### Assumed, not proven

@@ -1,5 +1,27 @@
 # Journal
 
+## 2026-10-31 — The mnemonic and backups are encrypted
+
+The mnemonic file is now an age passphrase-encrypted blob. New wallets prompt for
+a wallet passphrase; automation can set `BERLIN_WALLET_PASSPHRASE`. A legacy
+plaintext mnemonic is parsed once with the supplied passphrase and immediately
+rewritten encrypted. The BIP39 seed still uses the empty BIP39 passphrase; this
+is an at-rest storage passphrase, not a second BIP39 passphrase.
+
+Backups changed from an unencrypted directory copy to a single age-encrypted
+tar. The archive carries a versioned `.berlin-wallet-backup.json` manifest, the
+encrypted mnemonic, `chain.json`, `bdk.sqlite` plus WAL/SHM, and the RocksDB
+directory. Backup and restore use separate temp paths and rename only complete
+results; import validates the tar paths, manifest version, and required files
+before touching the target. Wrong backup passphrases and tampering fail
+authentication. The live RocksDB/SQLite files remain plaintext and rely on
+full-disk encryption; the archive is the application-level at-rest protection.
+
+A live CLI check copied an existing devimint data directory, migrated its
+plaintext mnemonic, backed it up to a 1.5 MB age archive, restored it into a
+fresh directory, and reopened it with the wallet and backup passphrases. The
+core tests cover migration, wrong passphrases, tampering, sidecars, stale temps,
+existing destinations, plaintext-source refusal, and locked databases.
 ## 2026-10-31 — Quiet shutdown without hiding task failures
 
 The CLI tracing subscriber is now reloadable. On quit, after the REPL stops
@@ -630,8 +652,8 @@ The recovery artifact is therefore **mnemonic plus the client data directory**,
 not the mnemonic alone. The CLI provides full-directory backup and import. The
 backup copies the mnemonic, BDK SQLite plus WAL/SHM sidecars, and the RocksDB
 directory; it takes a non-blocking fedimint lock and refuses a live database. The
-archive is unencrypted by design, so it must be encrypted externally. A
-journal-only export is not a recovery backup.
+archive is age-encrypted with a separate backup passphrase (see the 2026-10-31
+entry above). A journal-only export is not a recovery backup.
 
 ## Reorgs and chain truth
 

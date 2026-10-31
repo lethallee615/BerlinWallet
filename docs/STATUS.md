@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: 1232c61
+Main at: 66568ce
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -23,6 +23,7 @@ actually stands.
 | lightning | lnv2 send/receive | live | — | `API-VERIFICATION.md` §48, §49; paid send/receive, expiry, restart 2026-10-31; fresh join required |
 | chain-backends | Esplora, Electrum, bitcoind RPC behind one contract | live | — | `API-VERIFICATION.md` §51; Electrum live 2026-10-31; Esplora and bitcoind live |
 | restore-backup | Mnemonic restore, full-directory backup, documented limits | done | — | `API-VERIFICATION.md` §28–§31, §52; `docs/ARCHITECTURE.md` §8.1 |
+| encryption-at-rest | Mnemonic and backups encrypted; live DB boundary documented | done | — | `API-VERIFICATION.md` §56; full-disk boundary for live RocksDB/SQLite |
 | crash-safety | Documented crash windows survive restart | done | — | `API-VERIFICATION.md` §27, §53; deterministic CI matrix; one devimint-only window |
 | fee-preview | Claim and mintv2 operation fee before funding | live | — | `API-VERIFICATION.md` §50; devimint 2026-10-31 |
 | watch-progress | `watch` reports progress instead of polling silently | live | — | `API-VERIFICATION.md` §54; devimint heartbeat/SIGINT 2026-10-31 |
@@ -41,6 +42,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
+| 2026-10-31 | Legacy mnemonic migrated to age; encrypted backup/restore reopened with wallet and backup passphrases; wrong passphrase rejected | local CLI | pass | #27, §56 |
 | 2026-10-31 | `RUST_LOG=info` quit with a funded/open deposit: no `fm::task` WARN/ERROR after the prompt; exit 0 | devimint bitcoind | pass | #39, §55 |
 | 2026-10-31 | `watch` heartbeat: initial + 10s stderr lines with state/positions/funding; SIGINT returned to the prompt | devimint bitcoind | pass | #22, §54 |
 | 2026-10-31 | Fresh restore recovered 99,577,856 msat and BDK 0.09849694; empty history/warnings; new receive did not reclaim a stranded 50,000 sat deposit | bitcoind RPC | pass | #26, §52 |
@@ -65,7 +67,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 |---|---|
 | P0 | — |
 | P1 | — |
-| P2 | #9, #27, #28, #29, #30, #38 |
+| P2 | #9, #28, #29, #30, #38 |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
 P2 is hardening. `docs/TRACKING.md` defines how these are assigned.

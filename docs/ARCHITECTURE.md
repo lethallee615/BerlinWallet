@@ -54,7 +54,7 @@ UI.
 | `journal.rs` | `DepositRow`, `WithdrawalRow`, state enums, `JournalBackend`, in-memory backend, net-credit math. |
 | `journal_db.rs` | DB-backed journal, versioned envelopes, tag layout, indexes, atomic transitions, optimistic-conflict retries. |
 | `sync.rs` | BDK chain sync task, Fedimint keepalive/event/reconcile task, adoption task. |
-| `backup.rs` | Full data-directory backup/import and lock check. |
+| `backup.rs` | Age-encrypted full data-directory archive/import and lock check. |
 | `sqlite.rs` | Hand-written `SqliteDb` implementing Fedimint's raw database traits; retained for mobile. |
 | `seed.rs` | BIP39 mnemonic creation/loading, canonical Fedimint root secret, client identity digest. |
 | `network.rs` | Chain-id (block-1 hash) to `bitcoin::Network`; unknown chain IDs map to `Regtest`. |
@@ -83,7 +83,7 @@ contains:
 
 ```text
 <data-dir>/
-  mnemonic                12-word BIP39 phrase, plaintext, mode 0600
+  mnemonic                age-encrypted 12-word BIP39 phrase, mode 0600
   chain.json              selected chain source, mode 0600 (see below)
   bdk.sqlite              BDK wallet + chain checkpoint (SQLite)
   bdk.sqlite-wal/-shm     SQLite sidecars while the DB is live
@@ -97,8 +97,8 @@ a restart could not disagree with itself; with more than one backend, silently
 opening an Electrum-backed wallet against the default Esplora URL would hide a
 misconfiguration. `resolve_chain_config` prefers an explicit caller value,
 otherwise the stored one, and logs a warning when the two differ. It can contain
-bitcoind credentials in the URL, which is the same plaintext-at-0600 posture as
-`mnemonic`.
+bitcoind credentials in the URL, which remain plaintext at mode 0600 even though
+the mnemonic itself is age-encrypted.
 
 `berlin-wallet-core` has two database backends:
 
@@ -127,10 +127,12 @@ directory is unsupported and unsafe.
 
 ## 3. Keys, network, and client identity
 
-`seed::load_or_create_mnemonic` creates a 12-word English BIP39 mnemonic if
-`<data-dir>/mnemonic` is absent, writes it in plaintext, and sets mode `0600` on
-Unix. `mnemonic_seed` returns the standard 64-byte BIP39 seed with an empty
-passphrase.
+`seed::load_or_create_mnemonic(path, passphrase)` creates a 12-word English
+BIP39 mnemonic if `<data-dir>/mnemonic` is absent, encrypts it with age
+(passphrase mode), and sets mode `0600` on Unix. The passphrase is a storage
+passphrase, not a BIP39 passphrase. A legacy plaintext mnemonic is parsed once
+and migrated to the encrypted format. `mnemonic_seed` returns the standard
+64-byte BIP39 seed with an empty passphrase.
 
 Fedimint's root secret is derived with the canonical strategy mirrored from
 `fedimint-bip39` v0.12.0:
@@ -654,5 +656,6 @@ thin. A real GUI needs facilities that do **not** exist yet:
 - `lnv2` is in the CLI-first MVP scope but is not registered or implemented yet,
   even though the test federation exposes it. Its gateway/liquidity trust model
   is not yet analyzed.
-- There is no independent audit, no hardware wallet support, no encrypted
-  seed/backup, and no mobile application.
+- There is no independent audit, no hardware wallet support, and no mobile
+  application. The mnemonic and backups are passphrase-encrypted; the live
+  databases still rely on full-disk encryption.
