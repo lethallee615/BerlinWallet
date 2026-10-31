@@ -55,10 +55,14 @@ to `$REPO_ROOT/target-nix` (not plain `target`). Do not hardcode it; resolve the
 link:
 
 ```bash
+FEDIMINT_DIR="${FEDIMINT_DIR:-$HOME/src/fedimint}"
 DEVIMINT_LINK="$(find "$FEDIMINT_DIR" -maxdepth 2 -type l -name devimint | head -1)"
 TEST_DIR="$(readlink -f "$DEVIMINT_LINK")"
 source "$TEST_DIR/env"
-export FM_INVITE_CODE="$(cat "$TEST_DIR/clients/default-0/invite-code")"
+INVITE_FILE="$TEST_DIR/clients/default-0/invite-code"
+test -s "$INVITE_FILE" || { echo "missing invite file: $INVITE_FILE" >&2; return 1; }
+export FM_INVITE_CODE="$(cat "$INVITE_FILE")"
+test -n "$FM_INVITE_CODE" || { echo "invite is empty" >&2; return 1; }
 ```
 
 Check what the federation is actually using. Run these in the devimint shell
@@ -247,3 +251,16 @@ test use the bitcoind backend and restart the devimint esplora afterwards
   there. Exit the shell to stop the federation.
 - **Electrum live run (#24):** devimint's electrs exposes a regtest Electrum RPC
   on `127.0.0.1:60401`; use `electrum:tcp://127.0.0.1:60401`.
+
+## Common mistakes
+
+- `export FM_INVITE_CODE="$(cat <missing-file>)"` sets the variable to **empty**
+  and overwrites the value the devimint shell already exported. Check the file
+  exists first, or just `echo "$FM_INVITE_CODE"` in the devimint shell.
+- `target/devimint` does not exist under the Fedimint flake; the link is
+  `target-nix/devimint`. Resolve it with `readlink -f` rather than guessing.
+- `$FM_BTC_CLIENT` is a bare `bitcoin-cli ...` command. It only works where the
+  Fedimint shell `PATH` is active, not in a plain second terminal.
+- A fresh wallet has no on-chain BTC. `deposit` funds the federation from the BDK
+  wallet, so fund the printed `bdk address` and run `sync` first.
+
