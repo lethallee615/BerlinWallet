@@ -47,16 +47,25 @@ SKIP_CARGO_BUILD=1 just devimint-env
 
 ## 2. Capture the environment in a second terminal
 
-The devimint shell exports the variables. In terminal B:
+If you are already in the devimint shell, `FM_INVITE_CODE` is exported; skip to
+step 3. The instructions below are for a separate terminal.
+
+The link path is under `$CARGO_BUILD_TARGET_DIR`, which the Fedimint flake sets
+to `$REPO_ROOT/target-nix` (not plain `target`). Do not hardcode it; resolve the
+link:
 
 ```bash
-source "$FEDIMINT_DIR/target/devimint/env"
-export FM_INVITE_CODE="$(cat "$FEDIMINT_DIR/target/devimint/cfg/invite-code")"
+DEVIMINT_LINK="$(find "$FEDIMINT_DIR" -maxdepth 2 -type l -name devimint | head -1)"
+TEST_DIR="$(readlink -f "$DEVIMINT_LINK")"
+source "$TEST_DIR/env"
+export FM_INVITE_CODE="$(cat "$TEST_DIR/clients/default-0/invite-code")"
 ```
 
-Check what the federation is actually using:
+Check what the federation is actually using. Run these in the devimint shell
+(terminal A), where `bitcoin-cli` is on `PATH`:
 
 ```bash
+echo "$FM_INVITE_CODE"
 echo "$FM_BITCOIN_RPC_KIND"     # bitcoind in the v0.12.0 dev shell
 echo "$FM_BITCOIN_RPC_URL"      # http://bitcoin:bitcoin@127.0.0.1:<port>
 echo "$FM_PORT_ESPLORA"         # dynamically allocated
@@ -64,9 +73,11 @@ echo "$FM_LOGS_DIR"
 $FM_BTC_CLIENT getblockchaininfo | jq '{chain, blocks, bestblockhash}'
 ```
 
-`FM_BTC_CLIENT` is the devimint `bitcoin-cli` command. The `default` wallet is
-loaded at `/wallet/default`, so commands that need a wallet use
-`-rpcwallet=default`.
+`FM_BTC_CLIENT` is the devimint `bitcoin-cli` command. It is exported as a bare
+`bitcoin-cli ...` string, so it only works where the Fedimint shell's `PATH` is
+active. Terminal B only needs `FM_BITCOIN_RPC_URL`, `FM_PORT_ESPLORA`, and
+`FM_INVITE_CODE`; run chain commands in terminal A. The `default` wallet is at
+`/wallet/default`, so commands that need a wallet use `-rpcwallet=default`.
 
 ## 3. Build and initialize the wallet
 
@@ -74,6 +85,14 @@ In terminal B, from the wallet repository:
 
 ```bash
 cargo build -p berlin-wallet-cli
+```
+
+If you are already in the devimint shell, do **not** run `cargo build` there:
+the Fedimint shell uses a different Rust toolchain. Build the binary outside
+once, then invoke the absolute path (`~/projects/berlin_wallet/target/debug/berlin-wallet`)
+from the devimint shell.
+
+```bash
 export BERLIN_WALLET_DATA_DIR=/tmp/bw-gate-14
 export RUST_LOG=debug
 rm -rf "$BERLIN_WALLET_DATA_DIR"
@@ -223,7 +242,7 @@ test use the bitcoind backend and restart the devimint esplora afterwards
   `esplora:http://127.0.0.1:$FM_PORT_ESPLORA`. The esplora server is backed by the
   same devimint bitcoind, so the chain is shared.
 - **One terminal:** from the Fedimint shell,
-  `devimint --link-test-dir "$PWD/target/devimint" dev-fed --exec bash`
+  `devimint --link-test-dir "${CARGO_BUILD_TARGET_DIR:-$PWD/target}/devimint" dev-fed --exec bash`
   gives a plain shell with the environment; run the prebuilt wallet binary from
   there. Exit the shell to stop the federation.
 - **Electrum live run (#24):** devimint's electrs exposes a regtest Electrum RPC
