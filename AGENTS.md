@@ -51,7 +51,7 @@ berlin_wallet/                  # workspace root
       src/sync.rs               # BDK, fedimint, and adoption tasks
       src/backup.rs             # full data-directory backup/import
       src/seed.rs               # BIP39, canonical root secret, client identity
-      src/network.rs            # chain-id -> bitcoin::Network
+      src/network.rs            # chain-id -> bitcoin::Network, recorded choice
       src/sqlite.rs             # SQLite Database backend (mobile)
       src/wire.rs               # FeeQuoteWire
       src/error.rs              # PegError and transient/permanent classification

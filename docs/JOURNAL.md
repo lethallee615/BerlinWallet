@@ -4,6 +4,32 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-30 — Network selection is explicit and fail-closed
+
+The network used to come from the federation's block-1 chain-id, with an
+unknown chain-id silently mapping to `Network::Regtest`. The fallback is
+upstream server behaviour and is convenient for devimint, but in a wallet it
+changes address prefixes and BIP84 descriptors without saying so. Addresses are
+the one thing a user is asked to verify; a wrong network there is exactly the
+mistake the wallet must not make quietly.
+
+`network_from_chain_id` now returns a `Result` and names the offending chain-id.
+The escape hatch is a recorded choice, not a fallback:
+
+- `init` requires `--network <mainnet|testnet|signet|regtest>` and writes
+  `network.json` (versioned, 0600, atomic rename).
+- `run`/`open` read it, derive the chain-id network, and refuse a mismatch.
+- An unknown chain-id is accepted only when the recorded choice is `regtest`,
+  which is the explicit devimint/private-chain opt-in. A different network needs
+  a fresh data directory; `init_network` refuses to change an existing record.
+- The FFI makes the choice part of the API: `init(network)` and
+  `restore(..., network)`, and `InitView` reports it. `join`/`open` require the
+  recorded file, so an app cannot skip the decision by calling a different
+  entry point.
+
+This also fixed an older argument bug: `init` read its chain source from
+`args[3]`, so `berlin-wallet init esplora:...` was ignored. The chain source is
+the first positional after the command.
 ## 2026-10-30 — The devShell carries its own Go and an optimized C flag
 
 The Nix shell could not build the workspace on a machine whose `target/` had
