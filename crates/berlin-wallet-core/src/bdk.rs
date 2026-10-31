@@ -154,6 +154,49 @@ fn signers_from_descriptor(wallet: &Wallet, descriptor: &str) -> anyhow::Result<
     ))
 }
 
+/// Exact pre-sign figures for one on-chain send.
+#[derive(Debug, Clone)]
+pub struct SendQuote {
+    pub destination: bitcoin::Address,
+    pub amount: bitcoin::Amount,
+    pub fee_rate: bitcoin::FeeRate,
+    pub fee: bitcoin::Amount,
+    pub total_debit: bitcoin::Amount,
+    pub change: bitcoin::Amount,
+    pub input_count: usize,
+    pub txid: bitcoin::Txid,
+}
+
+/// A built PSBT plus its quote. Signing happens only in
+/// [`BdkWallet::execute_send`].
+#[derive(Debug)]
+pub struct SendPlan {
+    psbt: bitcoin::psbt::Psbt,
+    pub quote: SendQuote,
+}
+
+/// A broadcast send: the pre-sign quote plus the final transaction data.
+#[derive(Debug)]
+pub struct SignedSend {
+    pub quote: SendQuote,
+    pub txid: bitcoin::Txid,
+    pub vsize: u64,
+    pub tx: bitcoin::Transaction,
+}
+
+/// One wallet-graph transaction with confirmation state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnchainHistoryEntry {
+    pub txid: bitcoin::Txid,
+    pub sent: bitcoin::Amount,
+    pub received: bitcoin::Amount,
+    /// `None` when the inputs are not all known to this wallet (received-only).
+    pub fee: Option<bitcoin::Amount>,
+    pub height: Option<u32>,
+    pub confirmations: Option<u32>,
+    pub last_seen: Option<u64>,
+}
+
 /// BDK wallet plus its SQLite persister, software signers, and chain backend.
 ///
 /// The wrapper exists because `PersistedWallet<Connection>` needs the
@@ -311,6 +354,133 @@ impl BdkWallet {
             .apply_unconfirmed_txs([(tx.clone(), last_seen)]);
         self.persist()?;
         Ok(tx)
+    }
+
+    /// Build a first-class on-chain send and return its exact pre-sign quote.
+    ///
+    /// Nothing is signed or broadcast here. The quote is derived from the
+    /// finalized PSBT so the fee, total debit, and change are exact before the
+    /// caller decides to execute.
+    pub fn quote_send(
+        &mut self,
+        destination: &bitcoin::Address,
+        amount: bitcoin::Amount,
+        fee_rate: bitcoin::FeeRate,
+    ) -> anyhow::Result<SendPlan> {
+        anyhow::ensure!(amount > bitcoin::Amount::ZERO, "amount must be positive");
+        anyhow::ensure!(
+            fee_rate.to_sat_per_kwu() > 0,
+            "fee rate must be greater than zero"
+        );
+
+        let mut builder = self.wallet_mut().build_tx();
+        builder.add_recipient(destination.script_pubkey(), amount);
+        builder.fee_rate(fee_rate);
+        let psbt = builder.finish()?;
+
+        let fee = self.wallet().calculate_fee(&psbt.unsigned_tx)?;
+        let change = psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .filter(|output| output.script_pubkey != destination.script_pubkey())
+            .filter(|output| self.wallet().is_mine(output.script_pubkey.clone()))
+            .fold(bitcoin::Amount::ZERO, |total, output| total + output.value);
+        let total_debit = amount
+            .checked_add(fee)
+            .ok_or_else(|| anyhow::anyhow!("amount plus fee overflows"))?;
+        let txid = psbt.unsigned_tx.compute_txid();
+        let input_count = psbt.inputs.len();
+
+        Ok(SendPlan {
+            psbt,
+            quote: SendQuote {
+                destination: destination.clone(),
+                amount,
+                fee_rate,
+                fee,
+                total_debit,
+                change,
+                input_count,
+                txid,
+            },
+        })
+    }
+
+    /// Sign, finalize, broadcast, and persist a [`SendPlan`].
+    pub async fn execute_send(&mut self, plan: SendPlan) -> anyhow::Result<SignedSend> {
+        let SendPlan { mut psbt, quote } = plan;
+        let external_signers = self.external_signers.clone();
+        let internal_signers = self.internal_signers.clone();
+        let finalized = self.wallet_mut().sign_with_signers(
+            &mut psbt,
+            &[&external_signers, &internal_signers],
+            SignOptions::default(),
+        )?;
+        anyhow::ensure!(finalized, "BDK could not finalize the send PSBT");
+
+        let tx = psbt.extract_tx()?;
+        anyhow::ensure!(
+            tx.compute_txid() == quote.txid,
+            "signing changed the send txid; refusing to broadcast"
+        );
+        self.chain
+            .broadcast(&tx)
+            .await
+            .map_err(ChainError::into_anyhow)?;
+        let last_seen = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.wallet_mut()
+            .apply_unconfirmed_txs([(tx.clone(), last_seen)]);
+        self.persist()?;
+
+        Ok(SignedSend {
+            vsize: tx.vsize() as u64,
+            txid: tx.compute_txid(),
+            tx,
+            quote,
+        })
+    }
+
+    /// On-chain transaction history with confirmation state, newest first.
+    ///
+    /// The BDK graph is authoritative for confirmations; the journal only
+    /// records the operator's send decisions.
+    pub fn history(&self) -> Vec<OnchainHistoryEntry> {
+        let tip = self.wallet().latest_checkpoint().height();
+        let mut entries: Vec<OnchainHistoryEntry> = self
+            .wallet()
+            .transactions()
+            .map(|wallet_tx| {
+                let tx = &wallet_tx.tx_node.tx;
+                let (sent, received) = self.wallet().sent_and_received(tx);
+                let fee = self.wallet().calculate_fee(tx).ok();
+                let (height, confirmations, last_seen) = match wallet_tx.chain_position {
+                    ChainPosition::Confirmed { anchor, .. } => {
+                        let height = anchor.block_id.height;
+                        (
+                            Some(height),
+                            Some(tip.saturating_sub(height).saturating_add(1)),
+                            None,
+                        )
+                    }
+                    ChainPosition::Unconfirmed { last_seen, .. } => (None, None, last_seen),
+                };
+                OnchainHistoryEntry {
+                    txid: wallet_tx.tx_node.txid,
+                    sent,
+                    received,
+                    fee,
+                    height,
+                    confirmations,
+                    last_seen,
+                }
+            })
+            .collect();
+        entries.sort_by(|a, b| b.height.cmp(&a.height).then_with(|| b.txid.cmp(&a.txid)));
+        entries
     }
 
     /// Full script-pubkey scan for a restored wallet.
@@ -728,6 +898,51 @@ mod tests {
             .apply_block_connected_to(&block, height, connected_to)
             .expect("apply anchor block");
         block_hash
+    }
+
+    #[tokio::test]
+    async fn a_send_quote_and_broadcast_use_the_requested_fee_rate() {
+        let tip = ChainTip {
+            height: 200,
+            hash: hash(0xCD),
+        };
+        let mut fixture = wallet_at_with_anchor(
+            ChainKind::Esplora,
+            100,
+            hash(2),
+            Some(50),
+            tip,
+            Some(hash(2)),
+        );
+        let destination = "bcrt1qdpejjzcmhslvkf0katf7wnjumg8qlj50rxarzj66tfl0vl8cgdtsyy7fjf"
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .expect("valid address")
+            .require_network(Network::Regtest)
+            .expect("regtest address");
+        let fee_rate = bitcoin::FeeRate::from_sat_per_vb(2).expect("valid fee rate");
+        let amount = bitcoin::Amount::from_sat(10_000);
+
+        let plan = fixture
+            .wallet
+            .quote_send(&destination, amount, fee_rate)
+            .expect("quote");
+        let quote = plan.quote.clone();
+        assert!(quote.fee > bitcoin::Amount::ZERO);
+        assert_eq!(quote.total_debit, amount + quote.fee);
+        assert!(quote.change > bitcoin::Amount::ZERO);
+        assert_eq!(quote.input_count, 1);
+
+        let signed = fixture.wallet.execute_send(plan).await.expect("broadcast");
+        assert_eq!(signed.txid, quote.txid);
+        assert!(signed.vsize > 0);
+
+        let history = fixture.wallet.history();
+        let entry = history
+            .iter()
+            .find(|entry| entry.txid == signed.txid)
+            .expect("send must appear in history");
+        assert!(entry.sent > bitcoin::Amount::ZERO);
+        assert_eq!(entry.height, None, "the send is unconfirmed");
     }
 
     #[test]

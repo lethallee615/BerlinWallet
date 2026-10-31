@@ -210,8 +210,8 @@ mod tests {
     use fedimint_eventlog::EventLogId;
 
     use super::*;
-    use crate::journal::{DepositRow, Journal};
-    use crate::ops::DepositId;
+    use crate::journal::{DepositRow, Journal, OnchainSendRow};
+    use crate::ops::{DepositId, OnchainSendId};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rocksdb_journal_rows_survive_reopen() {
@@ -239,6 +239,45 @@ mod tests {
         assert_eq!(row.id, id);
         assert_eq!(row.amount, amount);
         assert_eq!(row.federation_id, federation_id);
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rocksdb_onchain_send_survives_reopen() {
+        let path =
+            std::env::temp_dir().join(format!("berlin-wallet-rocksdb-{}", uuid::Uuid::now_v7()));
+        let id = OnchainSendId::new();
+        let txid: bitcoin::Txid =
+            "0000000000000000000000000000000000000000000000000000000000000066"
+                .parse()
+                .expect("valid txid");
+
+        {
+            let db = open_rocksdb(&path).await.expect("open rocksdb");
+            let journal = Journal::new(db, vec![0x00]);
+            let row = OnchainSendRow::broadcast(
+                id.clone(),
+                "bcrt1qdpejjzcmhslvkf0katf7wnjumg8qlj50rxarzj66tfl0vl8cgdtsyy7fjf".to_owned(),
+                bitcoin::Amount::from_sat(10_000),
+                2,
+                bitcoin::Amount::from_sat(300),
+                150,
+                bitcoin::Amount::from_sat(39_700),
+                txid,
+            );
+            journal
+                .insert_onchain_send(&row)
+                .await
+                .expect("insert on-chain send");
+        }
+
+        let db = open_rocksdb(&path).await.expect("reopen rocksdb");
+        let journal = Journal::new(db, vec![0x00]);
+        let rows = journal.onchain_sends_all().await.expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].txid, txid);
 
         let _ = std::fs::remove_dir_all(path);
     }

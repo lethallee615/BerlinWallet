@@ -2745,3 +2745,38 @@ hidden.
 Gate (PTY): Ctrl+C printed the interrupt hint, Ctrl+Z printed the suspend
 warning, `quit` exited 0, and an immediate second `run` opened the same data
 directory. A `RUST_LOG=debug` quit produced no WARN or ERROR lines.
+
+## 47. First-class on-chain send
+
+- `BdkWallet::quote_send(destination, amount, fee_rate)` builds the PSBT with
+  `build_tx().add_recipient(..).fee_rate(..).finish()`, then reports the exact
+  fee (`Wallet::calculate_fee`), total debit, change, input count, and txid.
+  Nothing is signed or broadcast at quote time.
+- `BdkWallet::execute_send(plan)` signs with the BIP84 signers, extracts the
+  transaction, verifies the txid did not change, broadcasts through
+  `ChainBackend::broadcast`, applies the unconfirmed tx to the wallet graph, and
+  persists.
+- `OnchainSendRow` is stored under tag `0x09` with state `Broadcast`; it records
+  address, amount, fee rate, fee, vsize, change, and txid. `list-onchain` reads
+  both the journal rows and `Wallet::history()` (confirmation state and
+  sent/received/fee from the BDK graph).
+- CLI: `send <address> <sat> <sat/vb>` prints the quote before signing;
+  `list-onchain` prints journalled sends and wallet transactions.
+
+Live gate (2026-10-31, devimint v0.12.0, bitcoind backend on the same node):
+
+- 10,000 sat at 2 sat/vB: fee 281 sat, total debit 10,281 sat, change
+  9,989,719 sat, 1 input, txid `65ab176d…`.
+- Broadcast succeeded; the journal row and the unconfirmed wallet transaction
+  appeared immediately; after one block the transaction showed `height 156
+  (1 conf)`.
+- Restart preserved the journal row and history.
+- `invalidateblock` at height 156 reduced the remote tip to 155. The wallet
+  logged the orphaned-checkpoint rebuild (`scan_floor=0`,
+  `floor_source=configured_birthday`), full-scanned, and reported the send
+  unconfirmed. Re-mining the mempool returned it to `height 156 (1 conf)`.
+- Signet is not available in this repository's harness; #38 tracks that run.
+
+Known window: the journal row is inserted after broadcast. A crash between the
+broadcast and the insert leaves the transaction in the BDK graph but without the
+audit row; the crash matrix (#25) owns that window.

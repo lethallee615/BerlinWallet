@@ -4,6 +4,30 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-31 — First-class on-chain send
+
+The BDK wallet could reveal addresses and fund federation deposits, but there was
+no arbitrary on-chain send. `send <address> <sat> <sat/vb>` now builds the
+transaction, prints an exact quote before signing (amount, fee, total debit,
+change, input count, txid), signs with the BIP84 descriptors, broadcasts through
+the selected `ChainBackend`, and records the result in the journal. `list-onchain`
+shows the journalled sends and the wallet graph's transactions with confirmation
+state.
+
+The quote and the journal row are deliberately separate. The quote is derived
+from the finalized PSBT, so the fee is exact before signing; the journal row is
+written only after a successful broadcast. A crash between broadcast and the
+journal insert leaves the transaction in the BDK graph (and in `list-onchain`'s
+wallet section) but without the audit row; that window belongs to the crash
+matrix (#25), not to the send itself.
+
+Live gates on devimint (bitcoind backend): a 10,000 sat send at 2 sat/vB paid a
+281 sat fee with 9,989,719 sat change, confirmed, survived restart, and reorged
+cleanly. `invalidateblock` at the send's height made the wallet rebuild from the
+orphaned checkpoint and report the send unconfirmed; re-mining the mempool
+returned it to one confirmation. The journal row stayed `Broadcast` throughout.
+A signet run remains open as #38.
+
 ## 2026-10-31 — Ctrl+C cancels; Ctrl+Z no longer strands the database lock
 
 `quit` sent the shutdown flag but did not wait for the sync tasks or consume the

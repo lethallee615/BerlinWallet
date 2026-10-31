@@ -18,9 +18,10 @@ deferred until after the MVP; mobile is later still.
 This is the current definition of the MVP. All boxes must be checked before the
 MVP is called done.
 
-- [ ] **On-chain send/receive** (#18). A user can reveal/receive to a BDK address and
+- [x] **On-chain send/receive** (#18). A user can reveal/receive to a BDK address and
       send an arbitrary on-chain payment from the BDK wallet, with fee control and
-      a recorded result.
+      a recorded result. Live on devimint, including a reorg; the signet run is
+      tracked as #38.
 - [x] **Peg-in and peg-out.** `walletv2` deposit/claim and withdrawal/send work
       end to end on devimint and Mutinynet. The combined `deposit` path is
       currently at risk (#14).
