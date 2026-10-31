@@ -31,8 +31,9 @@ needs a fresh join/restore to gain the module. All three BDK chain backends are
 wired behind `chain::ChainBackend`; Esplora, Electrum, and bitcoind RPC all have
 live coverage (bitcoind's reorg path was verified on 2026-10-24; Electrum's
 sync/deposit/withdrawal/restart/`chain.json` gate on 2026-10-31).
-The BDK path has a first-class on-chain send with a fee quote and history, and
-the crash matrix still has known uncovered windows. See `ROADMAP.md` for the MVP
+The BDK path has a first-class on-chain send with a fee quote and history. The
+crash matrix is a deterministic CI suite (`src/crash_matrix.rs`); the
+broadcast-before-BDK/journal-persistence window remains devimint-only. See `ROADMAP.md` for the MVP
 checklist and `docs/STATUS.md` for the current snapshot.
 
 ## Crate layout
@@ -58,6 +59,7 @@ berlin_wallet/                  # workspace root
       src/journal_db.rs         # versioned DB journal, tags, atomic transitions
       src/sync.rs               # BDK, fedimint, and adoption tasks
       src/backup.rs             # full data-directory backup/import
+      src/crash_matrix.rs       # test-only deterministic crash/restart matrix
       src/seed.rs               # BIP39, canonical root secret, client identity
       src/network.rs            # chain-id -> bitcoin::Network, recorded choice
       src/restore_policy.rs     # restore warnings + balances-only assertions

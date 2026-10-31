@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: 5a365fd
+Main at: f6835ea
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -23,7 +23,7 @@ actually stands.
 | lightning | lnv2 send/receive | live | — | `API-VERIFICATION.md` §48, §49; paid send/receive, expiry, restart 2026-10-31; fresh join required |
 | chain-backends | Esplora, Electrum, bitcoind RPC behind one contract | live | — | `API-VERIFICATION.md` §51; Electrum live 2026-10-31; Esplora and bitcoind live |
 | restore-backup | Mnemonic restore, full-directory backup, documented limits | done | — | `API-VERIFICATION.md` §28–§31, §52; `docs/ARCHITECTURE.md` §8.1 |
-| crash-safety | Documented crash windows survive restart | in-progress | #25 | `API-VERIFICATION.md` §27; matrix is manual |
+| crash-safety | Documented crash windows survive restart | done | — | `API-VERIFICATION.md` §27, §53; deterministic CI matrix; one devimint-only window |
 | fee-preview | Claim and mintv2 operation fee before funding | live | — | `API-VERIFICATION.md` §50; devimint 2026-10-31 |
 | watch-progress | `watch` reports progress instead of polling silently | todo | #22 | Silent polling |
 
@@ -62,7 +62,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #25 |
+| P1 | — |
 | P2 | #9, #22, #27, #28, #29, #30, #38, #39 |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.

@@ -9,6 +9,8 @@ pub mod backup;
 pub mod bdk;
 pub mod chain;
 pub mod client;
+#[cfg(test)]
+mod crash_matrix;
 pub mod deposit;
 pub mod error;
 mod fault;

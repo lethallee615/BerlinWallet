@@ -39,10 +39,11 @@ MVP is called done.
       the limitations of a mnemonic-only restore are implemented and documented.
       The balances-only assertions and warning text are live in §52;
       in-flight-operation recovery remains an upstream gap.
-- [ ] **Crash safety** (#25). The state machines survive the documented crash windows
-      without double credit, double send, lost credit, or a stale open row. The
-      existing matrix is a start; the narrow broadcast/persist windows and
-      credited-deposit reorg need coverage.
+- [x] **Crash safety** (#25). The state machines survive the documented crash
+      windows without double credit, double send, lost credit, or a stale open
+      row. The deterministic matrix is in `API-VERIFICATION.md` §53; the
+      broadcast-before-BDK/journal-persistence window is explicitly devimint-only,
+      and the credited-deposit reorg remains the separate live gap (§41).
 - [x] **Fee preview at request-deposit** (#21). The deposit flow shows the on-chain
       claim fee, the walletv2 + mintv2 operation-fee estimate, and the estimated
       net before the user commits funds. The actual fee is recorded and a
