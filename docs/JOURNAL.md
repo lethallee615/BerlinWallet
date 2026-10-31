@@ -4,6 +4,42 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-31 — lnv2 client API verified before implementation
+
+Lightning was the next MVP gap, but the `fedimint-lnv2-client` surface had never
+been checked against the pinned version. That check is now in
+`docs/API-VERIFICATION.md` §48; no lnv2 code is registered yet.
+
+The important findings:
+
+- `LightningClientInit::default()` needs no gateway URL. It builds
+  `RealGatewayConnection` with `GatewayApi::new(None, connector_registry)` and
+  discovers the federation's vetted gateways at runtime. Registering the module
+  is the whole client-side wiring.
+- The v2 module kind is `lnv2`, distinct from the v1 `ln` module. `fedimint-cli`
+  registers both; this wallet should register only v2, because the live
+  federation exposes `lnv2` and no `ln`.
+- `send`/`receive` return an `OperationId` (and `receive` also the Bolt11
+  invoice), with final-state enums and update streams. `get_invoice_send_status`
+  is the anti-double-payment check; `send` itself rejects a duplicate operation
+  id derived from `(invoice, 0)`.
+- The federation fee and the gateway fee are separate. `send_fee_quote` and
+  `receive_fee_quote` quote the federation transaction only; the gateway's fee
+  is in `RoutingInfo`/the operation meta. Client limits are 1.5% + 100 sat for
+  send and 0.5% + 50 sat for receive; invoice expiry is capped at one day.
+- Gateway registration is an admin/guardian action; clients only list and
+  select. A gateway needs both inbound and outbound Lightning liquidity plus
+  on-chain funds for channels. The protocol is not trustless: the federation is
+  custodial for ecash, the gateway is a Lightning counterparty that can
+  censor/delay and sees payment metadata, and routing nodes see the payment.
+- Events (`payment-send`, `payment-send-update`, `payment-receive`) and the
+  `custom_meta` field give the journal the same adoption hooks used by
+  deposits/withdrawals.
+
+Live check: the devimint v0.12.0 federation exposes `lnv2` as module 0. The
+runtime gates (paid, failed, expired, interrupted invoices, gateway selection,
+refund timing) belong to #23.
+
 ## 2026-10-31 — First-class on-chain send
 
 The BDK wallet could reveal addresses and fund federation deposits, but there was

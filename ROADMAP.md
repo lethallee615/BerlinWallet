@@ -27,9 +27,10 @@ MVP is called done.
       currently at risk (#14).
 - [x] **Ecash balance.** The mintv2 BTC balance is readable and represented
       distinctly from the BDK on-chain balance.
-- [ ] **Lightning send/receive via `lnv2`** (#19, #23). Invoices can be paid and received
+- [ ] **Lightning send/receive via `lnv2`** (#23). Invoices can be paid and received
       through the federation's Lightning module, with final states and failure
-      handling.
+      handling. The pinned client API is verified in `API-VERIFICATION.md` §48;
+      the module is not registered yet.
 - [ ] **Three chain backends** (#24). The BDK chain source can be Esplora, Electrum, or
       bitcoind RPC, selected by configuration, with the same reorg and persistence
       guarantees.
@@ -86,9 +87,9 @@ This is the work that must happen before “real use” is more than an aspirati
 
 ### Lightning via `lnv2`
 
-- Register and verify `fedimint-lnv2-client` against the pinned Fedimint version;
-  it is currently **not** registered and its API surface has not been verified in
-  this repository.
+- [x] Verify `fedimint-lnv2-client` against the pinned Fedimint version; the
+  API surface is recorded in `API-VERIFICATION.md` §48.
+- [ ] Register `LightningClientInit::default()` and wire send/receive (#23).
 - Define the gateway/lightning requirements for paying and receiving invoices,
   including liquidity and routing assumptions.
 - Build send/receive state machines with the same journal discipline as the

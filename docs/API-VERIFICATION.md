@@ -2780,3 +2780,204 @@ Live gate (2026-10-31, devimint v0.12.0, bitcoind backend on the same node):
 Known window: the journal row is inserted after broadcast. A crash between the
 broadcast and the insert leaves the transaction in the BDK graph but without the
 audit row; the crash matrix (#25) owns that window.
+
+## 48. lnv2 client API — source-verified
+
+Verified against the pinned Fedimint tag `v0.12.0` (`2ead392`) in the
+`modules/fedimint-lnv2-client` and `modules/fedimint-lnv2-common` crates. No
+lnv2 code is registered in this workspace yet; this section is the gate for
+#23.
+
+### 48.1 Identity and registration
+
+- Crate: `fedimint-lnv2-client = "0.12.0"` (path `modules/fedimint-lnv2-client`),
+  with `fedimint-lnv2-common` as its common types. The workspace
+  `[patch.crates-io]` already pins both to the `v0.12.0` tag.
+- Module kind is `lnv2` (`modules/fedimint-lnv2-common/src/lib.rs:47`),
+  consensus version 1.0. It is distinct from the v1 `ln` module.
+- `LightningClientInit` is at `modules/fedimint-lnv2-client/src/lib.rs:222`.
+  `Default` (`:236`) sets `gateway_conn = None` and `custom_meta_fn = Null`.
+  `ClientModuleInit::init` (`:258`) then builds
+  `RealGatewayConnection { api: GatewayApi::new(None, connector_registry) }`
+  (`:282-290`). **There is no client-side gateway URL to configure**; gateways
+  come from the federation's registered list.
+- Register with `ClientBuilder::with_module(LightningClientInit::default())` and
+  read the module with
+  `Client::get_first_module::<LightningClientModule>()`. Alias the import
+  (`Lnv2ClientInit`) because the v1 crate exports the same type name;
+  `fedimint-cli` registers both (`fedimint-cli/src/lib.rs:836,841`), while this
+  wallet only needs v2.
+- Live check: the devimint v0.12.0 federation exposes `lnv2` as module 0
+  (`join` output: `module 0: lnv2`, `primary BTC module: Some(2)`).
+
+### 48.2 Send
+
+```rust
+LightningClientModule::send(
+    invoice: Bolt11Invoice,
+    gateway: Option<SafeUrl>,
+    custom_meta: serde_json::Value,
+) -> Result<OperationId, SendPaymentError>
+```
+
+`modules/fedimint-lnv2-client/src/lib.rs:539`. It validates the invoice amount,
+expiry, and currency, derives a deterministic operation id from
+`(invoice, 0u64)`, rejects `operation_exists` as
+`SendPaymentError::DuplicatePaymentAttempt`, selects a gateway when `None`,
+checks the gateway fee/expiry limits, builds an `OutgoingContract`, submits a
+transaction with one Lightning output, and logs `SendPaymentEvent`.
+
+- `await_final_send_operation_state(operation_id)
+  -> anyhow::Result<FinalSendOperationState>` (`:797`);
+  `FinalSendOperationState::{Success([u8; 32]), Refunded, Failure}` (`:170`).
+- `subscribe_send_operation_state_updates(operation_id)` (`:732`) yields
+  `SendOperationState::{Funding, Funded, Success, Refunding, Refunded, Failure}`
+  (`:153`).
+- `get_invoice_send_status(&Bolt11Invoice) -> anyhow::Result<InvoiceSendStatus>`
+  (`:687`); `InvoiceSendStatus::{NotAttempted, InFlight, Succeeded, Failed}`
+  (`:1365`). Call this before paying an invoice through any other path; only
+  `NotAttempted` is safe to treat as unpaid.
+- `SendOperationMeta` (`:82`) stores `change_outpoint_range`, `gateway`,
+  `contract`, `invoice`, and `custom_meta`; `gateway_fee()` (`:99`) returns the
+  absolute gateway fee from the invoice/contract.
+- Errors: `SendPaymentError` (`:1378`) covers missing amount, expiry, duplicate
+  attempt, gateway selection, unsupported federation, fee/expiry limits,
+  currency mismatch, and funding failure.
+
+### 48.3 Receive
+
+```rust
+LightningClientModule::receive(
+    amount: Amount,
+    expiry_secs: u32,
+    description: Bolt11InvoiceDescription,
+    gateway: Option<SafeUrl>,
+    custom_meta: serde_json::Value,
+) -> Result<(Bolt11Invoice, OperationId), ReceiveError>
+```
+
+`modules/fedimint-lnv2-client/src/lib.rs:835`. The gateway creates the Bolt11
+invoice; the client creates the `IncomingContract` and returns both the invoice
+and the operation id.
+
+- `await_final_receive_operation_state(operation_id)
+  -> anyhow::Result<FinalReceiveOperationState>` (`:1204`);
+  `FinalReceiveOperationState::{Expired, Claimed, Failure}` (`:210`).
+- `subscribe_receive_operation_state_updates(operation_id)` (`:1163`) yields
+  `ReceiveOperationState::{Pending, Expired, Claiming, Claimed, Failure}`
+  (`:195`).
+- `ReceiveOperationMeta` (`:105`) stores `gateway`, `contract`, `invoice`, and
+  `custom_meta`; `gateway_fee()` (`:118`).
+- Limits: `MAX_INVOICE_EXPIRY_SECS = 86400`
+  (`gateway_api.rs:128`), and `MINIMUM_INCOMING_CONTRACT_AMOUNT = 5 sat`
+  (`common/lib.rs:52`). `ReceiveError` (`:1407`) covers gateway selection,
+  unsupported federation, fee, small amount, invalid/incorrect invoice, and
+  expiry.
+
+### 48.4 Fees
+
+- `send_fee_quote(amount: Amount) -> anyhow::Result<FeeQuote>` (`:913`) and
+  `receive_fee_quote(amount: Amount) -> anyhow::Result<FeeQuote>` (`:884`)
+  quote the **federation transaction** fee: Lightning input/output fees, mint
+  fees on the funding notes/change, and sub-denomination dust. The gateway's
+  off-chain fee is **not** included.
+- The gateway fee comes from `RoutingInfo` (`gateway_api.rs:149`):
+  `send_fee_minimum` (direct swap), `send_fee_default` (Lightning swap),
+  `send_fee` limits, `receive_fee`, and `expiration_delta_{minimum,default}`.
+  It is also recoverable from `SendOperationMeta::gateway_fee()` /
+  `ReceiveOperationMeta::gateway_fee()`.
+- `PaymentFee` (`gateway_api.rs:194`) is `{ base: Amount, parts_per_million }`.
+  Client-enforced limits: send `1.5% + 100 sat` (`SEND_FEE_LIMIT`, `:203`),
+  receive `0.5% + 50 sat` (`RECEIVE_FEE_LIMIT`, `:217`). The outgoing contract
+  expiration delta is capped at 1440 blocks.
+- `spendable_amount(balance: Amount, gateway: Option<SafeUrl>) -> anyhow::Result<Amount>`
+  (`:959`) binary-searches the largest invoice amount that fits the balance,
+  using the default send fee. It is point-in-time; `send` remains authoritative.
+- `FeeQuote` is `fedimint_client_module::transaction::FeeQuote`, the same
+  non-serializable type the withdrawal path already wraps in `FeeQuoteWire`.
+  Reuse that wire form or add an lnv2-specific one.
+- `LightningClientConfig` (`common/config.rs:39`) exposes `tpe_agg_pk`,
+  `tpe_pks`, `fee_consensus`, and `network`. `FeeConsensus` (`:62`) is the
+  federation's per-input/output fee.
+
+### 48.5 Gateways
+
+- `select_gateway(invoice: Option<Bolt11Invoice>)
+  -> Result<(SafeUrl, RoutingInfo), SelectGatewayError>` (`:454`): queries the
+  federation's vetted gateways, prefers the invoice's payee key, checks
+  `routing_info`, and falls back to a random online gateway.
+- `list_gateways(peer: Option<PeerId>)` (`:493`) and
+  `routing_info(&SafeUrl)` (`:512`).
+- Federation API (`api.rs:21-40`): `gateways()`, `gateways_from_peer(peer)`,
+  `add_gateway(auth, gateway)`, `remove_gateway(auth, gateway)`,
+  `consensus_block_count()`, `await_preimage(outpoint, expiration)`,
+  `await_incoming_contract(contract_id, expiration)`,
+  `await_incoming_contracts(start, n)`.
+- Adding/removing a gateway is an **admin/guardian** action (`ApiAuth`); a
+  normal client only lists and selects. `fedimint-cli` exposes
+  `lnv2 gateways add/remove` for that admin path
+  (`modules/fedimint-lnv2-client/src/cli.rs`).
+- Devimint's `dev-fed` starts LND/LDK gateways and registers them; the client's
+  `list_gateways` is the runtime check that a gateway is reachable.
+
+### 48.6 Events and journal hooks
+
+- `SendPaymentEvent { operation_id, amount, fee }`, kind `payment-send`,
+  persistent (`modules/fedimint-lnv2-client/src/events.rs:8,16`).
+- `SendPaymentUpdateEvent { operation_id, status }`, kind
+  `payment-send-update` (`:31,38`); status is `Success([u8; 32])` or `Refunded`.
+- `ReceivePaymentEvent { operation_id, amount, fee }`, kind `payment-receive`
+  (`:45,56`).
+- `custom_meta: Value` is carried in both operations and in
+  `SendOperationMeta`/`ReceiveOperationMeta`. Use the journal id there, as the
+  withdrawal flow already does, so restart adoption can match an operation to a
+  row without re-sending.
+- Operation meta is `LightningOperationMeta::{Send, Receive, LnurlReceive}`
+  (`:78`). `SendOperationMeta.change_outpoint_range` is the handle for
+  `await_primary_module_outputs`, mirroring the withdrawal change wait.
+
+### 48.7 Trust and liquidity boundary
+
+This is **not** a trustless Lightning bridge. The gateway is a Lightning node
+that holds a channel balance and federation ecash; the federation is custodial
+for the ecash and can halt, censor, or rug; Lightning routing nodes see payment
+metadata. The protocol limits what each party can do, but it does not remove
+the counterparties.
+
+- **Send:** the client locks an `OutgoingContract` (payment hash, amount,
+  expiry, gateway claim key, client refund key). The gateway pays the invoice
+  and claims the contract by revealing the preimage; on failure it returns a
+  forfeit signature and the client refunds after expiry. The gateway can
+  censor/delay and sees the invoice, amount, and payment hash. The federation
+  enforces the contract but sees the same contract.
+- **Receive:** the client creates an `IncomingContract`; the gateway creates a
+  hold invoice. The payer pays the gateway's LN node; the federation provides
+  decryption shares; the gateway decrypts the preimage and claims, while the
+  client claims the incoming contract. The gateway can fail to route or stay
+  offline; the contract/expiry protects the client's funds, but the gateway
+  sees the payment and controls the invoice.
+- **Liquidity:** the gateway needs **outbound** liquidity to pay invoices for
+  clients and **inbound** liquidity to receive for them, plus on-chain funds for
+  channel management. A gateway without liquidity is online but cannot route;
+  `routing_info` succeeds while `send` can still fail.
+- **Fees:** the gateway's fee schedule is in `RoutingInfo`; the federation's
+  transaction fee is in `FeeQuote`. The client enforces the limits above and
+  rejects a gateway that exceeds them.
+
+### 48.8 Not verified / implementation notes for #23
+
+- The crate is not a workspace dependency yet; no lnv2 client is registered and
+  no live send/receive has been attempted.
+- `LightningClientInit::default()` needs no gateway configuration; the
+  federation's gateway list is the source. A test that needs a specific gateway
+  can pass `Some(SafeUrl)` to `send`/`receive`.
+- Register only v2 (`lnv2`); the live federation has no v1 `ln` module.
+- Reuse `FeeQuoteWire` for the two quote calls, and record both the gateway fee
+  and the federation fee in the journal row.
+- Call `get_invoice_send_status` before any retry; `send` itself rejects a
+  duplicate operation id.
+- The event names and `custom_meta` support the same adoption/journal pattern
+  as deposits and withdrawals.
+- Still unverified at runtime: gateway selection against a real federation,
+  paid/failed/expired/interrupted invoices, and refund/claim timing on a
+  regtest federation. Those are #23's live gates.
