@@ -28,7 +28,11 @@ pub use journal::{
     AdoptedClaim, ApplyResult, BindResult, DepositOrigin, DepositRow, DepositState, Journal,
     JournalBackend, WithdrawalRow, WithdrawalState,
 };
-pub use network::{client_network, network_from_chain_id};
+pub use network::{
+    NETWORK_FILE, client_network, init_network, load_network, network_from_chain_id,
+    network_from_recorded, parse_network, require_recorded_network, store_network,
+    verified_client_network,
+};
 pub use ops::{DepositId, WithdrawalId};
 pub use seed::{load_or_create_mnemonic, mnemonic_seed, root_secret_from_mnemonic};
 pub use sqlite::SqliteDb;

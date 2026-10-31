@@ -53,7 +53,7 @@ This is **pre-alpha software**.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 79 core tests, 4 CLI tests, and 4 FFI tests.
+- The current test suite is 86 core tests, 5 CLI tests, and 4 FFI tests.
 - There is **no mainnet operational testing** recorded in this repository and no
   independent security audit. The desktop GUI and mobile app are deferred until
   after the CLI-first MVP.
@@ -103,7 +103,17 @@ For Nix users, the §40 bindgen caveat does not apply: the shell derives
 `LIBCLANG_PATH` from the Nix `libclang` and
 `BINDGEN_EXTRA_CLANG_ARGS` from `clang -print-resource-dir`. The build and the
 `berlin-wallet` binary must be run **inside** the `nix develop` shell. The shell
-does not install rustup; rust-overlay provides the toolchain directly.
+does not install rustup; rust-overlay provides the toolchain directly. It also
+provides `go`, which `aws-lc-sys` needs when it builds its CMake feature probes
+from source, and exports an optimized `CFLAGS`/`CXXFLAGS` so a
+`_FORTIFY_SOURCE` probe is not rejected at `-O0`.
+
+If `aws-lc-sys` fails after switching between the Nix shell and the system
+toolchain, the CMake cache is stale. Remove the cached build and retry:
+
+```bash
+rm -rf target/debug/build/aws-lc-sys-*
+```
 
 ### Manual prerequisites
 
@@ -144,12 +154,15 @@ cargo test --workspace
 
 The CLI binary is a development harness, not a production UI:
 
-> **Warning:** `init` opens the BDK database with `Network::Regtest`. Do not run
-> it before joining a non-regtest federation. `run` opens the BDK wallet with
-> the federation's actual chain network.
+> **Network:** `init` requires `--network <mainnet|testnet|signet|regtest>` and
+> records the choice in `<data-dir>/network.json`. `run` verifies it against the
+> federation's chain-id and refuses a mismatch. An unknown chain-id fails closed
+> unless the recorded choice is `regtest` (the explicit devimint/custom opt-in).
+> A data directory created before `network.json` existed must run
+> `init --network <the network it already uses>` once.
 
 ```bash
-cargo run -p berlin-wallet-cli -- init
+cargo run -p berlin-wallet-cli -- init --network regtest
 ```
 
 It creates or opens `<data-dir>/bdk.sqlite` and related state.
@@ -170,7 +183,7 @@ crates/
     src/sync.rs                BDK, fedimint, and adoption tasks
     src/backup.rs              full data-directory backup/import
     src/seed.rs                BIP39, canonical root secret, client identity
-    src/network.rs             chain-id -> `bitcoin::Network`
+    src/network.rs             chain-id -> `bitcoin::Network` + recorded choice
     src/sqlite.rs              hand-written SQLite `Database` backend (mobile)
     src/wire.rs                serde wire form of `FeeQuote`
     src/error.rs               `PegError`, transient/permanent classification
