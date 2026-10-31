@@ -244,6 +244,16 @@ pub trait JournalBackend: Send + Sync {
         id: &DepositId,
         txid: bitcoin::Txid,
     ) -> anyhow::Result<()>;
+    /// Record the funded output as soon as the funding transaction is built.
+    ///
+    /// `Claim` binding still happens only when a receive operation succeeds;
+    /// this earlier write exists so a funded row is observable and so restart
+    /// recovery has an outpoint without waiting for the federation.
+    async fn set_deposit_funding_outpoint(
+        &self,
+        id: &DepositId,
+        outpoint: bitcoin::OutPoint,
+    ) -> anyhow::Result<()>;
     async fn set_deposit_address_if(
         &self,
         id: &DepositId,
@@ -438,6 +448,20 @@ impl JournalBackend for MemoryJournal {
         let mut inner = self.inner.lock().await;
         if let Some(row) = inner.deposits.get_mut(id) {
             row.funding_txid = Some(txid);
+            row.updated_at = now_ms();
+        }
+        Ok(())
+    }
+
+    async fn set_deposit_funding_outpoint(
+        &self,
+        id: &DepositId,
+        outpoint: bitcoin::OutPoint,
+    ) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
+        if let Some(row) = inner.deposits.get_mut(id) {
+            row.funding_outpoint = Some(outpoint);
+            row.funding_txid = Some(outpoint.txid);
             row.updated_at = now_ms();
         }
         Ok(())
@@ -1228,6 +1252,36 @@ mod tests {
                 .expect("pending index")
                 .is_empty(),
             "filling net_credit must remove the pending index entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn funding_outpoint_is_recorded_before_the_claim() {
+        let journal = Journal::in_memory();
+        let federation_id = FederationId::dummy();
+        let row = journal
+            .insert_deposit(&DepositRow::requested(
+                DepositId::new(),
+                federation_id,
+                EventLogId::LOG_START,
+                bitcoin::Amount::from_sat(50_000),
+            ))
+            .await
+            .expect("insert");
+        let outpoint = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([0x55; 32]), 1);
+
+        journal
+            .set_deposit_funding_outpoint(&row.id, outpoint)
+            .await
+            .expect("record outpoint");
+
+        let row = journal.deposit(&row.id).await.unwrap().unwrap();
+        assert_eq!(row.funding_outpoint, Some(outpoint));
+        assert_eq!(row.funding_txid, Some(outpoint.txid));
+        assert_eq!(
+            row.state,
+            DepositState::AwaitingAddress,
+            "recording the funded output must not claim or advance the row"
         );
     }
 

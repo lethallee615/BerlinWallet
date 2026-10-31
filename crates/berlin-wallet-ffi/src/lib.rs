@@ -27,12 +27,14 @@ use berlin_wallet_core::journal::{
     DepositOrigin, DepositRow, DepositState, Journal, WithdrawalOrigin, WithdrawalRow,
     WithdrawalState,
 };
-use berlin_wallet_core::network::client_network;
+use berlin_wallet_core::network::{
+    init_network, parse_network, require_recorded_network, verified_client_network,
+};
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::withdrawal;
-use bitcoin::Amount;
+use bitcoin::{Amount, Network};
 use fedimint_client::{Client, ClientHandleArc};
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::config::FederationId;
@@ -111,6 +113,7 @@ pub enum WithdrawalStateView {
 pub struct InitView {
     pub data_dir: String,
     pub mnemonic_path: String,
+    pub network: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -189,7 +192,9 @@ struct WalletState {
     bdk: Arc<Mutex<BdkWallet>>,
     federation_id: FederationId,
     client_identity: String,
+    network: Network,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    watchers: sync::DepositWatchers,
 }
 
 /// One FFI object. `new` only stores the data dir; `init` creates/loads the
@@ -224,16 +229,18 @@ impl PegWallet {
         })
     }
 
-    /// Create/load the mnemonic. This is local-only and fast; joining or
-    /// restoring is a separate async call.
-    pub fn init(&self) -> Result<InitView> {
+    /// Create/load the mnemonic and record the network choice. This is
+    /// local-only and fast; joining or restoring is a separate async call.
+    pub fn init(&self, network: String) -> Result<InitView> {
         self.ensure_open()?;
         std::fs::create_dir_all(&self.data_dir)?;
+        let network = init_network(&self.data_dir, parse_network(&network)?)?;
         let mnemonic_path = self.data_dir.join("mnemonic");
         seed::load_or_create_mnemonic(&mnemonic_path)?;
         Ok(InitView {
             data_dir: self.data_dir.display().to_string(),
             mnemonic_path: mnemonic_path.display().to_string(),
+            network: network.to_string(),
         })
     }
 
@@ -244,6 +251,7 @@ impl PegWallet {
             return Err(err("wallet is already joined/restored"));
         }
         std::fs::create_dir_all(&self.data_dir)?;
+        let recorded = require_recorded_network(&self.data_dir)?;
         let mnemonic = seed::load_or_create_mnemonic(&self.data_dir.join("mnemonic"))?;
         let seed = seed::mnemonic_seed(&mnemonic);
         let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
@@ -267,7 +275,7 @@ impl PegWallet {
             .await?;
         let client =
             build_client(client_partition, connectors, root_secret.clone(), invite).await?;
-        let network = client_network(&client).await?;
+        let network = verified_client_network(&client, recorded).await?;
         let bdk = BdkWallet::open_or_create(
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
@@ -280,7 +288,9 @@ impl PegWallet {
             bdk: Arc::new(Mutex::new(bdk)),
             federation_id,
             client_identity,
+            network,
             tasks: Vec::new(),
+            watchers: sync::DepositWatchers::new(),
         };
         self.install_state(state).await?;
         self.wallet_info().await
@@ -297,11 +307,17 @@ impl PegWallet {
 
     /// Restore a fresh data directory from the mnemonic. This performs the
     /// 0.12.0 recover/wait/shutdown/reopen flow and a full BDK scan.
-    pub async fn restore(&self, invite_code: String, chain_source: String) -> Result<RestoreView> {
+    pub async fn restore(
+        &self,
+        invite_code: String,
+        chain_source: String,
+        network: String,
+    ) -> Result<RestoreView> {
         self.ensure_open()?;
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
         }
+        let network = parse_network(&network)?;
         let mnemonic_path = self.data_dir.join("mnemonic");
         if !mnemonic_path.is_file() {
             return Err(err(format!(
@@ -326,7 +342,8 @@ impl PegWallet {
             .await?;
         let client =
             recover_client(client_db(&db, 0), connectors, root_secret.clone(), invite).await?;
-        let network = client_network(&client).await?;
+        let network = verified_client_network(&client, network).await?;
+        init_network(&self.data_dir, network)?;
         let mut bdk = BdkWallet::open_or_create(
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
@@ -355,7 +372,9 @@ impl PegWallet {
             bdk: Arc::new(Mutex::new(bdk)),
             federation_id,
             client_identity: client_identity.clone(),
+            network,
             tasks: Vec::new(),
+            watchers: sync::DepositWatchers::new(),
         };
         self.install_state(state).await?;
         Ok(RestoreView {
@@ -427,6 +446,11 @@ impl PegWallet {
             return Ok(());
         };
 
+        // The observers hold client handles. Let them exit before the
+        // `Arc::try_unwrap` below, otherwise shutdown reports a lingering
+        // reference even though nothing is actually running.
+        state.watchers.wait_all().await;
+
         for mut task in state.tasks {
             if tokio::time::timeout(Duration::from_secs(5), &mut task)
                 .await
@@ -493,6 +517,23 @@ impl PegWallet {
         )
         .await?;
         drop(bdk);
+        // Fund returns as soon as the transaction is broadcast. The watcher
+        // follows the row to a terminal state in the background, the same way
+        // the CLI does, and is resumed from the journal on the next `open`.
+        if let Some(shutdown) = self
+            .shutdown
+            .lock()
+            .ok()
+            .and_then(|sender| sender.as_ref().map(watch::Sender::subscribe))
+        {
+            state.watchers.spawn(
+                state.client.clone(),
+                state.journal.clone(),
+                state.federation_id,
+                DepositId(deposit_id.clone()),
+                shutdown,
+            );
+        }
         let row = state
             .journal
             .deposit(&DepositId(deposit_id))
@@ -690,6 +731,12 @@ impl PegWallet {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let client = state.client.clone();
         let journal = state.journal.clone();
+        let federation_id = state.federation_id;
+        let watchers = state.watchers.clone();
+        let resumed = watchers
+            .resume(&client, &journal, federation_id, shutdown_rx.clone())
+            .await?;
+        let _ = resumed;
         let bdk = state.bdk.clone();
         state.tasks = vec![
             tokio::spawn(sync::bdk_chain_task(bdk, shutdown_rx.clone())),
@@ -701,7 +748,7 @@ impl PegWallet {
             tokio::spawn(sync::adoption_task(
                 client,
                 journal,
-                state.federation_id,
+                federation_id,
                 shutdown_rx,
             )),
         ];
@@ -730,6 +777,7 @@ impl PegWallet {
         let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path)?;
         let seed = seed::mnemonic_seed(&mnemonic);
         let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
+        let recorded = require_recorded_network(&self.data_dir)?;
         let db = open_rocksdb(&self.data_dir.join("fedimint.rocksdb")).await?;
         let journal = Journal::new(db.clone(), vec![0x00]);
         let connectors = ConnectorRegistry::build_from_client_defaults()
@@ -744,7 +792,7 @@ impl PegWallet {
             return Err(err("backup federation id mismatch"));
         }
         let client_identity = seed::client_identity(&root_secret, federation_id)?;
-        let network = client_network(&client).await?;
+        let network = verified_client_network(&client, recorded).await?;
         let bdk = BdkWallet::open_or_create(
             &self.data_dir.join(BDK_DB_FILE),
             &seed,
@@ -757,7 +805,9 @@ impl PegWallet {
             bdk: Arc::new(Mutex::new(bdk)),
             federation_id,
             client_identity,
+            network,
             tasks: Vec::new(),
+            watchers: sync::DepositWatchers::new(),
         };
         self.install_state(state).await?;
         self.wallet_info().await
@@ -766,7 +816,7 @@ impl PegWallet {
     async fn wallet_info(&self) -> Result<WalletInfo> {
         let guard = self.inner.lock().await;
         let state = guard.as_ref().ok_or_else(|| err("wallet is not joined"))?;
-        let network = client_network(&state.client).await?;
+        let network = state.network;
         let (onchain_balance_sat, chain_source, chain_kind) = {
             let bdk = state.bdk.lock().await;
             let balance = bdk.balance().trusted_spendable().to_sat();
@@ -919,7 +969,9 @@ mod tests {
     async fn shutdown_is_terminal_and_methods_error_not_panic() {
         let wallet = PegWallet::new(std::env::temp_dir().to_string_lossy().into_owned());
         wallet.shutdown().await.expect("first shutdown");
-        let error = wallet.init().expect_err("init after shutdown");
+        let error = wallet
+            .init("regtest".into())
+            .expect_err("init after shutdown");
         assert!(error.to_string().contains("create a new PegWallet"));
         let error = wallet
             .balance_sat()

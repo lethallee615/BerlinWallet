@@ -10,16 +10,19 @@ use berlin_wallet_core::chain::ChainBackendConfig;
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
 };
-use berlin_wallet_core::journal::{DepositRow, Journal};
-use berlin_wallet_core::network::client_network;
+use berlin_wallet_core::journal::{DepositRow, DepositState, Journal};
+use berlin_wallet_core::network::{
+    NETWORK_FILE, init_network, network_from_chain_id, network_from_recorded, parse_network,
+    require_recorded_network, verified_client_network,
+};
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::withdrawal::await_change_outputs;
 use berlin_wallet_core::{deposit, withdrawal};
 use bitcoin::{Amount, Network};
-use fedimint_client::Client;
 use fedimint_client::RootSecret;
+use fedimint_client::{Client, ClientHandleArc};
 use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::core::OperationId;
 use fedimint_core::db::Database;
@@ -28,13 +31,13 @@ use fedimint_core::module::AmountUnit;
 use fedimint_walletv2_client::WalletClientModule;
 use tokio::sync::{Mutex, watch};
 
-const DEFAULT_NETWORK: Network = Network::Regtest;
 const DEFAULT_ESPLORA_URL: &str = "http://127.0.0.1:3002";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let network_arg = take_network_flag(&mut args)?;
     let data_dir = data_dir();
     let command = args.get(1).map(String::as_str);
 
@@ -63,18 +66,25 @@ async fn main() -> anyhow::Result<()> {
     let mnemonic = seed::load_or_create_mnemonic(&mnemonic_path)?;
     let seed = seed::mnemonic_seed(&mnemonic);
     let root_secret = seed::root_secret_from_mnemonic(&mnemonic);
-    let requested_chain = args.get(3).cloned();
     match command {
         None | Some("init") => {
-            let chain = chain_config(&data_dir, requested_chain.clone())?;
+            let value = network_arg.as_deref().ok_or_else(|| {
+                anyhow!("init requires --network <mainnet|testnet|signet|regtest>")
+            })?;
+            let network = init_network(&data_dir, parse_network(value)?)?;
+            // `init` takes the chain source as its first positional argument.
+            let chain = chain_config(&data_dir, args.get(2).cloned())?;
             let mut bdk = BdkWallet::open_or_create(
                 &data_dir.join(BDK_DB_FILE),
                 &seed,
-                DEFAULT_NETWORK,
+                network,
                 chain.clone(),
             )?;
             println!("chain source: {}", chain.describe());
-            println!("network: {DEFAULT_NETWORK}");
+            println!(
+                "network: {network} (recorded in {})",
+                data_dir.join(NETWORK_FILE).display()
+            );
             println!("data dir: {}", data_dir.display());
             println!("mnemonic: {}", mnemonic_path.display());
             println!("bdk db: {}", data_dir.join(BDK_DB_FILE).display());
@@ -91,35 +101,52 @@ async fn main() -> anyhow::Result<()> {
             let invite = args
                 .get(2)
                 .ok_or_else(|| anyhow!("usage: berlin-wallet join <invite-code>"))?;
-            join(invite, root_secret, &data_dir).await
+            join(invite, root_secret, &data_dir, network_arg.as_deref()).await
         }
         Some("run") => {
             let invite = args
                 .get(2)
                 .ok_or_else(|| anyhow!("usage: berlin-wallet run <invite-code> [chain-source]"))?;
+            let recorded = require_recorded_network(&data_dir)?;
+            if let Some(value) = network_arg.as_deref() {
+                let requested = parse_network(value)?;
+                anyhow::ensure!(
+                    requested == recorded,
+                    "run uses the network recorded in the data directory ({recorded}); \
+                     --network {requested} conflicts. Use a fresh data directory to change it"
+                );
+            }
             run(
                 invite,
                 &seed,
                 root_secret,
                 &data_dir,
-                requested_chain.clone(),
+                recorded,
+                args.get(3).cloned(),
             )
             .await
         }
         Some("restore") => {
             let invite = args.get(2).ok_or_else(|| {
                 anyhow!(
-                    "usage: berlin-wallet restore <invite-code> [chain-source] [expected-fed-id] [expected-client-identity]"
+                    "usage: berlin-wallet restore --network <net> <invite-code> [chain-source] [expected-fed-id] [expected-client-identity]"
                 )
             })?;
+            let value = network_arg.as_deref().ok_or_else(|| {
+                anyhow!("restore requires --network <mainnet|testnet|signet|regtest>")
+            })?;
+            let recorded = parse_network(value)?;
             restore(
                 invite,
                 &seed,
                 root_secret,
                 &data_dir,
-                args.get(3).cloned(),
-                args.get(4).map(String::as_str),
-                args.get(5).map(String::as_str),
+                recorded,
+                RestoreOptions {
+                    chain_source: args.get(3).cloned(),
+                    expected_federation_id: args.get(4).map(String::as_str),
+                    expected_identity: args.get(5).map(String::as_str),
+                },
             )
             .await
         }
@@ -176,17 +203,21 @@ fn data_dir() -> PathBuf {
 fn print_help() {
     println!();
     println!("commands:");
-    println!("  init                                create/open the local wallet");
-    println!("  join <invite>                       join a federation and print its config");
+    println!("  init --network <net> [chain-source] create/open the local wallet; net is");
+    println!("                                      mainnet|testnet|signet|regtest");
+    println!("  join <invite> [--network <net>]     join a federation and print its config");
     println!(
         "  backup <dest-dir>                   copy mnemonic + client DB + BDK DB (app stopped)"
     );
     println!(
         "  restore-backup <src-dir>            import a full directory backup into an empty data dir"
     );
-    println!("  restore <invite> [esplora] [fed] [identity]");
+    println!("  restore --network <net> <invite> [chain-source] [fed] [identity]");
     println!("                                      recover on a fresh data dir + full BDK scan");
     println!("  run <invite> [chain-source]         interactive manual-run session");
+    println!();
+    println!("  An unknown federation chain-id fails closed unless the data directory");
+    println!("  was explicitly initialized with --network regtest (devimint/custom).");
     println!();
     println!("interactive commands:");
     println!("  balance                             BDK balance");
@@ -212,7 +243,12 @@ fn print_help() {
     println!("  quit");
 }
 
-async fn join(invite: &str, root_secret: RootSecret, data_dir: &Path) -> anyhow::Result<()> {
+async fn join(
+    invite: &str,
+    root_secret: RootSecret,
+    data_dir: &Path,
+    requested_network: Option<&str>,
+) -> anyhow::Result<()> {
     let db = open_database(data_dir).await?;
     let connectors = ConnectorRegistry::build_from_client_defaults()
         .bind()
@@ -222,7 +258,11 @@ async fn join(invite: &str, root_secret: RootSecret, data_dir: &Path) -> anyhow:
     let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
 
     let module = client.get_first_module::<WalletClientModule>()?;
-    let chain_network = client_network(&client).await?;
+    let chain_id = client.chain_id().await?;
+    let chain_network = match requested_network {
+        Some(value) => network_from_recorded(chain_id, parse_network(value)?)?,
+        None => network_from_chain_id(chain_id)?,
+    };
     println!("federation id: {}", client.federation_id());
     println!("client identity: {identity}");
     println!("chain-id network: {chain_network}");
@@ -245,6 +285,7 @@ async fn run(
     seed: &[u8; 64],
     root_secret: RootSecret,
     data_dir: &Path,
+    recorded: Network,
     requested_chain: Option<String>,
 ) -> anyhow::Result<()> {
     let db = open_database(data_dir).await?;
@@ -256,7 +297,7 @@ async fn run(
     let identity = seed::client_identity(&root_secret, invite.federation_id())?;
     let client = build_client(client_db(&db, 0), connectors, root_secret, invite).await?;
     let federation_id = client.federation_id();
-    let chain_network = client_network(&client).await?;
+    let chain_network = verified_client_network(&client, recorded).await?;
     let chain = chain_config(data_dir, requested_chain)?;
     let bdk = BdkWallet::open_or_create(
         &data_dir.join(BDK_DB_FILE),
@@ -277,12 +318,20 @@ async fn run(
         client.clone(),
         journal.clone(),
         federation_id,
-        shutdown_rx,
+        shutdown_rx.clone(),
     ));
+    let deposit_watchers = sync::DepositWatchers::new();
+    let resumed = deposit_watchers
+        .resume(&client, &journal, federation_id, shutdown_rx.clone())
+        .await?;
+    if resumed > 0 {
+        println!("resumed {resumed} funded deposit watcher(s)");
+    }
 
     let module = client.get_first_module::<WalletClientModule>()?;
     println!("federation id: {federation_id}");
     println!("client identity: {identity}");
+    println!("recorded network: {recorded}");
     println!("chain-id network: {chain_network}");
     println!("config network: {}", module.get_network());
     println!("chain source: {}", chain.describe());
@@ -343,11 +392,29 @@ async fn run(
                 let id = parts
                     .next()
                     .ok_or_else(|| anyhow!("usage: fund-deposit <deposit-id>"))?;
-                command_fund_deposit(&client, &journal, &wallet, &DepositId(id.to_owned())).await
+                command_fund_deposit(
+                    &client,
+                    &journal,
+                    &wallet,
+                    federation_id,
+                    &deposit_watchers,
+                    shutdown_tx.subscribe(),
+                    &DepositId(id.to_owned()),
+                )
+                .await
             }
             "deposit" => {
                 let amount = parse_sat(parts.next())?;
-                command_deposit(&client, &journal, &wallet, federation_id, amount).await
+                command_deposit(
+                    &client,
+                    &journal,
+                    &wallet,
+                    federation_id,
+                    &deposit_watchers,
+                    shutdown_tx.subscribe(),
+                    amount,
+                )
+                .await
             }
             "watch" => {
                 let id = parts
@@ -451,7 +518,14 @@ async fn run(
     }
 
     let _ = shutdown_tx.send(true);
+    deposit_watchers.wait_all().await;
     Ok(())
+}
+
+struct RestoreOptions<'a> {
+    chain_source: Option<String>,
+    expected_federation_id: Option<&'a str>,
+    expected_identity: Option<&'a str>,
 }
 
 async fn restore(
@@ -459,10 +533,14 @@ async fn restore(
     seed: &[u8; 64],
     root_secret: RootSecret,
     data_dir: &Path,
-    requested_chain: Option<String>,
-    expected_federation_id: Option<&str>,
-    expected_identity: Option<&str>,
+    recorded: Network,
+    options: RestoreOptions<'_>,
 ) -> anyhow::Result<()> {
+    let RestoreOptions {
+        chain_source,
+        expected_federation_id,
+        expected_identity,
+    } = options;
     let bdk_path = data_dir.join(BDK_DB_FILE);
     anyhow::ensure!(
         !bdk_path.exists(),
@@ -503,13 +581,15 @@ async fn restore(
         "recovered client still has unavailable modules"
     );
 
-    let chain_network = client_network(&client).await?;
-    let chain = chain_config(data_dir, requested_chain)?;
+    let chain_network = verified_client_network(&client, recorded).await?;
+    init_network(data_dir, recorded)?;
+    let chain = chain_config(data_dir, chain_source)?;
     let mut bdk = BdkWallet::open_or_create(&bdk_path, seed, chain_network, chain.clone())?;
     let last_active = bdk.full_scan().await?;
     let ecash = client.get_balance_for_unit(AmountUnit::BITCOIN).await?;
 
     println!("restore modules usable: true");
+    println!("restore recorded network: {recorded}");
     println!("restore chain-id network: {chain_network}");
     println!(
         "restore ecash balance: {} msat ({} sat)",
@@ -543,15 +623,32 @@ async fn command_request_deposit(
 }
 
 async fn command_fund_deposit(
-    client: &Client,
+    client: &ClientHandleArc,
     journal: &Journal,
     wallet: &Arc<Mutex<BdkWallet>>,
+    federation_id: fedimint_core::config::FederationId,
+    watchers: &sync::DepositWatchers,
+    shutdown: watch::Receiver<bool>,
     id: &DepositId,
 ) -> anyhow::Result<()> {
     let module = client.get_first_module::<WalletClientModule>()?;
-    let mut wallet = wallet.lock().await;
-    let txid = deposit::fund_deposit(journal, module.inner(), &mut wallet, id).await?;
+    let txid = {
+        let mut wallet = wallet.lock().await;
+        deposit::fund_deposit(journal, module.inner(), &mut wallet, id).await?
+    };
     println!("funding txid: {txid}");
+    if watchers.spawn(
+        client.clone(),
+        journal.clone(),
+        federation_id,
+        id.clone(),
+        shutdown,
+    ) {
+        println!(
+            "watching deposit {} in the background; `status {}` or `watch {}` to follow",
+            id.0, id.0, id.0
+        );
+    }
     Ok(())
 }
 
@@ -586,10 +683,12 @@ async fn command_send_withdraw(
 }
 
 async fn command_deposit(
-    client: &Client,
+    client: &ClientHandleArc,
     journal: &Journal,
     wallet: &Arc<Mutex<BdkWallet>>,
     federation_id: fedimint_core::config::FederationId,
+    watchers: &sync::DepositWatchers,
+    shutdown: watch::Receiver<bool>,
     amount: Amount,
 ) -> anyhow::Result<()> {
     let row = deposit::request_deposit(client, journal, federation_id, amount).await?;
@@ -605,9 +704,23 @@ async fn command_deposit(
     );
 
     if row.address.is_some() {
-        let mut wallet = wallet.lock().await;
-        let txid = deposit::fund_deposit(journal, module.inner(), &mut wallet, &row.id).await?;
+        let txid = {
+            let mut wallet = wallet.lock().await;
+            deposit::fund_deposit(journal, module.inner(), &mut wallet, &row.id).await?
+        };
         println!("funding txid: {txid}");
+        if watchers.spawn(
+            client.clone(),
+            journal.clone(),
+            federation_id,
+            row.id.clone(),
+            shutdown,
+        ) {
+            println!(
+                "watching deposit {} in the background; `status {}` or `watch {}` to follow",
+                row.id.0, row.id.0, row.id.0
+            );
+        }
     } else {
         println!("address not ready; rerun/retry later");
     }
@@ -680,6 +793,19 @@ fn net_credit_display(net_credit: Option<fedimint_core::Amount>) -> String {
 fn print_deposit(row: &DepositRow) {
     println!("{row:#?}");
     println!("net_credit: {}", net_credit_display(row.net_credit));
+    if row.funding_txid.is_some()
+        && matches!(
+            row.state,
+            DepositState::AwaitingAddress | DepositState::AddressShown
+        )
+    {
+        println!(
+            "hint: funded but not claimed. `run` keeps a watcher alive for this row; \
+             if it stays here, run `watch {}` and check that the federation sees the \
+             funding transaction.",
+            row.id.0
+        );
+    }
 }
 
 fn parse_sat(value: Option<&str>) -> anyhow::Result<Amount> {
@@ -688,9 +814,70 @@ fn parse_sat(value: Option<&str>) -> anyhow::Result<Amount> {
     Ok(Amount::from_sat(sats))
 }
 
+/// Remove `--network <value>` or `--network=<value>` from the argument vector
+/// so the remaining positional indices stay stable.
+fn take_network_flag(args: &mut Vec<String>) -> anyhow::Result<Option<String>> {
+    if let Some(position) = args.iter().position(|arg| arg == "--network") {
+        anyhow::ensure!(position + 1 < args.len(), "--network requires a value");
+        let value = args.remove(position + 1);
+        args.remove(position);
+        return Ok(Some(value));
+    }
+    if let Some(position) = args.iter().position(|arg| arg.starts_with("--network=")) {
+        let argument = args.remove(position);
+        return Ok(Some(argument["--network=".len()..].to_owned()));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_flag_is_removed_before_positional_parsing() {
+        let mut args = vec![
+            "wallet".to_owned(),
+            "init".to_owned(),
+            "--network".to_owned(),
+            "regtest".to_owned(),
+            "esplora:http://127.0.0.1:3002".to_owned(),
+        ];
+        assert_eq!(
+            take_network_flag(&mut args).expect("flag"),
+            Some("regtest".to_owned())
+        );
+        assert_eq!(
+            args,
+            vec![
+                "wallet".to_owned(),
+                "init".to_owned(),
+                "esplora:http://127.0.0.1:3002".to_owned()
+            ]
+        );
+
+        let mut args = vec![
+            "wallet".to_owned(),
+            "run".to_owned(),
+            "invite".to_owned(),
+            "--network=signet".to_owned(),
+        ];
+        assert_eq!(
+            take_network_flag(&mut args).expect("flag"),
+            Some("signet".to_owned())
+        );
+        assert_eq!(
+            args,
+            vec!["wallet".to_owned(), "run".to_owned(), "invite".to_owned()]
+        );
+
+        let mut args = vec![
+            "wallet".to_owned(),
+            "init".to_owned(),
+            "--network".to_owned(),
+        ];
+        assert!(take_network_flag(&mut args).is_err());
+    }
 
     #[test]
     fn tracing_init_is_idempotent() {

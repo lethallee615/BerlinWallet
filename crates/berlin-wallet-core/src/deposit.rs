@@ -153,13 +153,43 @@ pub async fn fund_deposit(
     let quoted_fee = module.receive_fee().await?;
     journal.set_deposit_quoted_fee(id, quoted_fee).await?;
 
+    // The federation takes its claim fee out of the output value. An amount
+    // that does not cover the fee is broadcast and then never claimed, with no
+    // error anywhere, so refuse before anything leaves the wallet.
+    anyhow::ensure!(
+        row.amount > quoted_fee,
+        "deposit amount {} sat does not cover the federation's {} sat claim fee; \
+         the output would be unclaimable",
+        row.amount.to_sat(),
+        quoted_fee.to_sat()
+    );
+
     let address = row.address.as_deref().ok_or(PegError::AddressNotReady)?;
     let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> = address.parse()?;
     let destination = destination.assume_checked();
+    let deposit_script = destination.script_pubkey();
 
     let tx = wallet.build_and_finalize(&destination, row.amount).await?;
     let txid = tx.compute_txid();
     journal.set_deposit_funding_txid(id, txid).await?;
+    // Record the funded output from the transaction we just built rather than
+    // waiting for a chain scan. A funded row is then observable, and restart
+    // recovery has an outpoint without depending on the federation.
+    match tx
+        .output
+        .iter()
+        .position(|output| output.script_pubkey == deposit_script)
+    {
+        Some(vout) => {
+            journal
+                .set_deposit_funding_outpoint(id, bitcoin::OutPoint::new(txid, vout as u32))
+                .await?;
+        }
+        None => tracing::warn!(
+            %txid,
+            "funding transaction has no output paying the deposit address; funding_outpoint left unset"
+        ),
+    }
     // Debug-only crash point for the in-flight deposit restore matrix.
     crate::fault::crash_point("after_deposit_broadcast");
     Ok(txid)
