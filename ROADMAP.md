@@ -3,6 +3,11 @@
 This is a staged plan, not a release schedule. There are no dates. A stage is
 done only when its gate is met and documented.
 
+> **Tracking.** The live queue is GitHub Issues (labels + milestones).
+> [`docs/STATUS.md`](docs/STATUS.md) is the dated snapshot,
+> [`docs/TRACKING.md`](docs/TRACKING.md) is the workflow, and this file is the
+> definition of done. Merging code does not check a box; passing its gate does.
+
 The wallet is pre-alpha: deposit and withdrawal have been exercised end to end on
 devimint and Mutinynet, but the code is unaudited and several upstream edge cases
 are still open. The near-term product is a **CLI-first MVP**. A desktop GUI is
@@ -13,29 +18,31 @@ deferred until after the MVP; mobile is later still.
 This is the current definition of the MVP. All boxes must be checked before the
 MVP is called done.
 
-- [ ] **On-chain send/receive.** A user can reveal/receive to a BDK address and
+- [ ] **On-chain send/receive** (#18). A user can reveal/receive to a BDK address and
       send an arbitrary on-chain payment from the BDK wallet, with fee control and
       a recorded result.
 - [x] **Peg-in and peg-out.** `walletv2` deposit/claim and withdrawal/send work
-      end to end on devimint and Mutinynet.
+      end to end on devimint and Mutinynet. The combined `deposit` path is
+      currently at risk (#14).
 - [x] **Ecash balance.** The mintv2 BTC balance is readable and represented
       distinctly from the BDK on-chain balance.
-- [ ] **Lightning send/receive via `lnv2`.** Invoices can be paid and received
+- [ ] **Lightning send/receive via `lnv2`** (#19, #23). Invoices can be paid and received
       through the federation's Lightning module, with final states and failure
       handling.
-- [ ] **Three chain backends.** The BDK chain source can be Esplora, Electrum, or
+- [ ] **Three chain backends** (#24). The BDK chain source can be Esplora, Electrum, or
       bitcoind RPC, selected by configuration, with the same reorg and persistence
       guarantees.
 - [x] **Restore and backup.** Mnemonic restore, full-directory backup/import, and
       the limitations of a mnemonic-only restore are implemented and documented.
-      In-flight-operation recovery remains an upstream gap.
-- [ ] **Crash safety.** The state machines survive the documented crash windows
+      In-flight-operation recovery remains an upstream gap; the assertions are
+      tracked in (#26).
+- [ ] **Crash safety** (#25). The state machines survive the documented crash windows
       without double credit, double send, lost credit, or a stale open row. The
       existing matrix is a start; the narrow broadcast/persist windows and
       credited-deposit reorg need coverage.
-- [ ] **Fee preview at request-deposit.** The deposit flow shows the on-chain
+- [ ] **Fee preview at request-deposit** (#21). The deposit flow shows the on-chain
       claim fee and the mintv2 operation fee before the user commits funds.
-- [ ] **Watch progress output.** `watch` reports meaningful progress/heartbeat
+- [ ] **Watch progress output** (#22). `watch` reports meaningful progress/heartbeat
       information instead of polling silently.
 
 ## Now — hygiene and documentation
@@ -103,10 +110,10 @@ This is the work that must happen before “real use” is more than an aspirati
       misconfigured backends. The choice is persisted in `chain.json` and a
       backend change is never silent.
 - [ ] Test each backend against reorgs, transient failures, restore full scans,
-      and wallet restart. **Only Esplora has a live run.** Electrum needs
-      devimint's electrs (regtest Electrum RPC on 127.0.0.1:60401); bitcoind
-      needs the devimint node plus a birthday height. The deterministic
-      `invalidateblock` reorg test is expected to run on the bitcoind backend,
+      and wallet restart (#24). **Esplora and bitcoind RPC have live runs; Electrum
+      is unit-only.** Electrum needs devimint's electrs (regtest Electrum RPC on
+      127.0.0.1:60401); bitcoind needs the devimint node plus a birthday height.
+      The deterministic `invalidateblock` reorg test runs on the bitcoind backend,
       because the devimint Esplora binary panics on a live invalidate.
 - [x] Document the privacy and operational differences: an Electrum server and
       an Esplora server both see addresses; bitcoind RPC is a different trust

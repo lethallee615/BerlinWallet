@@ -1,0 +1,59 @@
+# Project status
+
+Last updated: 2026-10-30
+Main at: 52e331a
+
+This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
+vocabulary and the update rules. Every row names an issue or evidence; `—` means
+neither exists yet, which is itself a finding.
+
+Status values: `todo`, `in-progress`, `in-review`, `live`, `done`, `at-risk`,
+`blocked`.
+
+## MVP definition
+
+The requirements are defined in `ROADMAP.md`. This table says where each one
+actually stands.
+
+| ID | Requirement | Status | Issues | Evidence |
+|---|---|---|---|---|
+| onchain-send | Arbitrary on-chain send with fee control and a recorded result | in-progress | #18 | Address reveal and balance exist; no send path |
+| peg-in-out | walletv2 deposit/claim and withdrawal/send | at-risk | #14 | `API-VERIFICATION.md` §25, §27; JOURNAL 2026-10-24 |
+| ecash-balance | mintv2 balance distinct from the BDK balance | live | — | `API-VERIFICATION.md` §25 |
+| lightning | lnv2 send/receive | todo | #19, #23 | Not registered or API-verified |
+| chain-backends | Esplora, Electrum, bitcoind RPC behind one contract | in-progress | #24 | Esplora live; bitcoind live reorg; Electrum unit only |
+| restore-backup | Mnemonic restore, full-directory backup, documented limits | done | #26 | `API-VERIFICATION.md` §28–§31; `docs/ARCHITECTURE.md` §8.1 |
+| crash-safety | Documented crash windows survive restart | in-progress | #25 | `API-VERIFICATION.md` §27; matrix is manual |
+| fee-preview | Claim and mintv2 operation fee before funding | todo | #21 | Only known after the claim |
+| watch-progress | `watch` reports progress instead of polling silently | todo | #22 | Silent polling |
+
+## Backend coverage
+
+| Backend | Wired | Live sync | Live deposit | Live reorg | Live restore or rebuild | Evidence |
+|---|---|---|---|---|---|---|
+| Esplora | yes | yes | yes | no | unit | §25, §34–§36; devimint Esplora panics on a live `invalidateblock` |
+| Electrum | yes | no | no | no | no | Unit tests only; `crates/berlin-wallet-core/src/chain/electrum.rs` |
+| bitcoind RPC | yes | yes | yes | yes | partial | JOURNAL 2026-10-24; PR #13 (rebuild live, restore flow unit); deposit regression #14 |
+
+## Live verification log
+
+Newest first. A row is evidence only if it names the flow and the observation.
+
+| Date | Flow | Backend | Result | Evidence |
+|---|---|---|---|---|
+| 2026-10-30 | Combined `deposit` stays in `AddressShown` | bitcoind RPC | fail | #14 |
+| 2026-10-26 | Orphaned-checkpoint rebuild names its scan floor | bitcoind RPC | pass | PR #13; JOURNAL 2026-10-25 |
+| 2026-10-24 | 10-block reorg over a credited deposit | bitcoind RPC | pass | JOURNAL 2026-10-24; §41 |
+| 2026-10-24 | SQLite swap and next-index preservation | — | pass | Regression test in `crates/berlin-wallet-core/src/bdk.rs` |
+| 2026-10-20 | Deposit, claim, and withdrawal round trip | Esplora | pass | §25, §27 |
+
+## Open work by priority
+
+| Priority | Issues |
+|---|---|
+| P0 | #7, #14 |
+| P1 | #8, #10, #15, #18, #19, #21, #23, #24, #25, #26 |
+| P2 | #9, #22, #27, #28, #29, #30 |
+
+P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
+P2 is hardening. `docs/TRACKING.md` defines how these are assigned.

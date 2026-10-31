@@ -37,6 +37,62 @@ check on devimint regtest runs twice: with `birthday=0`, expecting
 funding a deposit and invalidating a block, expecting `floor_source=graph_anchor`
 with a non-zero `scan_floor` plus the WARN.
 
+## 2026-10-24 — Live reorg verification, stack merge, public launch
+
+State at start: four stacked draft PRs open (#3 rebroadcast idempotency, #4 chain-trait
+refactor, #5 electrum + chain.json, #6 bitcoind + scan floor). Locally green. Repo private.
+
+Live gates (devimint regtest, v0.12.0):
+- PR1: reorg regression test, behaviour-identical; new backend= log field confirmed.
+- PR2: electrum parity at 60401; chain.json persistence (0600, versioned envelope,
+  canonical() carries creds, describe() redacts).
+- PR3: deterministic invalidateblock reorg on the bitcoind backend with NO esplora
+  restart. Previously impossible — electrs-esplora 0.4.1 panics at
+  src/new_index/schema.rs:298 on a live invalidateblock.
+- §41 answered: 10-block reorg over a CREDITED deposit. Deposit orphaned to 0 confs, then
+  re-mined at the same height on a different block hash. Ecash balance unchanged
+  (148,743,680 msat), row stayed Done. No double credit. Rebuild path exercised twice in
+  five minutes and held both times.
+
+Forensics note: the reorg was reconstructed after the fact from getchaintips (an invalid
+branch with branchlen 10 forked at 266) plus block headers. getchaintips is the fast way
+to establish reorg depth retrospectively.
+
+Merge: stack merged bottom-up with merge commits (#3 → #4 → #6; #5's content reached main
+via #4). Merge commits mean no rebasing is needed, because the base's commits become
+shared history.
+
+Gotcha — deleting a PR's base branch CLOSES the dependent PR rather than retargeting it.
+A closed PR can't be retargeted ("Cannot change the base branch of a closed pull request")
+and can't be reopened while its base is missing. Recovery: recreate the base branch at its
+old SHA, reopen, retarget to main, delete the base again.
+
+Gotcha — && in multi-command pastes. "gh pr ready 4 && gh pr merge 4" silently skipped
+
+#4's merge when ready failed, and #5 then merged into the wrong base. Use ; or one command
+per line.
+
+Gotcha — backtick-only lines are eaten on paste into bash. A heredoc line consisting only
+of three backticks loses them and becomes blank, and the following line can lose its first
+character (INFO → NFO). Workaround: use 4-space indented code blocks in gh issue
+create/edit bodies.
+
+Publication: repo flipped public; MIT confirmed; description + topics set; issues enabled;
+wiki and projects off; Actions token read-only; Dependabot alerts and security updates on.
+
+Branch protection on main: required check "check", 0 required approvals,
+enforce_admins false, linear history, no force-push, no deletions. Linear history means
+future merges must be --squash or --rebase; --merge is now rejected.
+
+Collaborator: m1sterc001guy has write. Cannot push to main directly (PR required), can
+self-merge passing PRs. Settings and protection stay admin-only.
+
+Issues filed: #7 chain-id silently falls back to Regtest; #8 init silently defaults the
+network; #9 REPL paste mangling and unknown-command handling; #10 noisy background task
+shutdown on quit; #11 rebuild log line must print the derived scan floor.
+
+Next: #11 (cheap, makes the scan floor observable), then #7 + #8 as one PR, then lnv2.
+
 ## 2026-10-22 — The chain source becomes a trait; Electrum and bitcoind RPC arrive
 
 Esplora was hard-wired into the BDK wallet through a URL field. That was fine
@@ -272,59 +328,3 @@ mainnet run. The target now is the CLI-first MVP, not a GUI.
   tested.
 - Fresh restore can strand in-flight funds; the upstream re-claim gap remains.
 - The desktop GUI and mobile app are deferred until after MVP.
-
-## 2026-10-24 — Live reorg verification, stack merge, public launch
-
-State at start: four stacked draft PRs open (#3 rebroadcast idempotency, #4 chain-trait
-refactor, #5 electrum + chain.json, #6 bitcoind + scan floor). Locally green. Repo private.
-
-Live gates (devimint regtest, v0.12.0):
-- PR1: reorg regression test, behaviour-identical; new backend= log field confirmed.
-- PR2: electrum parity at 60401; chain.json persistence (0600, versioned envelope,
-  canonical() carries creds, describe() redacts).
-- PR3: deterministic invalidateblock reorg on the bitcoind backend with NO esplora
-  restart. Previously impossible — electrs-esplora 0.4.1 panics at
-  src/new_index/schema.rs:298 on a live invalidateblock.
-- §41 answered: 10-block reorg over a CREDITED deposit. Deposit orphaned to 0 confs, then
-  re-mined at the same height on a different block hash. Ecash balance unchanged
-  (148,743,680 msat), row stayed Done. No double credit. Rebuild path exercised twice in
-  five minutes and held both times.
-
-Forensics note: the reorg was reconstructed after the fact from getchaintips (an invalid
-branch with branchlen 10 forked at 266) plus block headers. getchaintips is the fast way
-to establish reorg depth retrospectively.
-
-Merge: stack merged bottom-up with merge commits (#3 → #4 → #6; #5's content reached main
-via #4). Merge commits mean no rebasing is needed, because the base's commits become
-shared history.
-
-Gotcha — deleting a PR's base branch CLOSES the dependent PR rather than retargeting it.
-A closed PR can't be retargeted ("Cannot change the base branch of a closed pull request")
-and can't be reopened while its base is missing. Recovery: recreate the base branch at its
-old SHA, reopen, retarget to main, delete the base again.
-
-Gotcha — && in multi-command pastes. "gh pr ready 4 && gh pr merge 4" silently skipped
-
-#4's merge when ready failed, and #5 then merged into the wrong base. Use ; or one command
-per line.
-
-Gotcha — backtick-only lines are eaten on paste into bash. A heredoc line consisting only
-of three backticks loses them and becomes blank, and the following line can lose its first
-character (INFO → NFO). Workaround: use 4-space indented code blocks in gh issue
-create/edit bodies.
-
-Publication: repo flipped public; MIT confirmed; description + topics set; issues enabled;
-wiki and projects off; Actions token read-only; Dependabot alerts and security updates on.
-
-Branch protection on main: required check "check", 0 required approvals,
-enforce_admins false, linear history, no force-push, no deletions. Linear history means
-future merges must be --squash or --rebase; --merge is now rejected.
-
-Collaborator: m1sterc001guy has write. Cannot push to main directly (PR required), can
-self-merge passing PRs. Settings and protection stay admin-only.
-
-Issues filed: #7 chain-id silently falls back to Regtest; #8 init silently defaults the
-network; #9 REPL paste mangling and unknown-command handling; #10 noisy background task
-shutdown on quit; #11 rebuild log line must print the derived scan floor.
-
-Next: #11 (cheap, makes the scan floor observable), then #7 + #8 as one PR, then lnv2.
