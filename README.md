@@ -42,7 +42,10 @@ This is **pre-alpha software**.
 - **Pre-alpha. Not audited.**
 - Deposit and withdrawal have been exercised end to end on devimint and
   Mutinynet. The live Mutinynet round trip and crash/restart matrix are recorded
-  in `docs/API-VERIFICATION.md` §25 and §27.
+  in `docs/API-VERIFICATION.md` §25 and §27. Funding returns after broadcast; a
+  per-deposit background observer follows the claim and is resumed from the
+  journal on restart. A funded row still unclaimed after five minutes logs a
+  WARN.
 - The crash matrix covers: address shown before funding, funding broadcast before
   claim, crash during confirmation, crash after `Done`, crash after
   `send()` before the operation id is persisted, and crash after the final send
@@ -50,7 +53,7 @@ This is **pre-alpha software**.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 85 core tests, 5 CLI tests, and 4 FFI tests.
+- The current test suite is 86 core tests, 5 CLI tests, and 4 FFI tests.
 - There is **no mainnet operational testing** recorded in this repository and no
   independent security audit. The desktop GUI and mobile app are deferred until
   after the CLI-first MVP.

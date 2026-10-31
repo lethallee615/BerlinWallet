@@ -491,6 +491,30 @@ impl JournalBackend for DbJournal {
         .await
     }
 
+    async fn set_deposit_funding_outpoint(
+        &self,
+        id: &DepositId,
+        outpoint: bitcoin::OutPoint,
+    ) -> anyhow::Result<()> {
+        let this = self;
+        let id = id.clone();
+        retry_on_conflict(move || {
+            let id = id.clone();
+            async move {
+                let mut dbtx = this.db.begin_transaction().await;
+                if let Some(mut row) = get_deposit(&mut dbtx, &id).await? {
+                    row.funding_outpoint = Some(outpoint);
+                    row.funding_txid = Some(outpoint.txid);
+                    row.updated_at = now_ms();
+                    write_deposit(&mut dbtx, &row).await?;
+                }
+                dbtx.commit_tx_result().await?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
     async fn set_deposit_address_if(
         &self,
         id: &DepositId,
