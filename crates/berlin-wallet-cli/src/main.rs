@@ -2,6 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use berlin_wallet_core::backup::{backup_data_dir, import_data_dir};
@@ -242,6 +243,9 @@ fn print_help() {
     println!("  sync                                run one BDK Esplora sync");
     println!("  help");
     println!("  quit");
+    println!();
+    println!("  Ctrl+C cancels a running `watch`; use `quit` to exit.");
+    println!("  Ctrl+Z is refused while the wallet holds the database lock.");
 }
 
 async fn join(
@@ -309,18 +313,30 @@ async fn run(
     let wallet = Arc::new(Mutex::new(bdk));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(sync::bdk_chain_task(wallet.clone(), shutdown_rx.clone()));
-    tokio::spawn(sync::fedimint_sync_task(
+    let mut tasks = Vec::new();
+    tasks.push(tokio::spawn(sync::bdk_chain_task(
+        wallet.clone(),
+        shutdown_rx.clone(),
+    )));
+    tasks.push(tokio::spawn(sync::fedimint_sync_task(
         client.clone(),
         journal.clone(),
         shutdown_rx.clone(),
-    ));
-    tokio::spawn(sync::adoption_task(
+    )));
+    tasks.push(tokio::spawn(sync::adoption_task(
         client.clone(),
         journal.clone(),
         federation_id,
         shutdown_rx.clone(),
-    ));
+    )));
+
+    // SIGINT cancels the current command instead of killing the process;
+    // SIGTSTP is trapped so Ctrl+Z cannot leave the database lock held.
+    let (interrupt_tx, interrupt_rx) = watch::channel(0u64);
+    tasks.push(spawn_interrupt_listener(interrupt_tx, shutdown_rx.clone()));
+    #[cfg(unix)]
+    tasks.push(spawn_suspend_guard(shutdown_rx.clone()));
+
     let deposit_watchers = sync::DepositWatchers::new();
     let resumed = deposit_watchers
         .resume(&client, &journal, federation_id, shutdown_rx.clone())
@@ -421,7 +437,22 @@ async fn run(
                 let id = parts
                     .next()
                     .ok_or_else(|| anyhow!("usage: watch <deposit-id>"))?;
-                command_watch(&client, &journal, federation_id, &DepositId(id.to_owned())).await
+                let deposit_id = DepositId(id.to_owned());
+                let mut interrupt = interrupt_rx.clone();
+                tokio::select! {
+                    result = command_watch(
+                        &client,
+                        &journal,
+                        federation_id,
+                        &deposit_id,
+                    ) => result,
+                    _ = interrupt.changed() => {
+                        eprintln!(
+                            "watch cancelled; the background observer (or the 60 s adoption pass) keeps the row updated"
+                        );
+                        Ok(())
+                    }
+                }
             }
             "request-withdraw" => {
                 let address = parts
@@ -535,7 +566,81 @@ async fn run(
 
     let _ = shutdown_tx.send(true);
     deposit_watchers.wait_all().await;
+    // Drop the module handle before the client is unwrapped; it may hold a
+    // clone of the client.
+    drop(module);
+    for mut task in tasks {
+        if tokio::time::timeout(Duration::from_secs(5), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            // Wait for cancellation so the task releases its handles.
+            let _ = task.await;
+        }
+    }
+    match Arc::try_unwrap(client) {
+        Ok(handle) => handle.shutdown().await,
+        Err(_) => eprintln!(
+            "warning: client handle is still referenced after task shutdown; \
+             the database lock may remain held"
+        ),
+    }
     Ok(())
+}
+
+fn spawn_interrupt_listener(
+    interrupt: watch::Sender<u64>,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                result = tokio::signal::ctrl_c() => {
+                    if result.is_err() {
+                        break;
+                    }
+                    eprintln!();
+                    eprintln!(
+                        "interrupt: Ctrl+C cancels a running `watch`; type `quit` to exit the wallet"
+                    );
+                    interrupt.send_modify(|count| *count = count.wrapping_add(1));
+                }
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+fn spawn_suspend_guard(mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    tokio::spawn(async move {
+        let Ok(mut tstp) = signal(SignalKind::from_raw(libc::SIGTSTP)) else {
+            return;
+        };
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = tstp.recv() => {
+                    eprintln!();
+                    eprintln!(
+                        "suspend is disabled: the wallet holds the database lock. \
+                         Use `quit` to exit."
+                    );
+                }
+            }
+        }
+    })
 }
 
 struct RestoreOptions<'a> {

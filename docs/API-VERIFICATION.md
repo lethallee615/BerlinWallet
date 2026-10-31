@@ -2727,3 +2727,21 @@ rows by funding txid and show one row per deposit. The `Requested` row is shown
 when both it and the `Adopted` duplicate are `Done`; the `Adopted` row remains
 addressable with `status <id>` for audit. A genuine adopted-only deposit is not
 hidden.
+
+## 46. CLI shutdown and signal handling
+
+- `quit` sends the shutdown flag, drains the deposit observers, waits up to five
+  seconds for the BDK/fedimint/adoption tasks, then calls
+  `ClientHandle::shutdown` before returning. A second `run` can open the same
+  data directory immediately; the RocksDB lock is not left behind.
+- SIGINT is trapped. At the prompt it prints a hint and keeps the process alive.
+  During `watch` it cancels the foreground wait and returns to the prompt; the
+  background observer and the 60 s adoption pass continue.
+- SIGTSTP (Ctrl+Z) is trapped and refused with a message. Suspending the process
+  would hold the database lock, so the wallet tells the user to `quit`.
+- `list-deposits` and the FFI `list_deposits` collapse duplicate rows by funding
+  txid (preferring `Done`, then `Requested`), so one deposit displays once.
+
+Gate (PTY): Ctrl+C printed the interrupt hint, Ctrl+Z printed the suspend
+warning, `quit` exited 0, and an immediate second `run` opened the same data
+directory. A `RUST_LOG=debug` quit produced no WARN or ERROR lines.

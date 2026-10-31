@@ -162,6 +162,10 @@ The CLI binary is a development harness, not a production UI:
 > A data directory created before `network.json` existed must run
 > `init --network <the network it already uses>` once.
 
+The REPL traps Ctrl+C (cancels a running `watch`) and refuses Ctrl+Z while the
+database lock is held. Use `quit` to shut down; it stops the client and releases
+the lock.
+
 ```bash
 cargo run -p berlin-wallet-cli -- init --network regtest
 ```

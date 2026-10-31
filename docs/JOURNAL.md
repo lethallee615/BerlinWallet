@@ -4,6 +4,31 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-31 — Ctrl+C cancels; Ctrl+Z no longer strands the database lock
+
+`quit` sent the shutdown flag but did not wait for the sync tasks or consume the
+client handle. The process exited with the client's background tasks still
+logging, and a suspended process held the RocksDB lock until it was killed. The
+next launch then blocked on a lock whose owner looked idle.
+
+The CLI now keeps the task handles. On exit it sends the shutdown flag, drains
+the deposit observers, waits (with a five-second timeout) for the BDK, fedimint,
+and adoption tasks, and calls `ClientHandle::shutdown` before returning. The
+client's own tasks are stopped by that call, so the next `run` can open the same
+data directory immediately.
+
+Signals:
+
+- SIGINT is trapped. At the prompt it prints a hint and keeps the session alive;
+  during `watch` it cancels the foreground wait and returns to the prompt. The
+  background observer and the 60-second adoption pass keep the row moving.
+- SIGTSTP (Ctrl+Z) is trapped and refused with a message. Suspending an open
+  wallet keeps the RocksDB lock, so the wallet tells the user to `quit` instead.
+
+Gate: a PTY test sent Ctrl+C, Ctrl+Z, and `quit`; both hints appeared, the
+process exited 0, and a second `run` opened the same data directory immediately.
+A `quit` at `RUST_LOG=debug` produced no WARN or ERROR lines after shutdown.
+
 ## 2026-10-31 — One row per deposit in `list-deposits`
 
 The adoption fix stopped new duplicate rows, but the live data directory still
