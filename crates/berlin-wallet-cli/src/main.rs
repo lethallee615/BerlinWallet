@@ -10,7 +10,7 @@ use berlin_wallet_core::chain::ChainBackendConfig;
 use berlin_wallet_core::client::{
     build_client, client_db, min_withdrawal_sat, open_rocksdb, recover_client,
 };
-use berlin_wallet_core::journal::{DepositRow, DepositState, Journal};
+use berlin_wallet_core::journal::{DepositRow, DepositState, Journal, collapse_deposit_rows};
 use berlin_wallet_core::network::{
     NETWORK_FILE, init_network, network_from_chain_id, network_from_recorded, parse_network,
     require_recorded_network, verified_client_network,
@@ -489,7 +489,7 @@ async fn run(
                 Ok(())
             }
             "list-deposits" => {
-                for row in journal.deposits_all().await? {
+                for row in collapse_deposit_rows(journal.deposits_all().await?) {
                     println!(
                         "{} {:?} {:?} {} funding_txid={:?} op={:?} net_credit={:?}",
                         row.id.0,

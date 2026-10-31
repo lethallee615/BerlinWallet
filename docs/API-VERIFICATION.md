@@ -2721,3 +2721,9 @@ Resolution (2026-10-31, after the fix in #35): on restart the requested row was
 shows the `Requested` and `Adopted` rows for the same txid and operation id,
 which is one deposit with a historical duplicate claim owner, not two deposits.
 A restart did not change the balance.
+
+Display note: `list-deposits` (CLI) and `PegWallet::list_deposits` (FFI) collapse
+rows by funding txid and show one row per deposit. The `Requested` row is shown
+when both it and the `Adopted` duplicate are `Done`; the `Adopted` row remains
+addressable with `status <id>` for audit. A genuine adopted-only deposit is not
+hidden.

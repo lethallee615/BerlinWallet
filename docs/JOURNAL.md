@@ -4,6 +4,23 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-31 — One row per deposit in `list-deposits`
+
+The adoption fix stopped new duplicate rows, but the live data directory still
+had a `Requested` and an `Adopted` row for one claim. They share the funding
+txid and operation id; the balance was correct, yet listing both made one
+deposit look like two.
+
+`list-deposits` now groups rows by funding txid (one deposit output per funding
+tx), then operation id, then row id. Within a group it shows the `Done` row
+first, then the `Requested` row, then the most recently updated one. A genuine
+adopted-only deposit still appears; a duplicate of a requested deposit does not.
+`status <id>` still resolves the hidden row directly, so the claim owner remains
+auditable.
+
+The FFI `list_deposits` uses the same collapse, so a GUI does not have to
+reimplement it.
+
 ## 2026-10-31 — Adoption and the watcher stop racing on a deposit claim
 
 The live gate for #14 succeeded at the federation layer: a 100,000 sat deposit
