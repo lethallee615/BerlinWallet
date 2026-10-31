@@ -17,6 +17,7 @@ mod journal_db;
 pub mod lightning;
 pub mod network;
 pub mod ops;
+pub mod restore_policy;
 pub mod seed;
 pub mod sqlite;
 pub mod sync;
@@ -36,6 +37,9 @@ pub use network::{
     verified_client_network,
 };
 pub use ops::{DepositId, LightningId, OnchainSendId, WithdrawalId};
+pub use restore_policy::{
+    HISTORY_UNAVAILABLE_WARNING, RECOVERY_BACKUP_WARNING, RestoreSummary, STRANDED_DEPOSIT_WARNING,
+};
 pub use seed::{load_or_create_mnemonic, mnemonic_seed, root_secret_from_mnemonic};
 pub use sqlite::SqliteDb;
 pub use wire::FeeQuoteWire;

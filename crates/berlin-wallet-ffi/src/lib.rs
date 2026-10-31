@@ -31,6 +31,7 @@ use berlin_wallet_core::network::{
     init_network, parse_network, require_recorded_network, verified_client_network,
 };
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
+use berlin_wallet_core::restore_policy::RestoreSummary;
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::withdrawal;
@@ -183,6 +184,8 @@ pub struct RestoreView {
     pub min_withdrawal_sat: u64,
     pub operation_log_empty: bool,
     pub history_unavailable: bool,
+    /// Exact warnings the host UI must display after this restore.
+    pub warnings: Vec<String>,
     pub journal_deposit_count: u32,
     pub journal_withdrawal_count: u32,
     pub bdk_external_last_active: Option<u32>,
@@ -365,8 +368,14 @@ impl PegWallet {
             .msats;
         let onchain_balance_sat = bdk.balance().trusted_spendable().to_sat();
         let min_withdrawal_sat = min_withdrawal_sat(&client).await?;
-        let deposit_count = journal.deposits_all().await?.len() as u32;
-        let withdrawal_count = journal.withdrawals_all().await?.len() as u32;
+        let deposit_count = journal.deposits_all().await?.len();
+        let withdrawal_count = journal.withdrawals_all().await?.len();
+        let summary = RestoreSummary::new(operation_log_empty, deposit_count, withdrawal_count);
+        if !summary.is_balances_only() {
+            return Err(err(
+                "fresh restore is not balances-only; the restore warning policy must be reviewed",
+            ));
+        }
         let (external, internal) = last_active_summary(&last_active);
 
         let state = WalletState {
@@ -387,10 +396,11 @@ impl PegWallet {
             onchain_balance_sat,
             ecash_balance_msat,
             min_withdrawal_sat,
-            operation_log_empty,
-            history_unavailable: operation_log_empty,
-            journal_deposit_count: deposit_count,
-            journal_withdrawal_count: withdrawal_count,
+            operation_log_empty: summary.operation_log_empty,
+            history_unavailable: summary.history_unavailable,
+            warnings: restore_warnings(&summary),
+            journal_deposit_count: summary.deposit_count,
+            journal_withdrawal_count: summary.withdrawal_count,
             bdk_external_last_active: external,
             bdk_internal_last_active: internal,
         })
@@ -862,6 +872,14 @@ fn last_active_summary(last_active: &[(KeychainKind, u32)]) -> (Option<u32>, Opt
     (external, internal)
 }
 
+fn restore_warnings(summary: &RestoreSummary) -> Vec<String> {
+    summary
+        .warnings
+        .iter()
+        .map(|warning| (*warning).to_owned())
+        .collect()
+}
+
 fn deposit_view(row: &DepositRow) -> DepositView {
     DepositView {
         id: row.id.0.clone(),
@@ -954,6 +972,28 @@ const _: fn() = || {
 mod tests {
     use super::*;
     use berlin_wallet_core::wire::FeeQuoteWire;
+    use berlin_wallet_core::{
+        HISTORY_UNAVAILABLE_WARNING, RECOVERY_BACKUP_WARNING, STRANDED_DEPOSIT_WARNING,
+    };
+
+    #[test]
+    fn restore_view_warnings_match_the_policy() {
+        let summary = RestoreSummary::new(true, 0, 0);
+        assert!(summary.is_balances_only());
+        assert_eq!(
+            restore_warnings(&summary),
+            vec![
+                HISTORY_UNAVAILABLE_WARNING.to_owned(),
+                STRANDED_DEPOSIT_WARNING.to_owned(),
+                RECOVERY_BACKUP_WARNING.to_owned(),
+            ]
+        );
+        assert!(
+            restore_warnings(&summary)
+                .iter()
+                .any(|warning| warning.contains("does not recover it"))
+        );
+    }
 
     #[test]
     fn pending_quote_has_no_net() {

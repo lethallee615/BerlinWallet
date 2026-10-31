@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: 7ba02b5
+Main at: 5a365fd
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -22,7 +22,7 @@ actually stands.
 | ecash-balance | mintv2 balance distinct from the BDK balance | live | — | `API-VERIFICATION.md` §25 |
 | lightning | lnv2 send/receive | live | — | `API-VERIFICATION.md` §48, §49; paid send/receive, expiry, restart 2026-10-31; fresh join required |
 | chain-backends | Esplora, Electrum, bitcoind RPC behind one contract | live | — | `API-VERIFICATION.md` §51; Electrum live 2026-10-31; Esplora and bitcoind live |
-| restore-backup | Mnemonic restore, full-directory backup, documented limits | done | #26 | `API-VERIFICATION.md` §28–§31; `docs/ARCHITECTURE.md` §8.1 |
+| restore-backup | Mnemonic restore, full-directory backup, documented limits | done | — | `API-VERIFICATION.md` §28–§31, §52; `docs/ARCHITECTURE.md` §8.1 |
 | crash-safety | Documented crash windows survive restart | in-progress | #25 | `API-VERIFICATION.md` §27; matrix is manual |
 | fee-preview | Claim and mintv2 operation fee before funding | live | — | `API-VERIFICATION.md` §50; devimint 2026-10-31 |
 | watch-progress | `watch` reports progress instead of polling silently | todo | #22 | Silent polling |
@@ -33,7 +33,7 @@ actually stands.
 |---|---|---|---|---|---|---|
 | Esplora | yes | yes | yes | no | unit | §25, §34–§36; devimint Esplora panics on a live `invalidateblock` |
 | Electrum | yes | yes | yes | no | no | §51; sync/deposit/withdrawal/restart/`chain.json` live; full scan/restore and reorg not live |
-| bitcoind RPC | yes | yes | yes | yes | partial | JOURNAL 2026-10-24; PR #13 (rebuild live, restore flow unit); deposit regression #14 |
+| bitcoind RPC | yes | yes | yes | yes | yes | JOURNAL 2026-10-24; PR #13 rebuild; §52 full-scan restore; deposit regression #14 |
 
 ## Live verification log
 
@@ -41,6 +41,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
+| 2026-10-31 | Fresh restore recovered 99,577,856 msat and BDK 0.09849694; empty history/warnings; new receive did not reclaim a stranded 50,000 sat deposit | bitcoind RPC | pass | #26, §52 |
 | 2026-10-31 | Electrum sync, 100,000 sat deposit -> Done (99,577,856 msat), 50,000 sat withdrawal -> Broadcast and 1 conf; restart and `chain.json` reuse | electrum tcp://127.0.0.1:60401 | pass | #24, §51 |
 | 2026-10-31 | 100,000 sat deposit preview: claim 316 sat, operation estimate 100,100 msat; actual 103,072 msat, net 99,580,928 msat | bitcoind RPC | pass | #21, §50 |
 | 2026-10-31 | lnv2 paid send 1,000 sat -> `Succeeded`, LND invoice `SETTLED` | devimint | pass | #23, §49 |
@@ -61,7 +62,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #25, #26 |
+| P1 | #25 |
 | P2 | #9, #22, #27, #28, #29, #30, #38, #39 |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.

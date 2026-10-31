@@ -145,6 +145,18 @@ pub async fn recover_client(
         reopened.all_modules_usable(),
         "recovery finished, but some modules are still unavailable after reopen"
     );
+    // The mintv2 recovery reconstructs ecash by adding an output state machine
+    // that issues the recovered notes. `wait_for_all_recoveries` only waits for
+    // module recovery, not for that issuance; without this wait a caller that
+    // reads the balance immediately after reopen sees 0 while the notes are
+    // still pending. Bound the wait so an unreachable federation cannot hang a
+    // restore forever.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        reopened.wait_for_all_active_state_machines(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out waiting for recovered ecash notes to settle"))??;
     tracing::debug!(
         %federation_id,
         all_modules_usable_while_recovering,

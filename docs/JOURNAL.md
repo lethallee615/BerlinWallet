@@ -1,5 +1,30 @@
 # Journal
 
+## 2026-10-31 — Restore assertions and a balance-settlement race
+
+The restore contract is now asserted rather than only described. A small
+`restore_policy` module owns the exact warning text, the `history_unavailable`
+decision, and `is_balances_only()`. The CLI prints the operation-log flag,
+history flag, journal counts, and all three warnings, and fails if a fresh
+restore is not balances-only. The FFI `RestoreView` carries the same warning
+strings; its restore path also enforces the balances-only result.
+
+The live devimint gate found a real bug first: recovery reconstructed
+`99,577,856 msat`, but `restore` printed `0 msat`. mintv2 recovery adds a pending
+output state machine to issue the reconstructed notes; `wait_for_all_recoveries`
+does not wait for that issuance, and `recover_client` reopened and returned
+immediately. `recover_client` now calls
+`Client::wait_for_all_active_state_machines()` after reopening, and the same
+gate then recovered the ecash and BDK balances correctly.
+
+The gate also created a funded, unclaimed 50,000 sat deposit before restoring.
+The restored client showed the settled 99,577,856 msat, an empty operation log
+and journal, and all warnings. A new `request-deposit 10000` reused the same
+walletv2 address in this run, but the ecash balance did not change and the
+stranded UTXO remained unspent after ten more blocks. Address reuse is not a
+re-claim; the warning's promise remains accurate.
+
+Tests: 103 core, 5 CLI, 6 FFI (including exact warning-text assertions).
 ## 2026-10-31 — Electrum is live on devimint
 
 Electrum was the last chain backend with unit coverage only. A fresh devimint

@@ -20,6 +20,7 @@ use berlin_wallet_core::network::{
     require_recorded_network, verified_client_network,
 };
 use berlin_wallet_core::ops::{DepositId, LightningId, OnchainSendId, WithdrawalId};
+use berlin_wallet_core::restore_policy::RestoreSummary;
 use berlin_wallet_core::seed;
 use berlin_wallet_core::sync;
 use berlin_wallet_core::withdrawal::await_change_outputs;
@@ -823,6 +824,19 @@ async fn restore(
     let mut bdk = BdkWallet::open_or_create(&bdk_path, seed, chain_network, chain.clone())?;
     let last_active = bdk.full_scan().await?;
     let ecash = client.get_balance_for_unit(AmountUnit::BITCOIN).await?;
+    let journal = Journal::new(db.clone(), vec![0x00]);
+    let operation_log_empty = client
+        .operation_log()
+        .paginate_operations_rev(1, None)
+        .await
+        .is_empty();
+    let deposit_count = journal.deposits_all().await?.len();
+    let withdrawal_count = journal.withdrawals_all().await?.len();
+    let summary = RestoreSummary::new(operation_log_empty, deposit_count, withdrawal_count);
+    anyhow::ensure!(
+        summary.is_balances_only(),
+        "fresh restore is not balances-only; review the restore warning policy"
+    );
 
     println!("restore modules usable: true");
     println!("restore recorded network: {recorded}");
@@ -834,8 +848,25 @@ async fn restore(
     );
     println!("restore bdk full scan last active: {last_active:?}");
     println!("restore bdk balance: {}", bdk.balance());
+    print_restore_summary(&summary);
     println!("restore assertions: ok");
     Ok(())
+}
+
+fn print_restore_summary(summary: &RestoreSummary) {
+    println!(
+        "restore operation log empty: {}",
+        summary.operation_log_empty
+    );
+    println!(
+        "restore history unavailable: {}",
+        summary.history_unavailable
+    );
+    println!("restore journal deposits: {}", summary.deposit_count);
+    println!("restore journal withdrawals: {}", summary.withdrawal_count);
+    for warning in &summary.warnings {
+        println!("restore warning: {warning}");
+    }
 }
 
 async fn command_request_deposit(
@@ -1249,6 +1280,29 @@ fn take_network_flag(args: &mut Vec<String>) -> anyhow::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use berlin_wallet_core::{
+        HISTORY_UNAVAILABLE_WARNING, RECOVERY_BACKUP_WARNING, STRANDED_DEPOSIT_WARNING,
+    };
+
+    #[test]
+    fn restore_warning_text_is_explicit() {
+        let summary = RestoreSummary::new(true, 0, 0);
+        assert!(summary.is_balances_only());
+        assert_eq!(
+            summary.warnings,
+            vec![
+                HISTORY_UNAVAILABLE_WARNING,
+                STRANDED_DEPOSIT_WARNING,
+                RECOVERY_BACKUP_WARNING,
+            ]
+        );
+        assert!(
+            summary
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("A new deposit request does not recover it."))
+        );
+    }
 
     #[test]
     fn network_flag_is_removed_before_positional_parsing() {
