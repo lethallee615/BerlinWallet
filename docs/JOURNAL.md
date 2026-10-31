@@ -4,6 +4,24 @@ This is a plain-language record of what Berlin Wallet is, what was built, and wh
 It is not API documentation and it is not a changelog of every commit. The source
 and `docs/API-VERIFICATION.md` remain authoritative for current behavior.
 
+## 2026-10-30 — The devShell carries its own Go and an optimized C flag
+
+The Nix shell could not build the workspace on a machine whose `target/` had
+been configured outside it. Two independent causes, both shell-specific:
+
+- `aws-lc-sys` configures its CMake build from source, and that path can shell
+  out to `go` for code generation. `go` was not in the devShell, so CMake
+  stopped at `cmake/go.cmake` with "Could not find Go".
+- The CMake feature probes compile at `-O0`. If the ambient glibc defines
+  `_FORTIFY_SOURCE`, `-Werror` turns the resulting warning into a failure.
+
+The shell now provides `go` and exports `CFLAGS`/`CXXFLAGS=-O2`. The second
+cause also has a cache dimension: a `target/debug/build/aws-lc-sys-*` directory
+configured in a different shell is reused in place, so a Go-enabled or
+fortify-enabled configure can fail even after the environment is fixed. The
+shellHook and `README.md` name the one-line purge; the full workspace was
+rebuilt from a clean `aws-lc-sys` cache inside the shell as the gate.
+
 ## 2026-10-25 — The rebuild log names its scan floor
 
 When the stored BDK checkpoint is orphaned, the wallet rebuilds and full-scans.
