@@ -100,7 +100,17 @@ For Nix users, the §40 bindgen caveat does not apply: the shell derives
 `LIBCLANG_PATH` from the Nix `libclang` and
 `BINDGEN_EXTRA_CLANG_ARGS` from `clang -print-resource-dir`. The build and the
 `berlin-wallet` binary must be run **inside** the `nix develop` shell. The shell
-does not install rustup; rust-overlay provides the toolchain directly.
+does not install rustup; rust-overlay provides the toolchain directly. It also
+provides `go`, which `aws-lc-sys` needs when it builds its CMake feature probes
+from source, and exports an optimized `CFLAGS`/`CXXFLAGS` so a
+`_FORTIFY_SOURCE` probe is not rejected at `-O0`.
+
+If `aws-lc-sys` fails after switching between the Nix shell and the system
+toolchain, the CMake cache is stale. Remove the cached build and retry:
+
+```bash
+rm -rf target/debug/build/aws-lc-sys-*
+```
 
 ### Manual prerequisites
 
