@@ -2636,3 +2636,44 @@ Not verified here (no live node in this environment):
   devimint Esplora binary; §36/§40).
 - `bip158::FilterIter` is **not** used. `getcfilters` and the block-filter-index
   requirement were not tested, so no code depends on them.
+
+## 44. Network selection is explicit and fail-closed
+
+`network_from_chain_id` used to return `Network::Regtest` for any chain-id it did
+not recognise. That is the upstream server behaviour (`fedimint-server-core`),
+and it is wrong for a wallet: a wrong network means wrong address prefixes and
+wrong BIP84 descriptors, with no warning. It now returns
+`anyhow::Result<Network>`; the four well-known block-1 hashes still map to
+mainnet, testnet, signet, and signet (Mutinynet), and anything else is an error.
+
+The error is resolvable without reintroducing a silent fallback:
+
+- `init` requires `--network <mainnet|testnet|signet|regtest>` and records it in
+  `<data-dir>/network.json` (version 1, mode 0600, atomic temp+rename).
+- `run`/`open` read that record, derive the chain-id network, and refuse a
+  mismatch.
+- An unknown chain-id is accepted **only** when the recorded choice is
+  `regtest`. That is the explicit opt-in for devimint and private chains; it is
+  not a default.
+- `init_network` refuses to change the recorded network of an initialized data
+  directory. A different network needs a fresh directory.
+
+The FFI follows the same rule and is a breaking signature change, as agreed:
+`PegWallet::init(network: String)`, `PegWallet::restore(invite_code,
+chain_source, network: String)`, and `InitView` gains `network`. `join` and
+`open` do not take a network; they require the recorded file and verify it, so
+an app cannot skip the choice. `WalletState` carries the verified
+`bitcoin::Network`.
+
+Tests in `crates/berlin-wallet-core/src/network.rs`:
+
+- known chain-ids map to their networks;
+- an unknown chain-id fails with the chain-id and the `--network regtest` hint;
+- a known chain-id must match the recorded network;
+- an unknown chain-id is accepted only with an explicit `regtest` record;
+- `network.json` round-trips, a missing record has a clear error, a corrupt file
+  is reported, and `init_network` refuses a change.
+
+The CLI argument split (`--network` is removed before positional parsing) is
+covered by `network_flag_is_removed_before_positional_parsing`. This also fixes
+the old `init` argument bug: the chain source is `args[2]`, not `args[3]`.
