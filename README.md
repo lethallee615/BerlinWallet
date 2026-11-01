@@ -55,7 +55,7 @@ This is an **unaudited developer preview**; the first source-only alpha
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 124 core tests (123 run + 1 devimint-only ignored), 8 CLI tests, and 6 FFI tests.
+- The current test suite is 124 core tests (123 run + 1 devimint-only ignored), 9 CLI tests, and 6 FFI tests.
 - The first alpha is source-only: there is no supported binary artifact and no
   platform-support promise. Build from the tagged source with the prerequisites
   below.
@@ -176,6 +176,8 @@ The CLI binary is a development harness, not a production UI:
 
 The CLI also has headless `send <address> <sat> <sat/vb>` and `list-onchain`
 commands for an initialized data directory; they do not require a federation.
+`berlin-wallet --version` prints the package version, and `--help` labels the
+binary as an unaudited developer preview.
 `docs/SIGNET.md` contains the local OP_TRUE signet send/reorg harness.
 
 The REPL traps Ctrl+C (cancels a running `watch`) and refuses Ctrl+Z while the
@@ -226,6 +228,9 @@ binding boundary for a later desktop GUI or mobile app; neither exists yet.
 ## Documentation
 
 - [`docs/README.md`](docs/README.md) — documentation index.
+- [`CHANGELOG.md`](CHANGELOG.md) and
+  [`docs/releases/v0.1.0-alpha.1.md`](docs/releases/v0.1.0-alpha.1.md) — the
+  curated alpha release notes.
 - [`docs/JOURNAL.md`](docs/JOURNAL.md) — plain-language narrative of what was
   built and why.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — crate boundaries, journal,

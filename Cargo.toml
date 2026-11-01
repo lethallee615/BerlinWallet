@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/berlin-wallet-core", "crates/berlin-wallet-cli", "crates/berlin-wallet-ffi"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 license = "MIT"
 description = "Berlin Wallet: Fedimint walletv2 + BDK peg-in/peg-out orchestration with a UniFFI surface."

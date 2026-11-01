@@ -46,6 +46,24 @@ static PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let mut args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("version")
+        || args
+            .iter()
+            .skip(1)
+            .any(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("berlin-wallet {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.get(1).map(String::as_str) == Some("help")
+        || args
+            .iter()
+            .skip(1)
+            .any(|arg| arg == "--help" || arg == "-h")
+    {
+        print_help();
+        return Ok(());
+    }
     let network_arg = take_network_flag(&mut args)?;
     let data_dir = data_dir();
     let command = args.get(1).map(String::as_str);
@@ -356,6 +374,10 @@ fn data_dir() -> PathBuf {
 }
 
 fn print_help() {
+    println!(
+        "berlin-wallet {} — unaudited CLI developer preview",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
     println!("commands:");
     println!("  init --network <net> [chain-source] create/open the local wallet; net is");
@@ -373,6 +395,8 @@ fn print_help() {
     println!("  run <invite> [chain-source]         interactive manual-run session");
     println!("  send <address> <sat> <sat/vb>       send on-chain without a federation");
     println!("  list-onchain                        journalled sends + wallet history");
+    println!("  version, --version                  print the package version");
+    println!("  help, --help                        print this help");
     println!();
     println!("  An unknown federation chain-id fails closed unless the data directory");
     println!("  was explicitly initialized with --network regtest (devimint/custom).");
@@ -400,6 +424,7 @@ fn print_help() {
     println!("  withdraw <address> <sat>            request + send in one step");
     println!("  send <address> <sat> <sat/vb>       send on-chain from the BDK wallet");
     println!("  list-onchain                        journalled sends + wallet history");
+    println!("  version, --version                  print the package version");
     println!("  ln-send <invoice> [gateway]         pay a Bolt11 invoice via lnv2");
     println!("  ln-receive <sat> [expiry] [gateway] [description...]");
     println!("                                      create an lnv2 invoice");
@@ -1548,6 +1573,11 @@ mod tests {
     use berlin_wallet_core::{
         HISTORY_UNAVAILABLE_WARNING, RECOVERY_BACKUP_WARNING, STRANDED_DEPOSIT_WARNING,
     };
+
+    #[test]
+    fn version_is_the_package_version() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0-alpha.1");
+    }
 
     #[test]
     fn restore_warning_text_is_explicit() {
