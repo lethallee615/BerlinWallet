@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,8 @@ use tokio::sync::{Mutex, watch};
 
 const DEFAULT_ESPLORA_URL: &str = "http://127.0.0.1:3002";
 const WATCH_HEARTBEAT: Duration = Duration::from_secs(10);
+const REPL_PROMPT: &str = "berlin-wallet> ";
+static PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -92,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
             let network = init_network(&data_dir, parse_network(value)?)?;
             // `init` takes the chain source as its first positional argument.
             let chain = chain_config(&data_dir, args.get(2).cloned())?;
-            let mut bdk = BdkWallet::open_or_create(
+            let bdk = BdkWallet::open_or_create(
                 &data_dir.join(BDK_DB_FILE),
                 &seed,
                 network,
@@ -110,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                 "fedimint db: {}",
                 data_dir.join("fedimint.rocksdb").display()
             );
-            println!("bdk address: {}", bdk.reveal_destination()?);
+            println!("bdk address: {}", bdk.peek_destination()?);
             println!("bdk balance: {}", bdk.balance());
             print_help();
             Ok(())
@@ -221,6 +224,41 @@ fn new_passphrase(kind: &str) -> anyhow::Result<String> {
     Ok(first)
 }
 
+/// Trace writer that keeps the REPL prompt visible after a background log line.
+/// It only redraws while the REPL is waiting for input, so command output and
+/// watch progress are not interrupted by an extra prompt.
+struct PromptMakeWriter;
+
+struct PromptWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for PromptMakeWriter {
+    type Writer = PromptWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        PromptWriter
+    }
+}
+
+impl Write for PromptWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        io::stderr().write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::stderr().flush()
+    }
+}
+
+impl Drop for PromptWriter {
+    fn drop(&mut self) {
+        if PROMPT_ACTIVE.load(Ordering::SeqCst) {
+            let mut stderr = io::stderr();
+            let _ = write!(stderr, "\r{REPL_PROMPT}");
+            let _ = stderr.flush();
+        }
+    }
+}
+
 /// Reloadable stderr tracing filter. `RUST_LOG` controls filtering and defaults
 /// to `info`; the handle lets shutdown silence fedimint's task-cancellation
 /// lifecycle noise without hiding real task errors during normal operation.
@@ -237,7 +275,7 @@ fn init_tracing() {
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(filter);
     let subscriber = tracing_subscriber::registry()
         .with(filter_layer)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
+        .with(tracing_subscriber::fmt::layer().with_writer(PromptMakeWriter));
     if subscriber.try_init().is_ok() {
         let _ = TRACING_RELOAD.set(reload_handle);
     }
@@ -339,6 +377,7 @@ fn print_help() {
     println!("  ln-gateways                         list the federation's vetted gateways");
     println!("  status <id>                         print a deposit or withdrawal row");
     println!("  sync                                run one BDK Esplora sync");
+    println!("  !<cmd> or shell <cmd>               run a shell command");
     println!("  help");
     println!("  quit");
     println!();
@@ -450,17 +489,36 @@ async fn run(
     println!("chain-id network: {chain_network}");
     println!("config network: {}", module.get_network());
     println!("chain source: {}", chain.describe());
-    println!("bdk address: {}", wallet.lock().await.reveal_destination()?);
+    println!("bdk address: {}", wallet.lock().await.peek_destination()?);
     println!("min withdrawal: {} sat", min_withdrawal_sat(&client).await?);
     println!("type `help` for commands");
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     loop {
-        eprint!("berlin-wallet> ");
+        PROMPT_ACTIVE.store(true, Ordering::SeqCst);
+        eprint!("{REPL_PROMPT}");
         io::stderr().flush()?;
-        let Some(line) = lines.next() else { break };
+        let Some(line) = lines.next() else {
+            PROMPT_ACTIVE.store(false, Ordering::SeqCst);
+            break;
+        };
+        PROMPT_ACTIVE.store(false, Ordering::SeqCst);
         let line = line?;
+        let line = normalize_command_line(&line);
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(shell_command) = line.strip_prefix('!') {
+            run_repl_shell(shell_command.trim());
+            continue;
+        }
+        if line == "shell" || line.starts_with("shell ") {
+            let shell_command = line.strip_prefix("shell").unwrap_or_default().trim();
+            run_repl_shell(shell_command);
+            continue;
+        }
+
         let mut parts = line.split_whitespace();
         let Some(command) = parts.next() else {
             continue;
@@ -758,7 +816,11 @@ async fn run(
                     .ok_or_else(|| anyhow!("usage: status <deposit-or-withdrawal-id>"))?;
                 command_status(&journal, id).await
             }
-            other => Err(anyhow!("unknown command: {other}")),
+            other if is_stray_command(other) => Ok(()),
+            other => {
+                eprintln!("unknown command: {other}; type `help` or use `!<shell command>`");
+                Ok(())
+            }
         };
 
         if let Err(err) = result {
@@ -790,6 +852,32 @@ async fn run(
         ),
     }
     Ok(())
+}
+
+fn normalize_command_line(line: &str) -> &str {
+    let line = line.trim_end_matches('\r');
+    let line = line.strip_prefix("\x1b[200~").unwrap_or(line);
+    line.strip_suffix("\x1b[201~").unwrap_or(line).trim()
+}
+
+fn is_stray_command(command: &str) -> bool {
+    command.chars().count() <= 1
+}
+
+fn run_repl_shell(command: &str) {
+    if command.is_empty() {
+        eprintln!("usage: !<shell command> or shell <shell command>");
+        return;
+    }
+    match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("shell command exited with {status:?}"),
+        Err(err) => eprintln!("could not run shell command: {err}"),
+    }
 }
 
 fn spawn_interrupt_listener(
@@ -1477,6 +1565,16 @@ mod tests {
             "funding_txid=1111111111111111111111111111111111111111111111111111111111111111"
         ));
         assert!(line.contains("operation_id=<none>"));
+    }
+
+    #[test]
+    fn repl_normalises_paste_markers_and_absorbs_stray_keys() {
+        assert_eq!(normalize_command_line("\x1b[200~address\r"), "address");
+        assert_eq!(normalize_command_line("address\x1b[201~"), "address");
+        assert_eq!(normalize_command_line("  balance\r"), "balance");
+        assert!(is_stray_command("s"));
+        assert!(is_stray_command("!"));
+        assert!(!is_stray_command("sync"));
     }
 
     #[test]

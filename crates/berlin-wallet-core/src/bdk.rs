@@ -312,6 +312,18 @@ impl BdkWallet {
             .is_mine(address.clone().assume_checked().script_pubkey())
     }
 
+    /// Peek at the current unused external address without revealing/persisting
+    /// a new derivation index. Startup and `init` use this so repeated sessions
+    /// show the same receive address; the explicit `address` command calls
+    /// [`Self::reveal_destination`].
+    pub fn peek_destination(&self) -> anyhow::Result<bitcoin::Address> {
+        let index = self.wallet().next_derivation_index(KeychainKind::External);
+        Ok(self
+            .wallet()
+            .peek_address(KeychainKind::External, index)
+            .address)
+    }
+
     /// Reveal and persist the next external address.
     pub fn reveal_destination(&mut self) -> anyhow::Result<bitcoin::Address> {
         let address = self
@@ -1268,5 +1280,32 @@ mod tests {
             "lower-tip update must be a no-op"
         );
         assert_eq!(local.tip().height(), 5);
+    }
+
+    #[test]
+    fn peek_destination_is_stable_until_the_explicit_reveal() {
+        let mut temp = wallet_at(
+            ChainKind::Esplora,
+            0,
+            hash(1),
+            ChainTip {
+                height: 1,
+                hash: hash(1),
+            },
+            Some(hash(1)),
+        );
+        let first = temp.wallet.peek_destination().expect("peek");
+        let second = temp.wallet.peek_destination().expect("peek again");
+        assert_eq!(first, second, "startup/peek must not advance the index");
+        let revealed = temp.wallet.reveal_destination().expect("reveal");
+        assert_eq!(
+            revealed, first,
+            "the explicit address command reveals the peeked address"
+        );
+        let next = temp.wallet.peek_destination().expect("peek after reveal");
+        assert_ne!(
+            next, first,
+            "revealing must advance the next unused address"
+        );
     }
 }
