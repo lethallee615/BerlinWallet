@@ -37,7 +37,8 @@ custody split is explicit:
   with mobile later.
 
 This is an **unaudited developer preview**; the first source-only alpha
-(`v0.1.0-alpha.1`) is being prepared.
+[`v0.1.0-alpha.1`](https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.1)
+is published.
 
 ## Status
 

@@ -32,8 +32,8 @@ It does not build a binary, publish to crates.io, or mark the release as latest.
 
 ```bash
 gh release view v0.1.0-alpha.1 --json isPrerelease,assets,url
-gh release download v0.1.0-alpha.1 --pattern '*.sha256' --dir /tmp/bw-release
-sha256sum -c /tmp/bw-release/*.sha256
+gh release download v0.1.0-alpha.1 --pattern '*.sha256' --pattern '*.tar.gz' --dir /tmp/bw-release
+(cd /tmp/bw-release && sha256sum -c *.sha256)
 ```
 
 If the workflow fails before the release exists, fix the cause and delete/recreate
@@ -46,7 +46,7 @@ cut a new alpha instead.
 mkdir -p dist
 git archive --format=tar.gz --prefix=berlin-wallet-v0.1.0-alpha.1/ \
   --output=dist/berlin-wallet-v0.1.0-alpha.1.tar.gz HEAD
-sha256sum dist/*.tar.gz > dist/berlin-wallet-v0.1.0-alpha.1.tar.gz.sha256
+(cd dist && sha256sum berlin-wallet-v0.1.0-alpha.1.tar.gz > berlin-wallet-v0.1.0-alpha.1.tar.gz.sha256)
 gh release create v0.1.0-alpha.1 dist/* --verify-tag --prerelease --latest=false \
   --title "Berlin Wallet v0.1.0-alpha.1" \
   --notes-file docs/releases/v0.1.0-alpha.1.md
