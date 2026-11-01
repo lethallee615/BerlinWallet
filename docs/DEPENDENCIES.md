@@ -49,6 +49,24 @@ than silently ignored. Dependabot ignores `lru < 0.16.3` and the equivalent
 advisory is listed in `deny.toml`. Remove both when the Fedimint/iroh/pkarr graph
 can move to `lru >= 0.16.3`.
 
+## Alpha dependency decisions
+
+The alpha dependency queue was cleared on 2026-10-31:
+
+- #54 merged the rust-minor-patch group: `serde_json` 1.0.154, `tokio` 1.54.1,
+  `uuid` 1.29.0, and `libc` 0.2.191. CI passed after the rebase.
+- #53 merged the GitHub Actions group: `actions/checkout@v7` and
+  `actions-rust-lang/setup-rust-toolchain@v2` in both CI and the release
+  workflow. CI passed.
+- #55 (`rand` 0.8.8 -> 0.10.3) was closed for the alpha. It is a transitive
+  lockfile bump across the Fedimint-pinned `soketto`/`jsonrpsee`/`iroh` graph,
+  not a wallet-code requirement or a security fix. Move it as one coordinated
+  dependency change later.
+
+The 12 open alerts and their reachability review are above. The advisory check
+stays non-blocking for alpha; remove the exceptions and make it blocking before
+beta or production.
+
 ## GitHub Actions
 
 Weekly, grouped, at most three open PRs. Actions are pinned to major-version
