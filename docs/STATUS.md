@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: 0faf3e4
+Main at: 3c69b69
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -37,8 +37,8 @@ production release, a binary release, or a crates.io publication.
 |---|---|---|---|
 | Security/roadmap/status truth | done | #57 | PR #62 |
 | Version, `--version`, release notes | done | #58 | PR #63 |
-| Source-only pre-release workflow | in-review | #59 | this PR |
-| Dependency queue and advisory reachability | todo | #60 | — |
+| Source-only pre-release workflow | done | #59 | PR #64 |
+| Dependency queue and advisory reachability | in-review | #60 | this PR |
 | Gate, tag, and publish `v0.1.0-alpha.1` | todo | #61 | — |
 
 The release is done only when #57–#61 close and the `v0.1.0-alpha.1` pre-release
@@ -86,7 +86,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #59, #60, #61 |
+| P1 | #60, #61 |
 | P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.

@@ -99,9 +99,9 @@ Versions below are verified against the crates.io sparse index + the committed `
 | `bdk_esplora` / `bdk_electrum` / `bdk_bitcoind_rpc` | `0.22.1` / `0.23.2` / `0.22.0` | chain source (pick one at runtime) |
 | `uniffi` | `=0.32.0` | UniFFI (optional feature in fedimint-client; required in ffi crate) |
 | `uniffi_bindgen` | `0.32.0` | build-time binding generation |
-| `tokio` | `1` (resolved `1.53.3`) | async runtime — **NOT `=1.48`**: `fedimint-connectors 0.12.0` → `iroh-mainline-address-lookup ^0.4.0` requires `tokio ^1.49` |
+| `tokio` | `1` (resolved `1.54.1`) | async runtime — **NOT `=1.48`**: `fedimint-connectors 0.12.0` → `iroh-mainline-address-lookup ^0.4.0` requires `tokio ^1.49` |
 | `anyhow` / `thiserror` | `=1.0.98` / `=2.0.18` | errors |
-| `serde` / `serde_json` | `1` (resolved `1.0.229`) / `=1.0.149` | journal serialization — **NOT `serde =1.0.219`**: `serde_json 1.0.149` requires `serde ^1.0.220` |
+| `serde` / `serde_json` | `1` (resolved `1.0.229`) / `1` (resolved `1.0.154`) | journal serialization — **NOT `serde =1.0.219`**: the resolved serde_json requires `serde ^1.0.220` |
 | `tracing` | `=0.1.44` | logging |
 | `async-trait` | `=0.1.88` | async traits |
 | `bitcoin` | `=0.32.8` | unified at a single version across fedimint + bdk |
