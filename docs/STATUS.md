@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: cd2450e
+Main at: 5f840b8
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -40,7 +40,7 @@ production release, a binary release, or a crates.io publication.
 | Source-only pre-release workflow | done | #59 | PR #64 |
 | Dependency queue and advisory reachability | done | #60 | PR #65 |
 | Gate, tag, and publish `v0.1.0-alpha.1` | done | #61 | tag `cd2450e`; <https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.1> |
-| Portable release checksum | in-review | #67 | this PR |
+| Portable release checksum | done | #67 | PR #68; alpha.1 checksum corrected in place |
 
 The `v0.1.0-alpha.1` pre-release exists. `ROADMAP.md` has the alpha boundary;
 `SECURITY.md` has the current limitations. The portable-checksum follow-up #67
@@ -88,7 +88,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #67 |
+| P1 | — |
 | P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
