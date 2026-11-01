@@ -31,9 +31,11 @@ needs a fresh join/restore to gain the module. All three BDK chain backends are
 wired behind `chain::ChainBackend`; Esplora, Electrum, and bitcoind RPC all have
 live coverage (bitcoind's reorg path was verified on 2026-10-24; Electrum's
 sync/deposit/withdrawal/restart/`chain.json` gate on 2026-10-31).
-The BDK path has a first-class on-chain send with a fee quote and history. The
-crash matrix is a deterministic CI suite (`src/crash_matrix.rs`); the
-broadcast-before-BDK/journal-persistence window remains devimint-only. See `ROADMAP.md` for the MVP
+The BDK path has a first-class on-chain send with a fee quote and history; it is
+live on devimint and on a local OP_TRUE signet harness (`docs/SIGNET.md`,
+`API-VERIFICATION.md` §58). The crash matrix is a deterministic CI suite
+(`src/crash_matrix.rs`); the broadcast-before-BDK/journal-persistence window
+remains devimint-only. See `ROADMAP.md` for the MVP
 checklist and `docs/STATUS.md` for the current snapshot.
 
 ## Crate layout

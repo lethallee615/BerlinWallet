@@ -20,8 +20,8 @@ MVP is called done.
 
 - [x] **On-chain send/receive** (#18). A user can reveal/receive to a BDK address and
       send an arbitrary on-chain payment from the BDK wallet, with fee control and
-      a recorded result. Live on devimint, including a reorg; the signet run is
-      tracked as #38.
+      a recorded result. Live on devimint, including a reorg, and on a local
+      OP_TRUE signet chain with a send/reorg gate (`API-VERIFICATION.md` §58).
 - [x] **Peg-in and peg-out.** `walletv2` deposit/claim and withdrawal/send work
       end to end on devimint and Mutinynet. The combined `deposit` path is fixed
       (#14).
@@ -87,8 +87,9 @@ This is the work that must happen before “real use” is more than an aspirati
   transaction history.
 - Make received on-chain funds visible with confirmation state and reorg-aware
   balance reporting.
-- Test send/receive, fee bumps if supported, and reorgs on devimint and a signet
-  environment.
+- [x] Test send/receive and reorgs on devimint and a signet environment. The
+  signet gate uses a local OP_TRUE Bitcoin Core signet and the headless
+  `send`/`list-onchain` path (`API-VERIFICATION.md` §58).
 
 ### Lightning via `lnv2`
 

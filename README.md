@@ -169,6 +169,10 @@ The CLI binary is a development harness, not a production UI:
 > A data directory created before `network.json` existed must run
 > `init --network <the network it already uses>` once.
 
+The CLI also has headless `send <address> <sat> <sat/vb>` and `list-onchain`
+commands for an initialized data directory; they do not require a federation.
+`docs/SIGNET.md` contains the local OP_TRUE signet send/reorg harness.
+
 The REPL traps Ctrl+C (cancels a running `watch`) and refuses Ctrl+Z while the
 database lock is held. `watch` prints its progress and heartbeat on stderr and
 keeps stdout for the final row. Multi-line paste is split correctly; stray

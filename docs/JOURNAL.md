@@ -1,5 +1,24 @@
 # Journal
 
+## 2026-10-31 — Signet on-chain send gate
+
+The last environment gap for the on-chain send is closed with a local custom
+signet harness. Bitcoin Core can run signet with `-signetchallenge=51`, where an
+empty signet solution is valid; `scripts/signet-mine.py` constructs the coinbase,
+BIP141 commitment, block merkle root, and signet block, including mempool
+transactions.
+
+The harness starts a fresh signet node, mines 101 blocks to the BDK address,
+runs the headless `send`/`list-onchain` path, confirms the 50,000 sat send at
+2 sat/vB (fee 281 sat, total debit 50,281 sat, change 4,999,949,719 sat, txid
+`b8dbe6cdd15b58bc0ee0326573ae1ab234adb2e6970d2fed0cdd862932b305c8`), and then
+invalidates the containing block. The BDK wallet rebuilt from `birthday=1` and
+re-confirmed the same txid at a new block 102 after a re-mine.
+
+This is a **custom OP_TRUE signet**, not public signet-4 or Mutinynet, and it
+does not involve a federation/faucet. The public-network run remains separate
+from this local consensus path.
+
 ## 2026-10-31 — Dependabot policy is checked in
 
 The repository now records its dependency-update policy instead of leaving it to

@@ -3456,3 +3456,63 @@ The development REPL now has explicit input normalization and prompt handling:
 
 Tests: `repl_normalises_paste_markers_and_absorbs_stray_keys` and
 `bdk::tests::peek_destination_is_stable_until_the_explicit_reveal`.
+
+## 58. Local OP_TRUE signet on-chain send gate (2026-10-31)
+
+Environment: Bitcoin Core 31.0, `-chain=signet -signetchallenge=51`, local
+bitcoind RPC; wallet data `/tmp/bw-signet-gate`; `berlin-wallet` at the current
+tree. The node was a trivially-true custom signet, not public signet-4 or
+Mutinynet.
+
+The harness (`scripts/signet-gate.sh` + `scripts/signet-mine.py`) does:
+
+- `init --network signet "bitcoind:http://u:p@127.0.0.1:18443?birthday=1"`;
+- mines 101 blocks to the BDK address (coinbase maturity);
+- runs the headless `send <external> 50000 2`;
+- mines the send transaction and reads `list-onchain` / `gettransaction`;
+- invalidates the block and re-mines to exercise the BDK reorg rebuild.
+
+Observed on the final harness run:
+
+```text
+send quote:
+  to: tb1qtht0pxkalcvgru2tshj7kp3ymhu5du9p8ftzus
+  amount: 50000 sat
+  fee rate: 2 sat/vB
+  fee: 281 sat
+  total debit: 50281 sat
+  change: 4999949719 sat
+  inputs: 1
+  txid: b8dbe6cdd15b58bc0ee0326573ae1ab234adb2e6970d2fed0cdd862932b305c8
+broadcast: b8dbe6cdd15b58bc0ee0326573ae1ab234adb2e6970d2fed0cdd862932b305c8 (141 vB, fee 281 sat)
+```
+
+The send confirmed in block 102
+(`0000016fff424d0e30167ff5a1f5ad13fc1654172de8bbc00bfd8c06d07fe611`):
+
+```text
+journal: 01a194ed-806d-717a-ba95-08d5ac14544b b8dbe6cd... tb1qtht... fee=281 sat
+         vsize=141 vB change=4999949719 sat state=Broadcast
+gettransaction: confirmations=1 blockhash=0000016fff...
+```
+
+Reorg: `invalidateblock 0000016fff424d0e30167ff5a1f5ad13fc1654172de8bbc00bfd8c06d07fe611`
+was accepted; `list-onchain` logged
+`BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan` and
+rebuilt from `birthday=1`. The harness re-mined a new block 102
+(`00000255bade079285ceb17d9f299d4f48f9fcfe0ac52001b020bad4c0a9e53a`) including
+the send transaction; `list-onchain` then reported the same txid at height 102
+with 1 confirmation.
+
+Coverage boundary: this proves the signet network's transaction path, address
+format, fee quote, broadcast, journal row, confirmation state, and BDK reorg
+rebuild against local Bitcoin Core. It does **not** prove a public signet
+federation/faucet path or public Esplora availability. The local signet node is
+started with OP_TRUE, so it is a test chain, not a consensus-representative
+public signet.
+
+The harness note `birthday=0` is not usable for a reorg rebuild on a non-regtest
+chain: the bitcoind backend refuses a genesis scan and the harness uses
+`birthday=1`. Public signet should use a recent birthday height.
+
+Tests: no new unit tests; the top-level headless path is exercised live.
