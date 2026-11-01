@@ -3472,35 +3472,35 @@ The harness (`scripts/signet-gate.sh` + `scripts/signet-mine.py`) does:
 - mines the send transaction and reads `list-onchain` / `gettransaction`;
 - invalidates the block and re-mines to exercise the BDK reorg rebuild.
 
-Observed on the final harness run:
+Observed on the final alpha harness run:
 
 ```text
 send quote:
-  to: tb1qtht0pxkalcvgru2tshj7kp3ymhu5du9p8ftzus
+  to: tb1qkkprzymnjmea954pzlaekt5svsu4kddmtlf0n3
   amount: 50000 sat
   fee rate: 2 sat/vB
   fee: 281 sat
   total debit: 50281 sat
   change: 4999949719 sat
   inputs: 1
-  txid: b8dbe6cdd15b58bc0ee0326573ae1ab234adb2e6970d2fed0cdd862932b305c8
-broadcast: b8dbe6cdd15b58bc0ee0326573ae1ab234adb2e6970d2fed0cdd862932b305c8 (141 vB, fee 281 sat)
+  txid: cc748ba8d29d7800bb79d8e0d33f3d600b96d3c65adfaf57ac7714fecfbecc03
+broadcast: cc748ba8d29d7800bb79d8e0d33f3d600b96d3c65adfaf57ac7714fecfbecc03 (141 vB, fee 281 sat)
 ```
 
 The send confirmed in block 102
-(`0000016fff424d0e30167ff5a1f5ad13fc1654172de8bbc00bfd8c06d07fe611`):
+(`00000132935f55d663bb59cb415f69e08ca94b0c87e7da1d7d78f611f68d13d0`):
 
 ```text
-journal: 01a194ed-806d-717a-ba95-08d5ac14544b b8dbe6cd... tb1qtht... fee=281 sat
+journal: 01a1955c-bd16-7023-a90d-9b3e26ced4ff cc748ba8... tb1qkkp... fee=281 sat
          vsize=141 vB change=4999949719 sat state=Broadcast
-gettransaction: confirmations=1 blockhash=0000016fff...
+gettransaction: confirmations=1 blockhash=0000013293...
 ```
 
-Reorg: `invalidateblock 0000016fff424d0e30167ff5a1f5ad13fc1654172de8bbc00bfd8c06d07fe611`
+Reorg: `invalidateblock 00000132935f55d663bb59cb415f69e08ca94b0c87e7da1d7d78f611f68d13d0`
 was accepted; `list-onchain` logged
 `BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan` and
 rebuilt from `birthday=1`. The harness re-mined a new block 102
-(`00000255bade079285ceb17d9f299d4f48f9fcfe0ac52001b020bad4c0a9e53a`) including
+(`000002833c603a3f72cb68faca717dd433a1ce31587bfb79b5e01f3ae5baa4`) including
 the send transaction; `list-onchain` then reported the same txid at height 102
 with 1 confirmation.
 
