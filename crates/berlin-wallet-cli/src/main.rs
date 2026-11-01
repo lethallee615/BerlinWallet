@@ -118,6 +118,35 @@ async fn main() -> anyhow::Result<()> {
             print_help();
             Ok(())
         }
+        Some("send") => {
+            let address = args
+                .get(2)
+                .ok_or_else(|| anyhow!("usage: berlin-wallet send <address> <sat> <sat/vb>"))?;
+            let amount = parse_sat(args.get(3).map(String::as_str))?;
+            let fee_rate_sat_vb: u64 = args
+                .get(4)
+                .ok_or_else(|| anyhow!("usage: berlin-wallet send <address> <sat> <sat/vb>"))?
+                .parse()
+                .context("invalid fee rate (sat/vB)")?;
+            let network = require_recorded_network(&data_dir)?;
+            let chain = chain_config(&data_dir, None)?;
+            let mut bdk =
+                BdkWallet::open_or_create(&data_dir.join(BDK_DB_FILE), &seed, network, chain)?;
+            bdk.sync().await?;
+            let journal = Journal::new(open_database(&data_dir).await?, vec![0x00]);
+            let wallet = Arc::new(Mutex::new(bdk));
+            command_send_onchain(&wallet, &journal, network, address, amount, fee_rate_sat_vb).await
+        }
+        Some("list-onchain") => {
+            let network = require_recorded_network(&data_dir)?;
+            let chain = chain_config(&data_dir, None)?;
+            let mut bdk =
+                BdkWallet::open_or_create(&data_dir.join(BDK_DB_FILE), &seed, network, chain)?;
+            bdk.sync().await?;
+            let journal = Journal::new(open_database(&data_dir).await?, vec![0x00]);
+            let wallet = Arc::new(Mutex::new(bdk));
+            command_list_onchain(&wallet, &journal).await
+        }
         Some("join") => {
             let invite = args
                 .get(2)
@@ -342,6 +371,8 @@ fn print_help() {
     println!("  BERLIN_WALLET_PASSPHRASE and BERLIN_WALLET_BACKUP_PASSPHRASE.");
     println!("                                      recover on a fresh data dir + full BDK scan");
     println!("  run <invite> [chain-source]         interactive manual-run session");
+    println!("  send <address> <sat> <sat/vb>       send on-chain without a federation");
+    println!("  list-onchain                        journalled sends + wallet history");
     println!();
     println!("  An unknown federation chain-id fails closed unless the data directory");
     println!("  was explicitly initialized with --network regtest (devimint/custom).");

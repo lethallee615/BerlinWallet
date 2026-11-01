@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: a8af156
+Main at: 90bcc74
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -17,7 +17,7 @@ actually stands.
 
 | ID | Requirement | Status | Issues | Evidence |
 |---|---|---|---|---|
-| onchain-send | Arbitrary on-chain send with fee control and a recorded result | live | #38 | `API-VERIFICATION.md` §47; devimint + reorg 2026-10-31; signet run open |
+| onchain-send | Arbitrary on-chain send with fee control and a recorded result | live | — | `API-VERIFICATION.md` §47, §58; devimint + reorg; local OP_TRUE signet send/reorg 2026-10-31 |
 | peg-in-out | walletv2 deposit/claim and withdrawal/send | live | — | `API-VERIFICATION.md` §25, §27, §45; live gate 2026-10-31 |
 | ecash-balance | mintv2 balance distinct from the BDK balance | live | — | `API-VERIFICATION.md` §25 |
 | lightning | lnv2 send/receive | live | — | `API-VERIFICATION.md` §48, §49; paid send/receive, expiry, restart 2026-10-31; fresh join required |
@@ -43,6 +43,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
 | 2026-10-31 | REPL PTY: two-line paste executed both balances; stray `s` absorbed; `!echo`/`shell echo` ran; background WARN redrew the prompt; startup BDK address stable | local CLI | pass | #9, §57 |
+| 2026-10-31 | Local OP_TRUE signet: 50,000 sat send at 2 sat/vB, fee 281 sat, total debit 50,281 sat, txid b8dbe6cd...; block 102 confirmed; invalidateblock + re-mine re-confirmed after BDK rebuild | signet bitcoind | pass | #38, §58 |
 | 2026-10-31 | 50,000 sat withdrawal: chain 228 sat + federation 101,600 msat; total debit 50,329,600 msat matched the balance delta; change range identified as ecash change | devimint bitcoind | pass | #28/#29, §37/§38 |
 | 2026-10-31 | Legacy mnemonic migrated to age; encrypted backup/restore reopened with wallet and backup passphrases; wrong passphrase rejected | local CLI | pass | #27, §56 |
 | 2026-10-31 | `RUST_LOG=info` quit with a funded/open deposit: no `fm::task` WARN/ERROR after the prompt; exit 0 | devimint bitcoind | pass | #39, §55 |
@@ -69,7 +70,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 |---|---|
 | P0 | — |
 | P1 | — |
-| P2 | #38 |
+| P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
 P2 is hardening. `docs/TRACKING.md` defines how these are assigned.

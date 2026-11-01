@@ -13,6 +13,7 @@ documents are kept for history and may describe superseded assumptions.
 | [`STATUS.md`](STATUS.md) | Machine-readable snapshot: MVP row status, backend coverage, live verification log, and open work by priority. |
 | [`TRACKING.md`](TRACKING.md) | The work queue, label/milestone taxonomy, status vocabulary, and the agent workflow. |
 | [`DEVIMINT.md`](DEVIMINT.md) | Local Fedimint v0.12.0 federation setup and the deposit live-gate checklist (#14). |
+| [`SIGNET.md`](SIGNET.md) | Local OP_TRUE signet harness for the headless on-chain send/reorg gate (#38). |
 | [`DEPENDENCIES.md`](DEPENDENCIES.md) | Dependabot policy, the Fedimint git-patch pin, and the documented `lru` exception. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries, data directory, journal format and invariants, deposit/withdrawal state machines, crash-safety windows, reorg handling, `[patch.crates-io]`, GUI gaps, unknowns. |
 | [`THREAT-MODEL.md`](THREAT-MODEL.md) | Trusted parties, what breaks if the federation/Esplora/BDK/OS/mnemonic/backups/data-directory assumptions fail, and explicit out-of-scope items. |
