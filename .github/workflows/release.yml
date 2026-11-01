@@ -70,11 +70,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          archive="dist/berlin-wallet-${GITHUB_REF_NAME}.tar.gz"
+          archive_name="berlin-wallet-${GITHUB_REF_NAME}.tar.gz"
           git archive --format=tar.gz \
             --prefix="berlin-wallet-${GITHUB_REF_NAME}/" \
-            --output="$archive" HEAD
-          sha256sum "$archive" > "${archive}.sha256"
+            --output="dist/${archive_name}" HEAD
+          (cd dist && sha256sum "$archive_name" > "${archive_name}.sha256")
 
       - name: Publish the source-only pre-release
         env:

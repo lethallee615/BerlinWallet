@@ -2,7 +2,8 @@
 
 ## 2026-10-31 — First source-only alpha
 
-The release train for `v0.1.0-alpha.1` is being cut from this commit. The docs now reflect the shipped
+The release train for `v0.1.0-alpha.1` was cut from this commit and published at
+<https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.1>. The docs now reflect the shipped
 code: `SECURITY.md` no longer describes the fixed plaintext mnemonic, unencrypted
 backups, silent watch, missing fee preview, quote mismatch, or unknown-chain
 fallback. `ROADMAP.md` separates the feature-complete MVP from the alpha
@@ -13,7 +14,11 @@ The workspace version is `0.1.0-alpha.1`; `berlin-wallet --version` and `--help`
 work without opening a wallet. Curated release notes are in
 `docs/releases/v0.1.0-alpha.1.md`. The tag workflow builds a source archive,
 writes SHA-256, and publishes a GitHub pre-release with `--latest=false`; there
-is no binary or crates.io artifact.
+is no binary or crates.io artifact. The first checksum asset recorded the
+workflow-local `dist/` path, so it was corrected in place to the archive
+basename; the archive hash is
+`bef686649964c1a17d82950bd160d5fa6766da93e3cdc8f81e9c84e303b9b768`. The workflow
+and runbook now generate portable checksums.
 
 The dependency queue is clear: #54's minor patch group and #53's action updates
 merged with green CI, and the transitive `rand` major was deferred. The 12 open
