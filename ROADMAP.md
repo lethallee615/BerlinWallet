@@ -177,6 +177,9 @@ This is the work that must happen before “real use” is more than an aspirati
 
 ### Dependency and supply-chain work
 
+- [x] Add a checked-in Dependabot policy (Cargo + GitHub Actions, weekly,
+  grouped, PR limits, Fedimint-patch and `lru` exceptions). See
+  `docs/DEPENDENCIES.md`.
 - Update `anyhow`, `rustls-webpki`, `hickory-proto`, `imbl-sized-chunks`, and the
   other advisory-affected transitive crates as upstream allows.
 - Remove the `[advisories].ignore` entries in `deny.toml` one by one and make the

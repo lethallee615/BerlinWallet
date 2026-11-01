@@ -90,7 +90,8 @@ This is **pre-alpha software**.
 ## Build prerequisites
 
 The workspace builds Rust only; native C/C++ dependencies come from the
-Fedimint/BDK graph.
+Fedimint/BDK graph. Dependency update policy and the documented `lru` exception
+are in `docs/DEPENDENCIES.md`.
 
 ### With Nix
 
