@@ -57,7 +57,7 @@ UI.
 | `backup.rs` | Age-encrypted full data-directory archive/import and lock check. |
 | `sqlite.rs` | Hand-written `SqliteDb` implementing Fedimint's raw database traits; retained for mobile. |
 | `seed.rs` | BIP39 mnemonic creation/loading, canonical Fedimint root secret, client identity digest. |
-| `network.rs` | Chain-id (block-1 hash) to `bitcoin::Network`; unknown chain IDs map to `Regtest`. |
+| `network.rs` | Chain-id (block-1 hash) to `bitcoin::Network`; unknown chain IDs fail closed unless the data directory was explicitly initialized with `--network regtest`. |
 | `wire.rs` | Serde-compatible `FeeQuoteWire`; `FeeQuote` itself is not `Serialize` in 0.12.0. |
 | `error.rs` | `PegError` and transient/permanent error classification. |
 | `fault.rs` | Debug-only `BERLIN_WALLET_CRASH_POINT` injection; no-op in release builds. |
@@ -161,10 +161,12 @@ hashes:
 - Bitcoin mainnet → `Network::Bitcoin`
 - testnet → `Network::Testnet`
 - signet-4 and Mutinynet → `Network::Signet`
-- anything else → `Network::Regtest`
+- anything else → an error
 
-The fallback to regtest is a real operational hazard: an unknown federation
-chain does not fail closed. Verify the federation and chain before funding.
+An unknown chain-id fails closed. The only exception is a data directory
+explicitly initialized with `--network regtest` for devimint or a private chain;
+even then the recorded network must match. Verify the federation and chain before
+funding.
 
 `seed::client_identity` derives the same client secret path used by
 `fedimint_client_module::secret::get_default_client_secret` and returns a

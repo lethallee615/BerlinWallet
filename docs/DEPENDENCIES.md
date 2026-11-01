@@ -63,3 +63,24 @@ merge.
    the non-blocking advisory job.
 4. For a major update or a change to the Fedimint graph, rerun the relevant
    devimint live gate before merging.
+
+## Open alert triage (alpha)
+
+GitHub reports 12 open dependency alerts against `Cargo.lock`: three high, four
+medium, and five low. This is a reachability review for the alpha, not an
+audit. The RustSec IDs and reasons for the accepted exceptions are in
+`deny.toml`; the advisory CI step remains non-blocking for alpha.
+
+The three high alerts are:
+
+| Alert | Path | Why it is not an alpha blocker |
+|---|---|---|
+| `GHSA-5j98-2g5x-46v6` — `hickory-resolver` obscures DNSSEC validation failures | `iroh`/Fedimint connector DNS | The wallet does not call the `Resolver::lookup*` DNSSEC APIs or claim DNSSEC validation; federation endpoints are configured by the user. |
+| `GHSA-3v94-mw7p-v465` — `hickory-proto` NSEC3 unbounded loop | `iroh`/Fedimint connector DNS | DNSSEC/NSEC3 validation is not enabled on the wallet's resolution path. |
+| `GHSA-82j2-j2ch-gfr8` — `rustls-webpki` panic on a malformed CRL | `rustls`/Fedimint HTTP and relay | The wallet does not parse or configure CRLs; it uses the default webpki certificate path. |
+
+The remaining alerts are in transitive `rustls`, `rustls-webpki`, `hickory`,
+`lru`, and `anyhow` paths. They are tracked in `deny.toml` with the same
+reachability caveat. Clear them as upstream Fedimint/iroh releases permit; make
+the advisory check blocking before beta/production. Do not treat this table as a
+security guarantee.

@@ -8,10 +8,10 @@ done only when its gate is met and documented.
 > [`docs/TRACKING.md`](docs/TRACKING.md) is the workflow, and this file is the
 > definition of done. Merging code does not check a box; passing its gate does.
 
-The wallet is pre-alpha: deposit and withdrawal have been exercised end to end on
-devimint and Mutinynet, but the code is unaudited and several upstream edge cases
-are still open. The near-term product is a **CLI-first MVP**. A desktop GUI is
-deferred until after the MVP; mobile is later still.
+The MVP feature set is complete, but the code is unaudited and several upstream
+edge cases are still open. The next delivery is a **source-only CLI developer
+preview**, `v0.1.0-alpha.1`; it is not a production wallet release. A desktop GUI
+is deferred until after the MVP; mobile is later still.
 
 ## MVP is done when…
 
@@ -51,6 +51,28 @@ MVP is called done.
 - [x] **Watch progress output** (#22). `watch` reports an initial stderr line
       and a 10 s heartbeat with state, event-log positions, funding txid,
       operation id, and elapsed time; `API-VERIFICATION.md` §54.
+
+The CLI-first MVP checklist above is met as of 2026-10-31. That is a feature
+milestone, not a release.
+
+## Alpha release boundary (`v0.1.0-alpha.1`)
+
+The first alpha is a **source-only CLI developer preview**:
+
+- no real funds, no mainnet, and no production custody claim;
+- no binary artifact or platform-support promise;
+- no crates.io publication;
+- no data-format or migration guarantee;
+- devimint, the earlier Mutinynet deposit/withdrawal round trip, and a local
+  custom OP_TRUE signet send/reorg gate are the live evidence;
+- the audit, public signet/Mutinynet on-chain send, mainnet operations, GUI,
+  mobile, full integration/property tests, upstream recovery work, and the
+  dependency-advisory cleanup are **post-alpha** unless the release milestone
+  says otherwise.
+
+The alpha release work is tracked in the `Release` milestone. The unchecked
+items below are post-alpha hardening unless they are explicitly claimed by an
+alpha issue.
 
 ## Now — hygiene and documentation
 

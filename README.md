@@ -32,14 +32,16 @@ custody split is explicit:
   Bitcoin address, wait for the federation's final send state, and record the
   broadcast txid.
 - The same core is exposed through a UniFFI crate and a development CLI. The
-  near-term deliverable is a CLI-first MVP; the desktop GUI is deferred until
-  after MVP, with mobile later.
+  CLI-first MVP is feature-complete; the next delivery is a source-only developer
+  preview (`v0.1.0-alpha.1`). The desktop GUI is deferred until after the MVP,
+  with mobile later.
 
-This is **pre-alpha software**.
+This is an **unaudited developer preview**; the first source-only alpha
+(`v0.1.0-alpha.1`) is being prepared.
 
 ## Status
 
-- **Pre-alpha. Not audited.**
+- **Developer preview (alpha). Not audited.**
 - Deposit and withdrawal have been exercised end to end on devimint and
   Mutinynet. The live Mutinynet round trip and crash/restart matrix are recorded
   in `docs/API-VERIFICATION.md` §25 and §27. Funding returns after broadcast; a
@@ -54,6 +56,9 @@ This is **pre-alpha software**.
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
 - The current test suite is 124 core tests (123 run + 1 devimint-only ignored), 8 CLI tests, and 6 FFI tests.
+- The first alpha is source-only: there is no supported binary artifact and no
+  platform-support promise. Build from the tagged source with the prerequisites
+  below.
 - There is **no mainnet operational testing** recorded in this repository and no
   independent security audit. The desktop GUI and mobile app are deferred until
   after the CLI-first MVP.

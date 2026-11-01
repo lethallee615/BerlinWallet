@@ -10,10 +10,10 @@ project got here. [`docs/TRACKING.md`](docs/TRACKING.md) defines the labels,
 milestones, status vocabulary, and the agent protocol. None of these replaces the
 source or `docs/API-VERIFICATION.md` for current API behavior.
 
-## Current scope (2026-10-30)
+## Current scope (2026-10-31)
 
-The near-term product is a **CLI-first MVP**. Desktop GUI and mobile are deferred
-until after the MVP.
+The **CLI-first MVP** is feature-complete. The current delivery is the source-only
+`v0.1.0-alpha.1` developer preview; desktop GUI and mobile remain deferred.
 
 In scope:
 
@@ -23,7 +23,9 @@ In scope:
 - Three BDK chain backends: Esplora, Electrum, and bitcoind RPC.
 - Restore/backup, crash safety, deposit fee preview, `watch` progress, and age-encrypted mnemonic/backups.
 
-Current reality: peg-in/peg-out and ecash balance are live-tested; the combined
+The CLI-first MVP feature set is complete; the next delivery is the source-only
+`v0.1.0-alpha.1` developer preview. Current reality: peg-in/peg-out and ecash
+balance are live-tested; the combined
 `deposit` path is fixed (adoption/watcher race) and was live-gated on 2026-10-31.
 Lightning (`lnv2`) is **registered**, with paid send/receive, expiry, and
 restart-adoption live-gated on devimint (§49); a pre-lnv2 client data directory

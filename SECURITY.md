@@ -1,6 +1,6 @@
 # Security Policy
 
-Berlin Wallet is **pre-alpha** and **has not been audited**. Do not assume any
+Berlin Wallet is an **unaudited alpha developer preview**. Do not assume any
 security property beyond what is explicitly tested and documented in this
 repository.
 
@@ -60,16 +60,17 @@ A useful report includes:
 unredacted backup in a report.** Reproduce with a test mnemonic and a disposable
 directory where possible.
 
-This is a volunteer, pre-alpha project. There is no bug bounty and no guaranteed
-response or disclosure timeline. The maintainers will try to acknowledge a
-report, reproduce it, and coordinate a fix and disclosure; do not publish
-details before a fix or an agreed disclosure date.
+This is a volunteer, alpha developer-preview project. There is no bug bounty and
+no guaranteed response or disclosure timeline. The maintainers will try to
+acknowledge a report, reproduce it, and coordinate a fix and disclosure; do not
+publish details before a fix or an agreed disclosure date.
 
 ## Supported versions
 
-There are no stable releases. The branch `main` is the only supported line.
-There are no backports to tags or release branches, and no commitment that a
-future release will preserve the current data format.
+There are no stable releases. `v0.1.0-alpha.1` is a source-only developer
+preview; the branch `main` is the only supported line. There are no backports to
+tags or release branches, and no commitment that a future release will preserve
+the current data format.
 
 ## Known weaknesses
 
@@ -79,46 +80,50 @@ full trust-boundary analysis is in [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md
 
 1. **No audit.** The core, FFI, and dependency graph have not been independently
    audited.
-2. **Plaintext mnemonic at rest.** `<data-dir>/mnemonic` is plaintext, mode
-   `0600` on Unix. There is no seed encryption or OS keystore integration.
-3. **Unencrypted backups.** `berlin-wallet backup` copies the whole directory,
-   including the mnemonic, without encryption. Treat the archive as key
-   material; encrypt it externally (`age`/`gpg`).
-4. **Custodial federation.** A federation threshold can halt, censor, or rug.
+2. **Custodial federation.** A federation threshold can halt, censor, or rug.
    See the federation section of `docs/THREAT-MODEL.md`.
-5. **Esplora privacy and chain trust.** One Esplora endpoint sees every BDK
+3. **Esplora privacy and chain trust.** One Esplora endpoint sees every BDK
    address/script and is trusted for chain observations. It can link the wallet's
    on-chain history and can lie about the chain. The ancestry guard is not a
-   Byzantine-chain defense.
-6. **Fresh restore can strand in-flight funds.** Mnemonic-only restore recovers
+   Byzantine-chain defense. The bitcoind RPC and Electrum backends have different
+   trust boundaries, documented in the threat model.
+4. **Fresh restore can strand in-flight funds.** Mnemonic-only restore recovers
    balances but not the operation log or in-flight operations. A funded,
    unclaimed deposit is not re-claimed by requesting a new deposit. The recovery
-   artifact is mnemonic **plus** the client data directory. See
-   `docs/API-VERIFICATION.md` §30/§31.
-7. **Withdrawal quote mismatch.** A test observed `send_fee_quote` differing from
-   the later charged operation fee by 224 msat; the quote-drift check did not
-   catch it. See `docs/API-VERIFICATION.md` §38.
-8. **Unverifiable change outpoints.** walletv2 `change_outpoint_range` named
-   txids that were never observed on chain in testing. `await-change` does not
-   prove the outpoints it names. See `docs/API-VERIFICATION.md` §37.
-9. **Mintv2 fee not previewed.** The deposit UI/API does not show the mintv2
-   operation fee at request time; it is accounted for later in `net_credit`.
-10. **Silent watch.** `watch` polls without a heartbeat; a hang is not
-    distinguishable from progress. See `docs/API-VERIFICATION.md` §39.
-11. **No structured FFI errors or event stream.** `PegWalletError` is a display
-    string; the GUI must poll status. There is no per-operation cancellation.
-12. **Single-open data directory.** There is no application-level whole-directory
-    lock. Running two processes against one directory is unsupported. The backup
-    lock covers the Fedimint DB, not the BDK SQLite DB.
-13. **Dependency advisories are non-blocking.** CI runs
-    `cargo deny check licenses sources bans` strictly, but the advisory check is
-    `continue-on-error`. Known advisories are explicitly listed in
-    `deny.toml` under `[advisories].ignore`; see the next section.
-14. **No mainnet run recorded.** Live peg tests are Mutinynet/devimint. Unknown
-    chain IDs fall back to `Network::Regtest`.
-15. **devimint Esplora panics on live reorgs.** `invalidateblock` can kill the
-    devimint Esplora process; the reorg test needs a manual restart
-    (`docs/API-VERIFICATION.md` §36).
+   artifact is mnemonic **plus** the client data directory (or the encrypted
+   backup). See `docs/API-VERIFICATION.md` §30/§31.
+5. **No structured FFI errors or event stream.** `PegWalletError` is a display
+   string; a GUI must poll status. There is no per-operation cancellation or
+   event stream.
+6. **Single-open data directory.** There is no application-level whole-directory
+   lock. Running two processes against one directory is unsupported. The backup
+   lock covers the Fedimint DB, not the BDK SQLite DB.
+7. **Dependency advisories are non-blocking.** CI runs
+   `cargo deny check licenses sources bans` strictly, but the advisory check is
+   `continue-on-error`. The open GitHub alerts include three high-severity
+   findings in the `hickory-resolver`/`hickory-proto` DNS and
+   `rustls-webpki` CRL paths. The wallet does not use those APIs directly; the
+   reachability reasoning is summarized in
+   [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) and the accepted RustSec
+   exceptions are in `deny.toml`. This is not a full audit of the dependency
+   graph.
+8. **No public signet or mainnet operational run for the on-chain send.** Live
+   evidence is devimint, the earlier Mutinynet deposit/withdrawal round trip,
+   and a local custom OP_TRUE signet send/reorg gate
+   (`docs/API-VERIFICATION.md` §47, §58). There is no mainnet run. Public
+   signet-4/Mutinynet on-chain send is not yet recorded.
+9. **devimint Esplora panics on live reorgs.** `invalidateblock` can kill the
+   devimint Esplora process; the reorg test needs a manual restart
+   (`docs/API-VERIFICATION.md` §36).
+10. **The CLI is a development harness.** There is no desktop GUI or mobile app.
+    The CLI is suitable for developers and disposable test data, not a
+    production user interface.
+11. **The live databases are not application-encrypted.** Full-disk encryption
+    is the supported boundary for `fedimint.rocksdb` and `bdk.sqlite`. The
+    mnemonic and backup archive are age-encrypted; the live databases are not.
+12. **No whole-device hardening.** There is no hardware wallet, secure enclave,
+    memory zeroization guarantee, or protection against a compromised running
+    OS. See `docs/THREAT-MODEL.md`.
 
 ## Dependency advisory policy
 
@@ -136,9 +141,10 @@ pinned-dependency issues that the current code does not exercise in the way the
 advisory describes; that reasoning must be re-checked when dependencies change.
 
 This is not a statement that the dependency graph is clean. It means the
-maintainers have chosen not to block the pre-alpha build on those findings. A
-future hardening step is to update the dependencies, remove the ignores, and make
-the advisory check blocking. See `ROADMAP.md`.
+maintainers have chosen not to block the **alpha developer preview** on those
+findings. A future hardening step is to update the dependencies, remove the
+ignores, and make the advisory check blocking before beta/production. See
+`ROADMAP.md`.
 
 ## Security review pointers
 
@@ -146,4 +152,5 @@ the advisory check blocking. See `ROADMAP.md`.
 - `docs/AUDIT.md` — invariants and suggested audit scope.
 - `docs/ARCHITECTURE.md` — journal, state machines, crash-safety windows.
 - `docs/API-VERIFICATION.md` §27 (crash matrix), §30/§31 (restore),
-  §33 (FFI), §34/§35 (reorg), §37–§41 (known gaps).
+  §33 (FFI), §34/§35 (reorg), §36 (devimint Esplora), §47/§58 (on-chain send),
+  §52 (restore policy), §56 (encryption).

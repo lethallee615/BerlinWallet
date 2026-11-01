@@ -1,7 +1,7 @@
 # Audit Brief
 
 This is a starting brief for an independent review, not a claim that a review has
-happened. The code is pre-alpha and unaudited.
+happened. The code is an alpha developer preview and is unaudited.
 
 ## 1. Scope and priority
 
@@ -208,13 +208,10 @@ These should be treated as audit findings until proven otherwise:
 |---|---|
 | Fresh restore does not resume in-flight operations and can strand a funded, unclaimed deposit. There is no public walletv2 rescan/re-claim in 0.12.0. | `docs/API-VERIFICATION.md` §30/§31 |
 | A reorg that orphans an already-credited deposit is not deterministically tested. | §41 |
-| `SendMeta.change_outpoint_range` names txids not observed on chain; `await-change` cannot verify them. | §37 |
-| Withdrawal quote and charged operation fee differed by 224 msat in one test; quote drift did not catch it. | §38 |
-| `watch` has no progress output; a hang is silent. | §39 |
-| Mintv2 operation fee is not previewed at deposit request. | §39 |
-| The dependency advisory check is non-blocking and has explicit ignores. | `deny.toml`, `SECURITY.md` |
+| The dependency advisory check is non-blocking and has explicit ignores; three high-severity open alerts are in the DNS/CRL graph. | `deny.toml`, `SECURITY.md`, `DEPENDENCIES.md` |
 | devimint Esplora panics on a live `invalidateblock`; reorg tests need a restart. | §36 |
-| No mainnet run; unknown chain IDs map to `Network::Regtest`. | `network.rs` |
+| No public signet/Mutinynet on-chain send and no mainnet run; the signet evidence is a local custom OP_TRUE chain. Unknown chain IDs fail closed unless the data directory is recorded as regtest. | §58, `network.rs` |
+| `lnv2` gateway/liquidity/routing trust has not had a dedicated adversarial review; paid sends/receives live on devimint only. | §48/§49 |
 | No structured FFI errors, event stream, per-operation cancellation, platform dirs, GUI, or mobile app. | `docs/ARCHITECTURE.md` §11, `ROADMAP.md` |
 | A crash after the network broadcast but before BDK persistence and the journal's `funding_txid` write can leave no recorded txid and allow a new funding attempt; the exact double-fund outcome is not covered by §27's tested window. | `deposit.rs` `fund_deposit`; §27 covers only the post-journal crash |
 
@@ -246,11 +243,14 @@ These should be treated as audit findings until proven otherwise:
 ### Assumed, not proven
 
 - A consistent Byzantine Esplora server is outside the ancestry guard.
-- The exact cause of the 224 msat quote mismatch is unknown.
-- The meaning and correctness of `change_outpoint_range` are unknown.
 - Reorg behavior for an already-credited deposit is unknown.
-- Mainnet chain/federation behavior, multi-federation behavior, mobile device
-  lifecycle, and real GUI behavior are not tested.
+- The `lnv2` gateway/liquidity/routing trust model has not had a dedicated
+  adversarial review.
+- Public-network latency, mempool, and faucet behavior are not tested for the
+  on-chain send.
+- Mainnet chain/federation behavior, public signet/Mutinynet on-chain send,
+  multi-federation behavior, mobile device lifecycle, and real GUI behavior are
+  not tested.
 - The dependency ignores are based on reachability reasoning, not a full audit.
 
 The first-pass document contains early assumptions that later sections supersede.
