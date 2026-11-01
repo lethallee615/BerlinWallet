@@ -1,5 +1,24 @@
 # Journal
 
+## 2026-10-31 — The REPL handles paste, shell passthrough, and stray keys
+
+The development REPL input path is cleaned up. Lines are normalized for carriage
+returns and bracketed-paste markers; a single misplaced keystroke is ignored;
+`!<command>` and `shell <command>` pass through to `sh -c`; and unknown
+multi-character input gets one short hint rather than an error chain.
+
+The tracing writer now redraws `berlin-wallet> ` after a background log only
+while the REPL is waiting for input. That removes the need for an extra Enter
+when a sync or task log appears over the prompt, without injecting a prompt in
+the middle of command output.
+
+Startup/`init` now peek at the current unused BDK address instead of revealing
+the next one, so repeated sessions show the same address; the explicit `address`
+command still reveals and persists a new one.
+
+PTY checks covered two commands pasted in one write, stray `s`, `!echo` and
+`shell echo`, a background chain-sync WARN redrawing the prompt, and two `init`
+runs printing the same address.
 ## 2026-10-31 — Withdrawal quote and change semantics corrected
 
 Two long-standing withdrawal questions are resolved.

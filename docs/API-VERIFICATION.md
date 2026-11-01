@@ -3427,3 +3427,32 @@ includes encrypted mnemonic round trip/wrong passphrase/plaintext migration,
 backup/import with WAL/SHM and RocksDB sidecars, tampering, wrong passphrase,
 stale temp files/dirs, existing-archive refusal, plaintext-source refusal, and
 locked-DB refusal.
+
+## 57. REPL input handling (2026-10-31)
+
+The development REPL now has explicit input normalization and prompt handling:
+
+- `normalize_command_line` strips trailing `\r` and terminal bracketed-paste
+  markers (`\x1b[200~`/`\x1b[201~`). PTY test: a single paste of
+  `balance\nbalance\nquit\n` executed both `balance` commands and quit.
+- A single-character unknown command (for example a stray `s`) is absorbed with
+  no error.
+- `!<command>` and `shell <command>` run through `sh -c` while the REPL keeps
+  its client and database open. PTY test: `!echo shell-ok` and
+  `shell echo shell2` both produced their output.
+- Other unknown multi-character input prints one concise hint and returns to the
+  prompt instead of emitting an `error:` chain.
+- The tracing writer is prompt-aware: while the REPL is waiting for input, a
+  background log line reprints `berlin-wallet> ` after the record. PTY test with
+  an unreachable BDK chain backend showed a `BDK chain sync failed` WARN followed
+  immediately by a fresh prompt; the next `quit` was consumed without an extra
+  Enter. Logs during commands (progress/watch/command execution) do not redraw an
+  extra prompt.
+- Startup and `init` use `BdkWallet::peek_destination()`, which prints the current
+  unused external address without revealing/advancing the derivation index. Two
+  consecutive `init` runs in the same data directory printed the same
+  `bdk address`; the explicit `address` command still calls
+  `reveal_destination()`.
+
+Tests: `repl_normalises_paste_markers_and_absorbs_stray_keys` and
+`bdk::tests::peek_destination_is_stable_until_the_explicit_reveal`.

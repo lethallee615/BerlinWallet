@@ -53,7 +53,7 @@ This is **pre-alpha software**.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 123 core tests (122 run + 1 devimint-only ignored), 7 CLI tests, and 6 FFI tests.
+- The current test suite is 124 core tests (123 run + 1 devimint-only ignored), 8 CLI tests, and 6 FFI tests.
 - There is **no mainnet operational testing** recorded in this repository and no
   independent security audit. The desktop GUI and mobile app are deferred until
   after the CLI-first MVP.
@@ -170,8 +170,9 @@ The CLI binary is a development harness, not a production UI:
 
 The REPL traps Ctrl+C (cancels a running `watch`) and refuses Ctrl+Z while the
 database lock is held. `watch` prints its progress and heartbeat on stderr and
-keeps stdout for the final row. Use `quit` to shut down; it stops the client and
-releases the lock.
+keeps stdout for the final row. Multi-line paste is split correctly; stray
+single-key input is ignored; `!<cmd>` or `shell <cmd>` runs a shell command. Use
+`quit` to shut down; it stops the client and releases the lock.
 
 ```bash
 export BERLIN_WALLET_PASSPHRASE='choose-a-strong-wallet-passphrase'
