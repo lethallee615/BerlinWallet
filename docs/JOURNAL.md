@@ -1,5 +1,18 @@
 # Journal
 
+## 2026-10-31 — Dependabot policy is checked in
+
+The repository now records its dependency-update policy instead of leaving it to
+GitHub defaults. Cargo and GitHub Actions are checked weekly, minor/patch Cargo
+updates are grouped, the Cargo PR limit is five, and `lockfile-only` protects
+the deliberate exact pins.
+
+The Fedimint `[patch.crates-io]` family is ignored as a group; it must move by
+bumping the v0.12.0 tag, not one crate at a time. The failing `lru` update is
+documented, not silently ignored: `iroh-relay` requires `^0.12`, `pkarr` requires
+`^0.13`, and the fixed `0.16.3` cannot satisfy either. The advisory is listed in
+`deny.toml`, and `docs/DEPENDENCIES.md` records the exact failed `cargo update`
+commands and the removal condition.
 ## 2026-10-31 — The REPL handles paste, shell passthrough, and stray keys
 
 The development REPL input path is cleaned up. Lines are normalized for carriage

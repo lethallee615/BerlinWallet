@@ -1,0 +1,64 @@
+version: 2
+
+# Dependency update policy. See docs/DEPENDENCIES.md for the rationale and the
+# exact commands used to verify the lru/patch constraints.
+
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    versioning-strategy: "lockfile-only"
+    rebase-strategy: "auto"
+    labels:
+      - "area:ci"
+      - "type:chore"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      rust-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # All Fedimint crates are pinned by [patch.crates-io] to the Fedimint
+      # v0.12.0 git tag. Updating one independently would fight the patch and
+      # ship a mixed Fedimint generation; bump the tag as one coordinated change.
+      - dependency-name: "fedimint-*"
+
+      # GHSA-rhfx-m35p-ff5j / RUSTSEC-2026-0002 affects lru < 0.16.3.
+      # lru 0.12.5 is forced by iroh-relay's ^0.12 requirement and lru 0.13.0 by
+      # pkarr's ^0.13 requirement (both via the Fedimint-pinned iroh 0.35.0).
+      # `cargo update -p lru@0.12.5 --precise 0.16.3` and the 0.13.0 equivalent
+      # fail with "failed to select a version" and must be fixed upstream.
+      - dependency-name: "lru"
+        versions:
+          - "< 0.16.3"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "area:ci"
+      - "type:chore"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

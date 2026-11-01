@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: 3d097e8
+Main at: a8af156
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -69,7 +69,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 |---|---|
 | P0 | — |
 | P1 | — |
-| P2 | #30, #38 |
+| P2 | #38 |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
 P2 is hardening. `docs/TRACKING.md` defines how these are assigned.

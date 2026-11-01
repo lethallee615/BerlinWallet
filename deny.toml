@@ -10,6 +10,7 @@ version = 2
 # them. CI runs this check with continue-on-error so advisories stay visible
 # as warnings without blocking the build; yanked crates warn here as well.
 ignore = [
+  { id = "RUSTSEC-2026-0002", reason = "lru 0.12.5/0.13.0 via the Fedimint-pinned iroh/pkarr; the IterMut soundness path is not used and the fixed 0.16.3 is semver-incompatible with those requirements" },
   { id = "RUSTSEC-2026-0190", reason = "anyhow 1.0.98 is pinned; wallet code never calls downcast_mut after adding context" },
   { id = "RUSTSEC-2026-0118", reason = "hickory-proto 0.25.2 via iroh; the wallet does not enable DNSSEC validation" },
   { id = "RUSTSEC-2026-0119", reason = "hickory-proto 0.25.2 via iroh; resolver input is limited to configured federation endpoints" },
