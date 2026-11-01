@@ -15,6 +15,7 @@ documents are kept for history and may describe superseded assumptions.
 | [`TRACKING.md`](TRACKING.md) | The work queue, label/milestone taxonomy, status vocabulary, and the agent workflow. |
 | [`DEVIMINT.md`](DEVIMINT.md) | Local Fedimint v0.12.0 federation setup and the deposit live-gate checklist (#14). |
 | [`SIGNET.md`](SIGNET.md) | Local OP_TRUE signet harness for the headless on-chain send/reorg gate (#38). |
+| [`RELEASE.md`](RELEASE.md) | Source-only alpha tag and pre-release runbook. |
 | [`DEPENDENCIES.md`](DEPENDENCIES.md) | Dependabot policy, the Fedimint git-patch pin, the documented `lru` exception, and the alpha alert triage. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries, data directory, journal format and invariants, deposit/withdrawal state machines, crash-safety windows, reorg handling, `[patch.crates-io]`, GUI gaps, unknowns. |
 | [`THREAT-MODEL.md`](THREAT-MODEL.md) | Trusted parties, what breaks if the federation/Esplora/BDK/OS/mnemonic/backups/data-directory assumptions fail, and explicit out-of-scope items. |
@@ -38,6 +39,7 @@ documents are kept for history and may describe superseded assumptions.
 | [`../LICENSE`](../LICENSE) | MIT license, copyright 2026 lethallee615. |
 | [`../deny.toml`](../deny.toml) | cargo-deny license/source/bans policy and the explicit advisory ignores. |
 | [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) | CI: format, strict clippy, workspace tests, strict licenses/sources/bans, non-blocking advisory check. |
+| [`../.github/workflows/release.yml`](../.github/workflows/release.yml) | Tag-triggered source-only pre-release: version/tag check, gates, archive, checksum, GitHub release. |
 | [`../.github/dependabot.yml`](../.github/dependabot.yml) | Weekly Cargo and GitHub Actions update policy. |
 | [`../scripts/ffi-smoke.sh`](../scripts/ffi-smoke.sh) | Builds the FFI cdylib and checks generated Kotlin binding surface. |
 

@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout the tagged source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag matches the workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          workspace_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          test -n "$workspace_version"
+          test "$version" = "$workspace_version" || {
+            echo "tag $tag does not match workspace version $workspace_version" >&2
+            exit 1
+          }
+          test -f "docs/releases/${tag}.md" || {
+            echo "missing docs/releases/${tag}.md" >&2
+            exit 1
+          }
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            cmake \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+          rustflags: "--cfg bdk_wallet_unstable -D warnings"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Validate the status document
+        run: python3 scripts/check_status.py
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build the tagged source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          archive="dist/berlin-wallet-${GITHUB_REF_NAME}.tar.gz"
+          git archive --format=tar.gz \
+            --prefix="berlin-wallet-${GITHUB_REF_NAME}/" \
+            --output="$archive" HEAD
+          sha256sum "$archive" > "${archive}.sha256"
+
+      - name: Publish the source-only pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "Berlin Wallet $GITHUB_REF_NAME" \
+            --notes-file "docs/releases/${GITHUB_REF_NAME}.md"
