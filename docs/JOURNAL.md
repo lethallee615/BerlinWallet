@@ -1,5 +1,33 @@
 # Journal
 
+## 2026-10-31 — First source-only alpha
+
+The release train for `v0.1.0-alpha.1` is being cut from this commit. The docs now reflect the shipped
+code: `SECURITY.md` no longer describes the fixed plaintext mnemonic, unencrypted
+backups, silent watch, missing fee preview, quote mismatch, or unknown-chain
+fallback. `ROADMAP.md` separates the feature-complete MVP from the alpha
+boundary; unknown chain-ids fail closed throughout the architecture and threat
+model.
+
+The workspace version is `0.1.0-alpha.1`; `berlin-wallet --version` and `--help`
+work without opening a wallet. Curated release notes are in
+`docs/releases/v0.1.0-alpha.1.md`. The tag workflow builds a source archive,
+writes SHA-256, and publishes a GitHub pre-release with `--latest=false`; there
+is no binary or crates.io artifact.
+
+The dependency queue is clear: #54's minor patch group and #53's action updates
+merged with green CI, and the transitive `rand` major was deferred. The 12 open
+advisory alerts remain non-blocking for alpha with the three high DNS/CRL paths
+documented.
+
+Final gate: 123 core tests plus one devimint-only ignored test, 9 CLI tests, and
+6 FFI tests; the local signet gate sent 50,000 sat at 2 sat/vB (fee 281 sat,
+total debit 50,281 sat, txid `cc748ba8d29d7800bb79d8e0d33f3d600b96d3c65adfaf57ac7714fecfbecc03`),
+confirmed it in block 102, invalidated the block, rebuilt the BDK wallet, and
+re-confirmed the same txid. Public signet/Mutinynet send and devimint were not
+rerun for the tag; the alpha notes say so. Mainnet and real funds remain out of
+scope until an audit.
+
 ## 2026-10-31 — Signet on-chain send gate
 
 The last environment gap for the on-chain send is closed with a local custom
