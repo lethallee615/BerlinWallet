@@ -1,6 +1,6 @@
 # Threat Model
 
-This is the threat model for the pre-alpha core and its UniFFI boundary. It is
+This is the threat model for the alpha developer-preview core and its UniFFI boundary. It is
 not an audit report, and it does not claim that the listed mitigations are
 sufficient. The code is unaudited.
 
@@ -196,10 +196,10 @@ and client identity, but the current CLI/FFI do not have a full trust-on-first-u
 or federation-verification UX. A user who joins the wrong federation sends funds
 to the wrong custodian.
 
-`network_from_chain_id` maps unknown chain IDs to `Network::Regtest` rather than
-failing closed. This prevents an unexpected chain from producing a clear error,
-and it can cause addresses/builds to be made for the wrong network. Verify the
-federation and chain id before funding.
+`network_from_chain_id` accepts only the known mainnet/testnet/signet-4/
+Mutinynet chain IDs. Unknown chain IDs fail closed. The explicit exception is a
+data directory initialized with `--network regtest` for devimint or a private
+chain. Verify the federation and chain id before funding.
 
 ### Host application and FFI boundary
 
@@ -238,14 +238,12 @@ two cannot drift.
 
 - [§30/§31: fresh restore, in-flight operations, and backup policy](API-VERIFICATION.md#30-in-flight-operations-across-a-fresh-restore-live-experiment) ([§31](API-VERIFICATION.md#31-recovery-policy-and-app-level-backup-0120)).
 - [§41: reorg of an already-credited deposit is untested](API-VERIFICATION.md#41-known-limitation--restore-strands-in-flight-operations).
-- [§37: walletv2 change outpoints are unverifiable](API-VERIFICATION.md#37-walletv2-operation-meta--change_outpoint_range-is-unverifiable).
-- [§38: withdrawal quote and charged fee mismatch](API-VERIFICATION.md#38-withdrawal-quote-vs-charged-fee-mismatch-224-msat).
-- [§39: silent `watch` polling](API-VERIFICATION.md#39-observability-gaps).
-- [§39: mintv2 operation fee is not previewed at deposit request](API-VERIFICATION.md#39-observability-gaps).
 - [§36: devimint Esplora panics on a live reorg](API-VERIFICATION.md#36-devimints-esplora-panics-on-a-live-reorg).
+- [§58: signet evidence is a local custom OP_TRUE chain; no public signet/Mutinynet on-chain send or mainnet run](API-VERIFICATION.md#58-local-op_true-signet-on-chain-send-gate-2026-10-31).
+- The dependency advisory check is non-blocking; see `SECURITY.md`.
 
-Lightning/`lnv2` is in the MVP scope but is not implemented yet; its gateway,
-liquidity, and routing trust model has not been analyzed.
+Lightning/`lnv2` is implemented and live on devimint, but its gateway, liquidity,
+and routing trust model has not had a dedicated adversarial review.
 
 The dependency advisory-check policy is separate from these code findings and is
 documented in [`SECURITY.md`](../SECURITY.md#dependency-advisory-policy).

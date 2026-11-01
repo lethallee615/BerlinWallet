@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-10-31
-Main at: 90bcc74
+Main at: 2305012
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -27,6 +27,23 @@ actually stands.
 | crash-safety | Documented crash windows survive restart | done | — | `API-VERIFICATION.md` §27, §53; deterministic CI matrix; one devimint-only window |
 | fee-preview | Claim and mintv2 operation fee before funding | live | — | `API-VERIFICATION.md` §50; devimint 2026-10-31 |
 | watch-progress | `watch` reports progress instead of polling silently | live | — | `API-VERIFICATION.md` §54; devimint heartbeat/SIGINT 2026-10-31 |
+
+## Release v0.1.0-alpha.1
+
+The first alpha is a **source-only CLI developer preview**. It is not a
+production release, a binary release, or a crates.io publication.
+
+| Release gate | Status | Issue | Evidence |
+|---|---|---|---|
+| Security/roadmap/status truth | in-review | #57 | this PR |
+| Version, `--version`, release notes | todo | #58 | — |
+| Source-only pre-release workflow | todo | #59 | — |
+| Dependency queue and advisory reachability | todo | #60 | — |
+| Gate, tag, and publish `v0.1.0-alpha.1` | todo | #61 | — |
+
+The release is done only when #57–#61 close and the `v0.1.0-alpha.1` pre-release
+exists. `ROADMAP.md` has the alpha boundary; `SECURITY.md` has the current
+limitations.
 
 ## Backend coverage
 
@@ -69,7 +86,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | — |
+| P1 | #57, #58, #59, #60, #61 |
 | P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.

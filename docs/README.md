@@ -8,7 +8,7 @@ documents are kept for history and may describe superseded assumptions.
 
 | Document | What it covers |
 |---|---|
-| [`../README.md`](../README.md) | What the wallet is, pre-alpha status, “do not use yet” limits, build prerequisites, crate layout, license. |
+| [`../README.md`](../README.md) | What the wallet is, alpha developer-preview status, “do not use yet” limits, build prerequisites, crate layout, license. |
 | [`JOURNAL.md`](JOURNAL.md) | Plain-language narrative of what was built and why, including the current CLI-first MVP scope decision. |
 | [`STATUS.md`](STATUS.md) | Machine-readable snapshot: MVP row status, backend coverage, live verification log, and open work by priority. |
 | [`TRACKING.md`](TRACKING.md) | The work queue, label/milestone taxonomy, status vocabulary, and the agent workflow. |
