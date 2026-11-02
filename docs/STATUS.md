@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-11-01
-Main at: fdc5153
+Main at: 80084ee
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -36,8 +36,8 @@ developer-preview surface.
 | Release gate | Status | Issue | Evidence |
 |---|---|---|---|
 | Mainnet hard guard | done | #70 | PR #73 |
-| Demo/testing/community docs | in-review | #71 | this PR |
-| Tag and publish alpha.2 | todo | #72 | — |
+| Demo/testing/community docs | done | #71 | PR #74 |
+| Tag and publish alpha.2 | in-review | #72 | this PR |
 
 ## Release v0.1.0-alpha.1
 
@@ -74,8 +74,9 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
 | 2026-10-31 | REPL PTY: two-line paste executed both balances; stray `s` absorbed; `!echo`/`shell echo` ran; background WARN redrew the prompt; startup BDK address stable | local CLI | pass | #9, §57 |
+| 2026-11-01 | Mainnet guard: `init --network mainnet` exits 1, creates no data directory; core/FFI tests cover rejection | local CLI | pass | #70, §59 |
 | 2026-10-31 | Source-only alpha `v0.1.0-alpha.1` published as a pre-release (not latest); source archive + portable SHA-256 verified | GitHub release | pass | #61; release URL |
-| 2026-10-31 | Local OP_TRUE signet alpha gate: 50,000 sat send at 2 sat/vB, fee 281 sat, total debit 50,281 sat, txid cc748ba8...; block 102 confirmed; invalidateblock + re-mine re-confirmed after BDK rebuild | signet bitcoind | pass | #38/#61, §58 |
+| 2026-11-01 | Local OP_TRUE signet alpha.2 gate: 50,000 sat send at 2 sat/vB, fee 281 sat, total debit 50,281 sat, txid 708fdc25...; block 102 confirmed; invalidateblock + re-mine re-confirmed after BDK rebuild | signet bitcoind | pass | #72, §58 |
 | 2026-10-31 | 50,000 sat withdrawal: chain 228 sat + federation 101,600 msat; total debit 50,329,600 msat matched the balance delta; change range identified as ecash change | devimint bitcoind | pass | #28/#29, §37/§38 |
 | 2026-10-31 | Legacy mnemonic migrated to age; encrypted backup/restore reopened with wallet and backup passphrases; wrong passphrase rejected | local CLI | pass | #27, §56 |
 | 2026-10-31 | `RUST_LOG=info` quit with a funded/open deposit: no `fm::task` WARN/ERROR after the prompt; exit 0 | devimint bitcoind | pass | #39, §55 |
@@ -101,7 +102,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #71, #72 |
+| P1 | #72 |
 | P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.

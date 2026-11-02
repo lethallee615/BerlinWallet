@@ -36,9 +36,10 @@ custody split is explicit:
   developer preview. The desktop GUI is deferred until after the MVP, with mobile
   later.
 
-This is an **unaudited developer preview**; the source-only alpha releases are
-published on the [releases page](https://github.com/lethallee615/BerlinWallet/releases).
-The current source disables mainnet; alpha.1 predates that guard.
+This is an **unaudited developer preview**. The current release is
+[`v0.1.0-alpha.2`](https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.2),
+a source-only alpha. The current source disables mainnet; alpha.1 predates that
+guard.
 
 ## Status
 

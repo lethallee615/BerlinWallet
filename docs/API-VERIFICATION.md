@@ -3472,35 +3472,35 @@ The harness (`scripts/signet-gate.sh` + `scripts/signet-mine.py`) does:
 - mines the send transaction and reads `list-onchain` / `gettransaction`;
 - invalidates the block and re-mines to exercise the BDK reorg rebuild.
 
-Observed on the final alpha harness run:
+Observed on the final alpha.2 harness run:
 
 ```text
 send quote:
-  to: tb1qkkprzymnjmea954pzlaekt5svsu4kddmtlf0n3
+  to: tb1qdqwtnj7xnpyf8m8whke22jzwnql0wl0fnk38vx
   amount: 50000 sat
   fee rate: 2 sat/vB
   fee: 281 sat
   total debit: 50281 sat
   change: 4999949719 sat
   inputs: 1
-  txid: cc748ba8d29d7800bb79d8e0d33f3d600b96d3c65adfaf57ac7714fecfbecc03
-broadcast: cc748ba8d29d7800bb79d8e0d33f3d600b96d3c65adfaf57ac7714fecfbecc03 (141 vB, fee 281 sat)
+  txid: 708fdc256bfa360548f65d5ee991324bcf956e697440cc6586d1594accef8e93
+broadcast: 708fdc256bfa360548f65d5ee991324bcf956e697440cc6586d1594accef8e93 (141 vB, fee 281 sat)
 ```
 
 The send confirmed in block 102
-(`00000132935f55d663bb59cb415f69e08ca94b0c87e7da1d7d78f611f68d13d0`):
+(`0000034d7153dd5cc45ac3b7f141d4ce07c5ae30ce234ee51a2fb8a19c720970`):
 
 ```text
-journal: 01a1955c-bd16-7023-a90d-9b3e26ced4ff cc748ba8... tb1qkkp... fee=281 sat
+journal: 01a19a13-7fc8-748f-aa0b-f2dd40561d3c 708fdc25... tb1qdqw... fee=281 sat
          vsize=141 vB change=4999949719 sat state=Broadcast
-gettransaction: confirmations=1 blockhash=0000013293...
+gettransaction: confirmations=1 blockhash=0000034d71...
 ```
 
-Reorg: `invalidateblock 00000132935f55d663bb59cb415f69e08ca94b0c87e7da1d7d78f611f68d13d0`
+Reorg: `invalidateblock 0000034d7153dd5cc45ac3b7f141d4ce07c5ae30ce234ee51a2fb8a19c720970`
 was accepted; `list-onchain` logged
 `BDK checkpoint is orphaned; rebuilding wallet DB and running full rescan` and
 rebuilt from `birthday=1`. The harness re-mined a new block 102
-(`000002833c603a3f72cb68faca717dd433a1ce31587bfb79b5e01f3ae5baa4`) including
+(`0000006cdb8a2d6b2de99736ef6484cf5f3b2c94abd44e28e24c2283e2785c76`) including
 the send transaction; `list-onchain` then reported the same txid at height 102
 with 1 confirmation.
 
@@ -3516,3 +3516,29 @@ chain: the bitcoind backend refuses a genesis scan and the harness uses
 `birthday=1`. Public signet should use a recent birthday height.
 
 Tests: no new unit tests; the top-level headless path is exercised live.
+
+
+## 59. Alpha mainnet hard guard (2026-11-01)
+
+The alpha rejects mainnet at the network boundary. `ensure_alpha_network` returns
+an error for `Network::Bitcoin`; `store_network`, `init_network`, and
+`require_recorded_network` call it. CLI `init`/`restore` and FFI
+`init`/`restore` check it before creating or recovering wallet state, and `join`
+rejects a mainnet chain-id.
+
+Observed:
+
+```text
+$ BERLIN_WALLET_DATA_DIR=/tmp/bw-mainnet-guard BERLIN_WALLET_PASSPHRASE=x \
+    target/debug/berlin-wallet init --network mainnet
+Error: mainnet is disabled in this unaudited alpha; use signet, testnet, or regtest; mainnet requires the audited release path
+$ echo $?
+1
+$ ls /tmp/bw-mainnet-guard
+# no directory created
+```
+
+Core tests cover `ensure_alpha_network`, direct `store_network`, `init_network`,
+and an existing mainnet `network.json`; FFI tests cover `init` and `restore`
+rejection. Signet, testnet, and regtest remain accepted. Alpha.1 predates this
+guard; do not use alpha.1 with mainnet.

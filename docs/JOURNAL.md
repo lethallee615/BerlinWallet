@@ -1,5 +1,27 @@
 # Journal
 
+## 2026-11-01 — Alpha.2: mainnet guard and public-readiness surface
+
+The second source-only alpha makes mainnet deliberately unavailable. The core
+network boundary, CLI `init`/`restore`/`join`, and FFI `init`/`restore` reject
+`Network::Bitcoin`; a data directory recorded as mainnet fails closed. Alpha.1
+predates the guard, so its release note is not a statement that mainnet was safe.
+
+The public surface is ready for a local developer meetup: `docs/DEMO.md` has the
+timed signet + Fedimint runbook and external-recipient proof; `docs/TESTING.md`
+has the matrix, report fields, and exit criteria; `CONTRIBUTING.md`,
+`SUPPORT.md`, the code of conduct, the live-gate issue form, and Discussions are
+in place. `scripts/signet-gate.sh` supports `SIGNET_KEEP_NODE=1` for a rehearsal
+that leaves the local node running.
+
+Final alpha.2 gate: 125 core tests plus one devimint-only ignored test, 9 CLI
+tests, and 8 FFI tests. The local signet run sent 50,000 sat at 2 sat/vB (fee 281
+sat, total debit 50,281 sat, txid
+`708fdc256bfa360548f65d5ee991324bcf956e697440cc6586d1594accef8e93`), confirmed
+in block 102, invalidated the block, rebuilt the BDK wallet, and re-confirmed the
+same txid. Public signet/Mutinynet and devimint were not rerun for the tag; the
+release notes say so. Mainnet stays disabled until the audited release path.
+
 ## 2026-10-31 — First source-only alpha
 
 The release train for `v0.1.0-alpha.1` was cut from this commit and published at
