@@ -1,7 +1,7 @@
 # Project status
 
-Last updated: 2026-10-31
-Main at: 5f840b8
+Last updated: 2026-11-01
+Main at: dab7a5f
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -28,7 +28,20 @@ actually stands.
 | fee-preview | Claim and mintv2 operation fee before funding | live | — | `API-VERIFICATION.md` §50; devimint 2026-10-31 |
 | watch-progress | `watch` reports progress instead of polling silently | live | — | `API-VERIFICATION.md` §54; devimint heartbeat/SIGINT 2026-10-31 |
 
+## Release v0.1.0-alpha.2
+
+The second source-only alpha adds the hard mainnet guard and the public
+developer-preview surface.
+
+| Release gate | Status | Issue | Evidence |
+|---|---|---|---|
+| Mainnet hard guard | in-review | #70 | this PR |
+| Demo/testing/community docs | todo | #71 | — |
+| Tag and publish alpha.2 | todo | #72 | — |
+
 ## Release v0.1.0-alpha.1
+
+
 
 The first alpha is a **source-only CLI developer preview**. It is not a
 production release, a binary release, or a crates.io publication.
@@ -88,7 +101,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | — |
+| P1 | #70, #71, #72 |
 | P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.

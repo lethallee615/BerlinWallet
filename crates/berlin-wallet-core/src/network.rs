@@ -29,6 +29,20 @@ const MUTINYNET_CHAIN_ID: &str = "000002855893a0a9b24eaffc5efc770558a326fee4fc10
 pub const NETWORK_FILE: &str = "network.json";
 const NETWORK_ROW_VERSION: u8 = 1;
 
+/// Mainnet is disabled at the application boundary for the unaudited alpha.
+///
+/// `network_from_chain_id` still knows the mainnet chain-id so the core remains
+/// ready for a future audited release. The CLI and FFI call this guard before
+/// creating, restoring, or opening a data directory.
+pub fn ensure_alpha_network(network: Network) -> anyhow::Result<Network> {
+    if network == Network::Bitcoin {
+        anyhow::bail!(
+            "mainnet is disabled in this unaudited alpha; use signet, testnet, or regtest; mainnet requires the audited release path"
+        );
+    }
+    Ok(network)
+}
+
 /// Parse a user-facing network name. `mainnet` and `bitcoin` are aliases.
 pub fn parse_network(value: &str) -> anyhow::Result<Network> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -130,6 +144,7 @@ pub fn load_network(data_dir: &Path) -> anyhow::Result<Option<Network>> {
 /// Write the network choice. Atomic enough for one process: temp file in the
 /// same directory, mode 0600, then rename.
 pub fn store_network(data_dir: &Path, network: Network) -> anyhow::Result<()> {
+    ensure_alpha_network(network)?;
     std::fs::create_dir_all(data_dir)?;
     let path = path_for(data_dir);
     let envelope = NetworkEnvelope {
@@ -151,7 +166,9 @@ pub fn store_network(data_dir: &Path, network: Network) -> anyhow::Result<()> {
 /// Record the operator's choice, or verify that it agrees with an existing
 /// record. Refuses to silently change the network of an initialized directory.
 pub fn init_network(data_dir: &Path, requested: Network) -> anyhow::Result<Network> {
+    ensure_alpha_network(requested)?;
     if let Some(stored) = load_network(data_dir)? {
+        ensure_alpha_network(stored)?;
         anyhow::ensure!(
             stored == requested,
             "data directory is already initialized for {stored}; refusing to change it to \
@@ -165,13 +182,14 @@ pub fn init_network(data_dir: &Path, requested: Network) -> anyhow::Result<Netwo
 
 /// Read the recorded network or explain how to create it.
 pub fn require_recorded_network(data_dir: &Path) -> anyhow::Result<Network> {
-    load_network(data_dir)?.ok_or_else(|| {
+    let network = load_network(data_dir)?.ok_or_else(|| {
         anyhow::anyhow!(
             "no network is recorded in {}; initialize the data directory with \
-             `--network <mainnet|testnet|signet|regtest>` first",
+             `--network <testnet|signet|regtest>` first",
             path_for(data_dir).display()
         )
-    })
+    })?;
+    ensure_alpha_network(network)
 }
 
 #[cfg(test)]
@@ -283,5 +301,42 @@ mod tests {
         assert_eq!(parse_network("signet").unwrap(), Network::Signet);
         assert_eq!(parse_network("regtest").unwrap(), Network::Regtest);
         assert!(parse_network("mainnet2").is_err());
+    }
+
+    #[test]
+    fn mainnet_is_disabled_at_the_alpha_boundary() {
+        let err = ensure_alpha_network(Network::Bitcoin).expect_err("mainnet must be disabled");
+        assert!(err.to_string().contains("mainnet is disabled"), "{err:#}");
+        assert_eq!(
+            ensure_alpha_network(Network::Signet).unwrap(),
+            Network::Signet
+        );
+        assert_eq!(
+            ensure_alpha_network(Network::Testnet).unwrap(),
+            Network::Testnet
+        );
+        assert_eq!(
+            ensure_alpha_network(Network::Regtest).unwrap(),
+            Network::Regtest
+        );
+    }
+
+    #[test]
+    fn init_and_require_refuse_mainnet() {
+        let dir = temp_dir();
+        let err = init_network(&dir, Network::Bitcoin).expect_err("init mainnet");
+        assert!(err.to_string().contains("mainnet is disabled"), "{err:#}");
+        assert!(load_network(&dir).expect("load").is_none());
+        assert!(store_network(&dir, Network::Bitcoin).is_err());
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(NETWORK_FILE),
+            br#"{"version":1,"network":"mainnet"}"#,
+        )
+        .unwrap();
+        let err = require_recorded_network(&dir).expect_err("open mainnet");
+        assert!(err.to_string().contains("mainnet is disabled"), "{err:#}");
+        std::fs::remove_dir_all(dir).ok();
     }
 }

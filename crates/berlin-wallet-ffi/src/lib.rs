@@ -28,7 +28,8 @@ use berlin_wallet_core::journal::{
     WithdrawalState, collapse_deposit_rows,
 };
 use berlin_wallet_core::network::{
-    init_network, parse_network, require_recorded_network, verified_client_network,
+    ensure_alpha_network, init_network, parse_network, require_recorded_network,
+    verified_client_network,
 };
 use berlin_wallet_core::ops::{DepositId, WithdrawalId};
 use berlin_wallet_core::restore_policy::RestoreSummary;
@@ -239,8 +240,9 @@ impl PegWallet {
     /// is local-only and fast; joining or restoring is a separate async call.
     pub fn init(&self, network: String, passphrase: String) -> Result<InitView> {
         self.ensure_open()?;
+        let network = ensure_alpha_network(parse_network(&network)?)?;
         std::fs::create_dir_all(&self.data_dir)?;
-        let network = init_network(&self.data_dir, parse_network(&network)?)?;
+        let network = init_network(&self.data_dir, network)?;
         let mnemonic_path = self.data_dir.join("mnemonic");
         seed::load_or_create_mnemonic(&mnemonic_path, &passphrase)?;
         Ok(InitView {
@@ -333,7 +335,7 @@ impl PegWallet {
         if self.inner.lock().await.is_some() {
             return Err(err("wallet is already joined/restored"));
         }
-        let network = parse_network(&network)?;
+        let network = ensure_alpha_network(parse_network(&network)?)?;
         let mnemonic_path = self.data_dir.join("mnemonic");
         if !mnemonic_path.is_file() {
             return Err(err(format!(
@@ -1048,6 +1050,36 @@ mod tests {
             .expect_err("open after shutdown");
         assert!(error.to_string().contains("create a new PegWallet"));
         wallet.shutdown().await.expect("idempotent shutdown");
+    }
+
+    #[test]
+    fn init_rejects_mainnet_in_the_alpha() {
+        let dir = std::env::temp_dir().join(format!(
+            "berlin-wallet-ffi-mainnet-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let wallet = PegWallet::new(dir.to_string_lossy().into_owned());
+        let error = wallet
+            .init("mainnet".into(), "pass".into())
+            .expect_err("mainnet init must fail");
+        assert!(error.to_string().contains("mainnet is disabled"), "{error}");
+        assert!(!dir.join("network.json").exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_mainnet_before_recovery() {
+        let dir = std::env::temp_dir().join(format!(
+            "berlin-wallet-ffi-restore-mainnet-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let wallet = PegWallet::new(dir.to_string_lossy().into_owned());
+        let error = wallet
+            .restore("".into(), "".into(), "mainnet".into(), "pass".into())
+            .await
+            .expect_err("mainnet restore must fail");
+        assert!(error.to_string().contains("mainnet is disabled"), "{error}");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
