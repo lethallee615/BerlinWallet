@@ -3,6 +3,12 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/lethallee615/BerlinWallet/security/policy
     about: Do not open a public issue for a vulnerability. Read SECURITY.md first.
+  - name: Questions and testing discussion
+    url: https://github.com/lethallee615/BerlinWallet/discussions
+    about: Ask questions, share demo results, and discuss testnet experiences.
+  - name: Demo and testing guides
+    url: https://github.com/lethallee615/BerlinWallet/blob/main/docs/TESTING.md
+    about: Test matrix, expected results, and the report format.
   - name: Documentation index
     url: https://github.com/lethallee615/BerlinWallet/blob/main/docs/README.md
     about: Architecture, API verification, journal, roadmap, and status.

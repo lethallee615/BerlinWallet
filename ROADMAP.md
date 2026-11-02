@@ -9,8 +9,9 @@ done only when its gate is met and documented.
 > definition of done. Merging code does not check a box; passing its gate does.
 
 The MVP feature set is complete, but the code is unaudited and several upstream
-edge cases are still open. The next delivery is a **source-only CLI developer
-preview**, `v0.1.0-alpha.1`; it is not a production wallet release. A desktop GUI
+edge cases are still open. The current delivery is the **source-only CLI
+developer preview** line; the next tag is `v0.1.0-alpha.2` with the mainnet guard
+and public-readiness docs. It is not a production wallet release. A desktop GUI
 is deferred until after the MVP; mobile is later still.
 
 ## MVP is done when…
@@ -55,7 +56,7 @@ MVP is called done.
 The CLI-first MVP checklist above is met as of 2026-10-31. That is a feature
 milestone, not a release.
 
-## Alpha release boundary (`v0.1.0-alpha.1`)
+## Alpha release boundary (source-only alpha)
 
 The first alpha is a **source-only CLI developer preview**:
 

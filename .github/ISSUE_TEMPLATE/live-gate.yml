@@ -1,0 +1,121 @@
+name: Live gate report
+description: Record a signet, devimint, backend, backup, or recovery test.
+title: "[live-gate]: "
+labels: ["type:test", "needs:live-test"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include seed words, passphrases, invite codes, RPC credentials,
+        or unredacted data directories. This template is for testnet/devimint
+        evidence, not mainnet. Mainnet is disabled in the alpha.
+
+  - type: input
+    id: version
+    attributes:
+      label: Release or commit
+      description: Output of `berlin-wallet --version` and/or `git rev-parse HEAD`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gate
+    attributes:
+      label: Gate
+      options:
+        - T1 build and version
+        - T2 mainnet guard
+        - T3 local signet send/reorg
+        - T4 send to another wallet
+        - T5 devimint deposit/withdrawal
+        - T6 restart/backup/restore
+        - T7 Electrum or bitcoind backend
+        - T8 lnv2
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, toolchain, bitcoind/Electrum version, devimint revision.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network
+      options:
+        - signet
+        - testnet
+        - regtest
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Chain backend
+      options:
+        - esplora
+        - electrum
+        - bitcoind
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands and steps
+      description: Exact commands and data-directory state; redact secrets.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: Point at the documented expectation or issue acceptance criteria.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: What happened, including the first error and whether it is reproducible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Redacted logs, txid, block height, journal/state output.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - pass
+        - fail
+        - blocked
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      options:
+        - label: This report contains no mainnet, real funds, or unredacted secrets.
+          required: true

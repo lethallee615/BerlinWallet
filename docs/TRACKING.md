@@ -30,7 +30,7 @@ Every issue has:
 - one `area:*` label (`core`, `cli`, `ffi`, `chain`, `build`, `ci`, `docs`);
 - one `type:*` label (`bug`, `feature`, `test`, `docs`, `chore`);
 - one `priority:*` label;
-- one milestone (`MVP`, `Hardening`, `Post-MVP`);
+- one milestone (`MVP`, `Hardening`, `Post-MVP`, `Release`);
 - optionally `needs:live-test` and/or `blocked:upstream`.
 
 Priority:

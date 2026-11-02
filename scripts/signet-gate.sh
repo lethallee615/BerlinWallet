@@ -14,6 +14,7 @@
 #   SIGNET_DATA_DIR (default /tmp/bw-signet-gate)
 #   SIGNET_RPC_PORT (18443), SIGNET_P2P_PORT (38333)
 #   BERLIN_WALLET_PASSPHRASE (required)
+#   SIGNET_KEEP_NODE=1 (leave bitcoind running for a demo/rehearsal)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,6 +43,10 @@ btc() {
 }
 
 stop_node() {
+    if [ "${SIGNET_KEEP_NODE:-0}" = "1" ]; then
+        echo "SIGNET_KEEP_NODE=1: leaving signet bitcoind running on port $RPC_PORT"
+        return
+    fi
     btc stop >/dev/null 2>&1 || true
 }
 trap stop_node EXIT
