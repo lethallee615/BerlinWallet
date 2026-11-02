@@ -15,11 +15,16 @@ documents are kept for history and may describe superseded assumptions.
 | [`TRACKING.md`](TRACKING.md) | The work queue, label/milestone taxonomy, status vocabulary, and the agent workflow. |
 | [`DEVIMINT.md`](DEVIMINT.md) | Local Fedimint v0.12.0 federation setup and the deposit live-gate checklist (#14). |
 | [`SIGNET.md`](SIGNET.md) | Local OP_TRUE signet harness for the headless on-chain send/reorg gate (#38). |
+| [`DEMO.md`](DEMO.md) | Presenter runbook for a local signet + Fedimint demo and external recipient. |
+| [`TESTING.md`](TESTING.md) | Tester matrix, expected results, report fields, and exit criteria. |
 | [`RELEASE.md`](RELEASE.md) | Source-only alpha tag and pre-release runbook. |
 | [`DEPENDENCIES.md`](DEPENDENCIES.md) | Dependabot policy, the Fedimint git-patch pin, the documented `lru` exception, and the alpha alert triage. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate boundaries, data directory, journal format and invariants, deposit/withdrawal state machines, crash-safety windows, reorg handling, `[patch.crates-io]`, GUI gaps, unknowns. |
 | [`THREAT-MODEL.md`](THREAT-MODEL.md) | Trusted parties, what breaks if the federation/Esplora/BDK/OS/mnemonic/backups/data-directory assumptions fail, and explicit out-of-scope items. |
 | [`../SECURITY.md`](../SECURITY.md) | Reporting a vulnerability, scope, supported versions, known-weak list, advisory policy. |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Development setup, tests/live gates, branch/PR rules, community expectations. |
+| [`../SUPPORT.md`](../SUPPORT.md) | Where to ask, what to include, and what is not supported. |
+| [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Community behavior and enforcement. |
 | [`AUDIT.md`](AUDIT.md) | Audit brief: which crate first, invariants to attack, known-broken items, source-verified vs assumed. |
 | [`../ROADMAP.md`](../ROADMAP.md) | Staged CLI-first MVP plan, hardening, audit, and deferred GUI/mobile work. |
 

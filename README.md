@@ -32,13 +32,13 @@ custody split is explicit:
   Bitcoin address, wait for the federation's final send state, and record the
   broadcast txid.
 - The same core is exposed through a UniFFI crate and a development CLI. The
-  CLI-first MVP is feature-complete; the next delivery is a source-only developer
-  preview (`v0.1.0-alpha.1`). The desktop GUI is deferred until after the MVP,
-  with mobile later.
+  CLI-first MVP is feature-complete; the current delivery is a source-only
+  developer preview. The desktop GUI is deferred until after the MVP, with mobile
+  later.
 
-This is an **unaudited developer preview**; the first source-only alpha
-[`v0.1.0-alpha.1`](https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.1)
-is published.
+This is an **unaudited developer preview**; the source-only alpha releases are
+published on the [releases page](https://github.com/lethallee615/BerlinWallet/releases).
+The current source disables mainnet; alpha.1 predates that guard.
 
 ## Status
 
@@ -93,6 +93,14 @@ is published.
 - **A production custody or payments service.** The federation is custodial by
   construction, the Esplora server is trusted for chain observations, and the
   FFI/GUI/operational layer is not complete.
+
+## Try it and report back
+
+- [`docs/DEMO.md`](docs/DEMO.md) — meetup presenter runbook for signet + Fedimint.
+- [`docs/TESTING.md`](docs/TESTING.md) — test matrix and report format.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development setup and PR rules.
+- [`SUPPORT.md`](SUPPORT.md) — where to ask and what to include.
+- [GitHub Discussions](https://github.com/lethallee615/BerlinWallet/discussions) — questions and test reports.
 
 ## Build prerequisites
 
@@ -232,9 +240,12 @@ binding boundary for a later desktop GUI or mobile app; neither exists yet.
 ## Documentation
 
 - [`docs/README.md`](docs/README.md) — documentation index.
-- [`CHANGELOG.md`](CHANGELOG.md) and
-  [`docs/releases/v0.1.0-alpha.1.md`](docs/releases/v0.1.0-alpha.1.md) — the
-  curated alpha release notes.
+- [`CHANGELOG.md`](CHANGELOG.md) and [`docs/releases/`](docs/releases/) — curated
+  alpha release notes.
+- [`docs/DEMO.md`](docs/DEMO.md) and [`docs/TESTING.md`](docs/TESTING.md) — demo
+  and tester runbooks.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SUPPORT.md`](SUPPORT.md), and
+  [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — contribution and community rules.
 - [`docs/JOURNAL.md`](docs/JOURNAL.md) — plain-language narrative of what was
   built and why.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — crate boundaries, journal,

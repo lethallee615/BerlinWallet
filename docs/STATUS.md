@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-11-01
-Main at: dab7a5f
+Main at: fdc5153
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -35,8 +35,8 @@ developer-preview surface.
 
 | Release gate | Status | Issue | Evidence |
 |---|---|---|---|
-| Mainnet hard guard | in-review | #70 | this PR |
-| Demo/testing/community docs | todo | #71 | — |
+| Mainnet hard guard | done | #70 | PR #73 |
+| Demo/testing/community docs | in-review | #71 | this PR |
 | Tag and publish alpha.2 | todo | #72 | — |
 
 ## Release v0.1.0-alpha.1
@@ -101,7 +101,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #70, #71, #72 |
+| P1 | #71, #72 |
 | P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
