@@ -15,8 +15,8 @@ and checks the tagged source before publishing a GitHub pre-release.
 ```bash
 git checkout main
 git pull --ff-only
-git tag -a v0.1.0-alpha.1 -m "Berlin Wallet v0.1.0-alpha.1"
-git push origin v0.1.0-alpha.1
+git tag -a v0.1.0-alpha.2 -m "Berlin Wallet v0.1.0-alpha.2"
+git push origin v0.1.0-alpha.2
 ```
 
 The workflow then:
@@ -31,8 +31,8 @@ It does not build a binary, publish to crates.io, or mark the release as latest.
 ## Verify
 
 ```bash
-gh release view v0.1.0-alpha.1 --json isPrerelease,assets,url
-gh release download v0.1.0-alpha.1 --pattern '*.sha256' --pattern '*.tar.gz' --dir /tmp/bw-release
+gh release view v0.1.0-alpha.2 --json isPrerelease,assets,url
+gh release download v0.1.0-alpha.2 --pattern '*.sha256' --pattern '*.tar.gz' --dir /tmp/bw-release
 (cd /tmp/bw-release && sha256sum -c *.sha256)
 ```
 
@@ -44,10 +44,10 @@ cut a new alpha instead.
 
 ```bash
 mkdir -p dist
-git archive --format=tar.gz --prefix=berlin-wallet-v0.1.0-alpha.1/ \
-  --output=dist/berlin-wallet-v0.1.0-alpha.1.tar.gz HEAD
-(cd dist && sha256sum berlin-wallet-v0.1.0-alpha.1.tar.gz > berlin-wallet-v0.1.0-alpha.1.tar.gz.sha256)
-gh release create v0.1.0-alpha.1 dist/* --verify-tag --prerelease --latest=false \
-  --title "Berlin Wallet v0.1.0-alpha.1" \
-  --notes-file docs/releases/v0.1.0-alpha.1.md
+git archive --format=tar.gz --prefix=berlin-wallet-v0.1.0-alpha.2/ \
+  --output=dist/berlin-wallet-v0.1.0-alpha.2.tar.gz HEAD
+(cd dist && sha256sum berlin-wallet-v0.1.0-alpha.2.tar.gz > berlin-wallet-v0.1.0-alpha.2.tar.gz.sha256)
+gh release create v0.1.0-alpha.2 dist/* --verify-tag --prerelease --latest=false \
+  --title "Berlin Wallet v0.1.0-alpha.2" \
+  --notes-file docs/releases/v0.1.0-alpha.2.md
 ```
