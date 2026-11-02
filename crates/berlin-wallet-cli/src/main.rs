@@ -17,8 +17,8 @@ use berlin_wallet_core::journal::{
 };
 use berlin_wallet_core::lightning;
 use berlin_wallet_core::network::{
-    NETWORK_FILE, init_network, network_from_chain_id, network_from_recorded, parse_network,
-    require_recorded_network, verified_client_network,
+    NETWORK_FILE, ensure_alpha_network, init_network, network_from_chain_id, network_from_recorded,
+    parse_network, require_recorded_network, verified_client_network,
 };
 use berlin_wallet_core::ops::{DepositId, LightningId, OnchainSendId, WithdrawalId};
 use berlin_wallet_core::restore_policy::RestoreSummary;
@@ -84,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
         return import_data_dir(&data_dir, Path::new(source), &passphrase);
     }
 
+    if let Some(value) = network_arg.as_deref() {
+        ensure_alpha_network(parse_network(value)?)?;
+    }
+
     std::fs::create_dir_all(&data_dir)?;
     let mnemonic_path = data_dir.join("mnemonic");
     if command == Some("restore") && !mnemonic_path.exists() {
@@ -108,9 +112,11 @@ async fn main() -> anyhow::Result<()> {
     match command {
         None | Some("init") => {
             let value = network_arg.as_deref().ok_or_else(|| {
-                anyhow!("init requires --network <mainnet|testnet|signet|regtest>")
+                anyhow!(
+                    "init requires --network <testnet|signet|regtest> (mainnet is disabled in this alpha)"
+                )
             })?;
-            let network = init_network(&data_dir, parse_network(value)?)?;
+            let network = init_network(&data_dir, ensure_alpha_network(parse_network(value)?)?)?;
             // `init` takes the chain source as its first positional argument.
             let chain = chain_config(&data_dir, args.get(2).cloned())?;
             let bdk = BdkWallet::open_or_create(
@@ -201,9 +207,11 @@ async fn main() -> anyhow::Result<()> {
                 )
             })?;
             let value = network_arg.as_deref().ok_or_else(|| {
-                anyhow!("restore requires --network <mainnet|testnet|signet|regtest>")
+                anyhow!(
+                    "restore requires --network <testnet|signet|regtest> (mainnet is disabled in this alpha)"
+                )
             })?;
-            let recorded = parse_network(value)?;
+            let recorded = ensure_alpha_network(parse_network(value)?)?;
             restore(
                 invite,
                 &seed,
@@ -381,7 +389,7 @@ fn print_help() {
     println!();
     println!("commands:");
     println!("  init --network <net> [chain-source] create/open the local wallet; net is");
-    println!("                                      mainnet|testnet|signet|regtest");
+    println!("                                      testnet|signet|regtest (mainnet disabled)");
     println!("  join <invite> [--network <net>]     join a federation and print its config");
     println!(
         "  backup <dest-file>                   encrypted age archive of mnemonic + client DB + BDK DB"
@@ -398,6 +406,7 @@ fn print_help() {
     println!("  version, --version                  print the package version");
     println!("  help, --help                        print this help");
     println!();
+    println!("  Mainnet is disabled in this unaudited alpha. Use signet, testnet, or regtest.");
     println!("  An unknown federation chain-id fails closed unless the data directory");
     println!("  was explicitly initialized with --network regtest (devimint/custom).");
     println!();
@@ -461,6 +470,7 @@ async fn join(
         Some(value) => network_from_recorded(chain_id, parse_network(value)?)?,
         None => network_from_chain_id(chain_id)?,
     };
+    let chain_network = ensure_alpha_network(chain_network)?;
     println!("federation id: {}", client.federation_id());
     println!("client identity: {identity}");
     println!("chain-id network: {chain_network}");

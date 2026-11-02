@@ -72,6 +72,10 @@ preview; the branch `main` is the only supported line. There are no backports to
 tags or release branches, and no commitment that a future release will preserve
 the current data format.
 
+Mainnet is disabled in the current alpha source and FFI. The CLI/FFI reject
+mainnet initialization and restore, and a data directory recorded as mainnet
+fails closed. Alpha.1 predates that guard; do not use it with mainnet.
+
 ## Known weaknesses
 
 These are current, documented limitations. They are listed here so reporters do

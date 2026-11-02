@@ -43,6 +43,7 @@ is published.
 ## Status
 
 - **Developer preview (alpha). Not audited.**
+- **Mainnet is disabled in this alpha.** Use signet, testnet, or regtest.
 - Deposit and withdrawal have been exercised end to end on devimint and
   Mutinynet. The live Mutinynet round trip and crash/restart matrix are recorded
   in `docs/API-VERIFICATION.md` §25 and §27. Funding returns after broadcast; a
@@ -56,7 +57,7 @@ is published.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 124 core tests (123 run + 1 devimint-only ignored), 9 CLI tests, and 6 FFI tests.
+- The current test suite is 126 core tests (125 run + 1 devimint-only ignored), 9 CLI tests, and 8 FFI tests.
 - The first alpha is source-only: there is no supported binary artifact and no
   platform-support promise. Build from the tagged source with the prerequisites
   below.
@@ -168,12 +169,14 @@ cargo test --workspace
 
 The CLI binary is a development harness, not a production UI:
 
-> **Network:** `init` requires `--network <mainnet|testnet|signet|regtest>` and
-> records the choice in `<data-dir>/network.json`. `run` verifies it against the
-> federation's chain-id and refuses a mismatch. An unknown chain-id fails closed
-> unless the recorded choice is `regtest` (the explicit devimint/custom opt-in).
-> A data directory created before `network.json` existed must run
-> `init --network <the network it already uses>` once.
+> **Network:** `init` requires `--network <testnet|signet|regtest>` and records
+> the choice in `<data-dir>/network.json`. **Mainnet is disabled in this
+> unaudited alpha**; CLI and FFI initialization and restore reject it, and an
+> existing mainnet data directory fails closed. `run` verifies the recorded
+> network against the federation's chain-id and refuses a mismatch. An unknown
+> chain-id fails closed unless the recorded choice is `regtest` (the explicit
+> devimint/custom opt-in). A data directory created before `network.json`
+> existed must run `init --network <the network it already uses>` once.
 
 The CLI also has headless `send <address> <sat> <sat/vb>` and `list-onchain`
 commands for an initialized data directory; they do not require a federation.
