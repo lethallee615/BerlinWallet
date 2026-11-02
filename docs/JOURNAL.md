@@ -22,6 +22,11 @@ in block 102, invalidated the block, rebuilt the BDK wallet, and re-confirmed th
 same txid. Public signet/Mutinynet and devimint were not rerun for the tag; the
 release notes say so. Mainnet stays disabled until the audited release path.
 
+The tag is `v0.1.0-alpha.2` at `f8149c0`, published at
+<https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.2> as a
+pre-release, not latest. The source archive SHA-256 is
+`26f2509854792a7188f0e36779bfd9c419c8e4a287af2d50c743b741010be791`.
+
 ## 2026-10-31 — First source-only alpha
 
 The release train for `v0.1.0-alpha.1` was cut from this commit and published at

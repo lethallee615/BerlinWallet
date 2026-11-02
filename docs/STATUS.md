@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-11-01
-Main at: 80084ee
+Main at: f8149c0
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -37,7 +37,7 @@ developer-preview surface.
 |---|---|---|---|
 | Mainnet hard guard | done | #70 | PR #73 |
 | Demo/testing/community docs | done | #71 | PR #74 |
-| Tag and publish alpha.2 | in-review | #72 | this PR |
+| Tag and publish alpha.2 | done | #72 | tag `f8149c0`; <https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.2> |
 
 ## Release v0.1.0-alpha.1
 
@@ -74,6 +74,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Date | Flow | Backend | Result | Evidence |
 |---|---|---|---|---|
 | 2026-10-31 | REPL PTY: two-line paste executed both balances; stray `s` absorbed; `!echo`/`shell echo` ran; background WARN redrew the prompt; startup BDK address stable | local CLI | pass | #9, §57 |
+| 2026-11-01 | Source-only alpha `v0.1.0-alpha.2` published as a pre-release (not latest); source archive + portable SHA-256 verified | GitHub release | pass | #72; release URL |
 | 2026-11-01 | Mainnet guard: `init --network mainnet` exits 1, creates no data directory; core/FFI tests cover rejection | local CLI | pass | #70, §59 |
 | 2026-10-31 | Source-only alpha `v0.1.0-alpha.1` published as a pre-release (not latest); source archive + portable SHA-256 verified | GitHub release | pass | #61; release URL |
 | 2026-11-01 | Local OP_TRUE signet alpha.2 gate: 50,000 sat send at 2 sat/vB, fee 281 sat, total debit 50,281 sat, txid 708fdc25...; block 102 confirmed; invalidateblock + re-mine re-confirmed after BDK rebuild | signet bitcoind | pass | #72, §58 |
@@ -102,7 +103,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #72 |
+| P1 | — |
 | P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.
