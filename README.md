@@ -97,6 +97,10 @@ guard.
 
 ## Try it and report back
 
+> The alpha release is source-only and does **not** bundle Bitcoin Core. The
+> signet demo needs `bitcoind`/`bitcoin-cli` 28+ separately. Run
+> `scripts/check-demo-prereqs.sh` after setting `BITCOIND` and `BITCOIN_CLI`.
+
 - [`docs/DEMO.md`](docs/DEMO.md) — meetup presenter runbook for signet + Fedimint.
 - [`docs/TESTING.md`](docs/TESTING.md) — test matrix and report format.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development setup and PR rules.
