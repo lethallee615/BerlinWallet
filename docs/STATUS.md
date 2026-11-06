@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-11-01
+Last updated: 2026-11-05
 Main at: f8149c0
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the

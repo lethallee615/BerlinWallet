@@ -28,16 +28,45 @@ Target: **25 minutes plus Q&A**.
 
 Lightning is optional. Use a recorded fallback if the gateway is not stable.
 
+## Get the release
+
+A Git tag is a ref, not a directory. `ls` will not show it.
+
+```bash
+git fetch --tags
+git switch -c demo-alpha2 v0.1.0-alpha.2
+cargo build --release -p berlin-wallet-cli
+export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
+"$BERLIN_WALLET" --version
+```
+
+Do not build for the first time during the meetup.
+
+## Bitcoin Core is not bundled
+
+The alpha release ships source, not Bitcoin Core. Install Bitcoin Core 28 or
+newer and point `BITCOIND`/`BITCOIN_CLI` at the binaries. With Nix:
+
+```bash
+nix shell nixpkgs#bitcoind -c bash
+export BITCOIND="$(command -v bitcoind)"
+export BITCOIN_CLI="$(command -v bitcoin-cli)"
+```
+
+Or install it with your distro or from the official Bitcoin Core binaries and
+use those paths. The repository's Nix devShell does not include bitcoind.
+
 ## Preflight — at least one day before
 
-1. Build the tagged release:
+1. Check the local toolchain and binaries:
 
    ```bash
-   cargo build --release -p berlin-wallet-cli
-   target/release/berlin-wallet --version
+   export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
+   scripts/check-demo-prereqs.sh
    ```
 
-   Do not build for the first time during the meetup.
+   It checks the wallet version, `bitcoind`/`bitcoin-cli`, Python, jq, the signet
+   miner, and port 18443.
 
 2. Run the complete signet gate once and keep the node/data directory for the
    demo:
@@ -45,6 +74,7 @@ Lightning is optional. Use a recorded fallback if the gateway is not stable.
    ```bash
    export BITCOIND=/path/to/bitcoind
    export BITCOIN_CLI=/path/to/bitcoin-cli
+   export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
    export BERLIN_WALLET_PASSPHRASE=signet-pass
    SIGNET_KEEP_NODE=1 scripts/signet-gate.sh
    ```
@@ -84,11 +114,12 @@ Use two terminals:
 
 ```bash
 export BITCOIN_CLI=/path/to/bitcoin-cli
+export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
 export BERLIN_WALLET_DATA_DIR=/tmp/bw-signet-gate/wallet
 export BERLIN_WALLET_PASSPHRASE=signet-pass
 
 # Show the funded wallet and its current history.
-target/release/berlin-wallet list-onchain
+"$BERLIN_WALLET" list-onchain
 
 # Create an external recipient address.
 EXT=$($BITCOIN_CLI -chain=signet -datadir=/tmp/bw-signet-gate \
@@ -97,7 +128,7 @@ EXT=$($BITCOIN_CLI -chain=signet -datadir=/tmp/bw-signet-gate \
 echo "$EXT"
 
 # Send to the external wallet.
-target/release/berlin-wallet send "$EXT" 25000 2
+"$BERLIN_WALLET" send "$EXT" 25000 2
 ```
 
 Mine a confirmation block to the separate miner wallet. The signet miner includes
@@ -118,7 +149,7 @@ $BITCOIN_CLI -chain=signet -datadir=/tmp/bw-signet-gate \
   -rpcuser=u -rpcpassword=p -rpcport=18443 \
   -rpcwallet=recipient gettransaction <txid>
 
-target/release/berlin-wallet list-onchain
+"$BERLIN_WALLET" list-onchain
 ```
 
 The point is the external address, not an explorer. The recipient wallet's
@@ -129,10 +160,11 @@ The point is the external address, not an explorer. The recipient wallet's
 Use the devimint federation prepared in preflight. A concise flow is:
 
 ```bash
+export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
 export BERLIN_WALLET_DATA_DIR=/tmp/bw-demo-fed
 export BERLIN_WALLET_PASSPHRASE=wallet-pass
-target/release/berlin-wallet init --network regtest
-target/release/berlin-wallet run "$FM_INVITE_CODE"
+"$BERLIN_WALLET" init --network regtest
+"$BERLIN_WALLET" run "$FM_INVITE_CODE"
 ```
 
 Inside the REPL:

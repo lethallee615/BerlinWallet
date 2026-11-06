@@ -14,7 +14,9 @@ mature coinbases from `scripts/signet-mine.py`.
 ## Requirements
 
 - `bitcoind` and `bitcoin-cli` (Bitcoin Core 28 or newer; the gate was run with
-  31.0).
+  31.0). **Bitcoin Core is not bundled** with the release. Install it separately
+  or use, for example, `nix shell nixpkgs#bitcoind -c bash`, then set
+  `BITCOIND`/`BITCOIN_CLI` to `command -v bitcoind`/`command -v bitcoin-cli`.
 - `python3`, `jq`, and a built `target/debug/berlin-wallet`.
 - About 15 minutes for 101 signet blocks on a typical CPU.
 
@@ -23,8 +25,10 @@ mature coinbases from `scripts/signet-mine.py`.
 ```bash
 export BITCOIND=/path/to/bitcoind
 export BITCOIN_CLI=/path/to/bitcoin-cli
+export BERLIN_WALLET=/path/to/berlin-wallet
 export BERLIN_WALLET_PASSPHRASE=signet-pass
-scripts/signet-gate.sh
+scripts/check-demo-prereqs.sh
+SIGNET_KEEP_NODE=1 scripts/signet-gate.sh
 ```
 
 The script:

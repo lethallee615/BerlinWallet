@@ -29,10 +29,18 @@ Include this in every report:
 
 ### T1 — build and identity
 
+The release does not bundle Bitcoin Core. Install Bitcoin Core 28+ separately
+and set `BITCOIND`/`BITCOIN_CLI`, or use `nix shell nixpkgs#bitcoind -c bash`
+and point the variables at the resulting binaries.
+
 ```bash
+git fetch --tags
+git switch -c test-alpha2 v0.1.0-alpha.2
 cargo build --release -p berlin-wallet-cli
-target/release/berlin-wallet --version
-target/release/berlin-wallet --help
+export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
+"$BERLIN_WALLET" --version
+"$BERLIN_WALLET" --help
+scripts/check-demo-prereqs.sh
 ```
 
 Pass: version matches the tag; help labels the binary as an unaudited developer
@@ -43,7 +51,7 @@ preview and says mainnet is disabled.
 ```bash
 export BERLIN_WALLET_DATA_DIR=/tmp/bw-test-mainnet
 export BERLIN_WALLET_PASSPHRASE=test-pass
-target/release/berlin-wallet init --network mainnet
+"$BERLIN_WALLET" init --network mainnet
 ```
 
 Pass: exit is non-zero, the error says mainnet is disabled, and no
@@ -55,7 +63,9 @@ bindings, and for `restore --network mainnet` with a disposable mnemonic.
 ```bash
 export BITCOIND=/path/to/bitcoind
 export BITCOIN_CLI=/path/to/bitcoin-cli
+export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
 export BERLIN_WALLET_PASSPHRASE=signet-pass
+scripts/check-demo-prereqs.sh
 scripts/signet-gate.sh
 ```
 
