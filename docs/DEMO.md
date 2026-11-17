@@ -103,7 +103,61 @@ use those paths. The repository's Nix devShell does not include bitcoind.
 6. Confirm the demo machine has large terminal font, a clean data directory, and
    enough disk for the RocksDB/SQLite files.
 
-## Live demo — signet send to another wallet
+## Demo console (TUI)
+
+The sat-first demo console is the primary presenter surface. It shows all
+amounts in `sat`, uses the configured external recipient, and has a clean quit
+for the restart/backup evidence.
+
+### Signet profile
+
+Start the signet node/data directory from the preflight, then:
+
+```bash
+export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
+export BERLIN_WALLET_DATA_DIR=/tmp/bw-signet-gate/wallet
+export BERLIN_WALLET_PASSPHRASE=signet-pass
+export BERLIN_WALLET_DEMO_PROFILE=signet
+export BERLIN_WALLET_DEMO_RECIPIENT="<recipient-address>"
+export BERLIN_WALLET_DEMO_BITCOIND_RPC="http://u:p@127.0.0.1:18443/wallet/recipient"
+"$BERLIN_WALLET" demo --profile signet
+```
+
+Keys:
+
+- `1` — refresh the wallet and network view;
+- `2` — send 25,000 sat to the configured recipient;
+- `3` — refresh confirmations and the recipient wallet balance;
+- `4` / `5` — disabled when no federation is joined;
+- `q` — clean shutdown.
+
+Mine the confirmation block from the second terminal with
+`scripts/signet-mine.py`, then press `3`.
+
+### Fedimint profile
+
+Use the prepared devimint federation and joined data directory:
+
+```bash
+export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
+export BERLIN_WALLET_DATA_DIR=/tmp/bw-demo-fed
+export BERLIN_WALLET_PASSPHRASE=wallet-pass
+export BERLIN_WALLET_DEMO_PROFILE=fedimint
+export BERLIN_WALLET_DEMO_INVITE="<invite-code>"
+export BERLIN_WALLET_DEMO_RECIPIENT="<devimint-recipient-address>"
+export BERLIN_WALLET_DEMO_BITCOIND_RPC="http://bitcoin:bitcoin@<devimint-rpc>/wallet/default"
+"$BERLIN_WALLET" demo --profile fedimint --invite "$BERLIN_WALLET_DEMO_INVITE"
+```
+
+Press `4` to deposit 100,000 sat. While the status says `deposit in progress`,
+mine six blocks with the federation's bitcoind (the walletv2 receive finalizes at
+`tip - 6`), then wait for the ecash balance. Press `3` to refresh the recipient,
+then `5` to withdraw 50,000 sat, `3` again, and `q`.
+
+The TUI's `q` path stops tasks/client and releases the data directory so the
+backup/restart commands can run immediately.
+
+## CLI fallback — signet send to another wallet
 
 The gate has already created a funded wallet and a `recipient` bitcoind wallet.
 
@@ -155,7 +209,7 @@ $BITCOIN_CLI -chain=signet -datadir=/tmp/bw-signet-gate \
 The point is the external address, not an explorer. The recipient wallet's
 `gettransaction` output is the proof that another wallet received the payment.
 
-## Live demo — Fedimint deposit and withdrawal
+## CLI fallback — Fedimint deposit and withdrawal
 
 Use the devimint federation prepared in preflight. A concise flow is:
 

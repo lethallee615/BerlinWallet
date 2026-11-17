@@ -3542,3 +3542,42 @@ Core tests cover `ensure_alpha_network`, direct `store_network`, `init_network`,
 and an existing mainnet `network.json`; FFI tests cover `init` and `restore`
 rejection. Signet, testnet, and regtest remain accepted. Alpha.1 predates this
 guard; do not use alpha.1 with mainnet.
+
+## 60. Sat-first demo TUI (2026-11-17)
+
+The `berlin-wallet demo` TUI adds a presenter surface without changing the
+normal CLI or FFI. It renders every amount as `sat`; ecash values use fractional
+sat only when the msat value is not an exact sat amount. Internal protocol values
+remain untouched.
+
+Signet profile, with the local `v0.1.0-alpha.2` demo wallet and a bitcoind
+recipient wallet:
+
+- `1` refreshed network/chain/BDK balance; the wallet had
+  509,999,924,719 sat before the TUI send.
+- `2` sent 25,000 sat to `tb1qcdfrqvn8evxrqntv74dnpxdae0rs78psw5qn6e`;
+  quote fee 281 sat, total debit 25,281 sat, txid `9081473c...`.
+- `3` queried the recipient wallet through bitcoind RPC and showed
+  25,000 sat received / 50,000 sat balance.
+- `q` shut down cleanly; the CLI could immediately open the same data directory
+  and list its history.
+
+Fedimint profile, joined devimint federation and a funded BDK wallet:
+
+- `4` deposited 100,000 sat; after six confirmation blocks the deposit reached
+  `Done` and ecash showed `99,577.856 sat`.
+- `5` withdrew 50,000 sat to
+  `bcrt1q7suy4xtyxkt9wj55lrngsl5ep5mjj8r5m25jtq`; the recipient probe showed
+  50,000 sat received.
+- A restart showed the on-chain and ecash balances without replaying an
+  operation; `q` released the directory. A CLI `backup` then produced a 318K
+  age archive.
+- The TUI source has tests for sat formatting and RPC URL parsing. The normal
+  CLI remains BTC/msat-formatted; the future CLI unit migration is separate.
+
+The Fedimint deposit needs six blocks after funding because walletv2 finalizes
+receive outputs at `tip - 6`. The presenter runbook calls that out and mines from
+the prepared bitcoind.
+
+Test count: 125 core tests plus one devimint-only ignored, 13 CLI tests (four TUI
+tests), and 8 FFI tests.

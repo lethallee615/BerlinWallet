@@ -1,5 +1,24 @@
 # Journal
 
+## 2026-11-17 — Sat-first demo TUI
+
+The demo now has a small keyboard-only TUI in the CLI crate. It is not a general
+wallet UI: it has show/send/refresh/deposit/withdraw/quit, fixed demo amounts,
+and a configured recipient. The signet profile is BDK-only; the Fedimint profile
+opens the joined devimint client. The normal CLI and FFI are unchanged.
+
+All TUI amounts are sat. On-chain values are integer sat; ecash values use
+fractional sat only when the exact msat value is not a whole sat. The recipient
+balance is queried through the local bitcoind RPC. `q` stops tasks/client,
+releases the directory, and prints the data-directory path so the presenter can
+immediately back up or restart.
+
+Live checks: signet send 25,000 sat with a 281 sat fee and recipient balance
+25,000 sat; Fedimint deposit 100,000 sat -> 99,577.856 sat ecash, withdrawal
+50,000 sat -> recipient 50,000 sat, clean quit, and a 318K age backup. The
+Fedimint deposit needed six confirmation blocks because walletv2 finalizes at
+`tip - 6`.
+
 ## 2026-11-01 — Alpha.2: mainnet guard and public-readiness surface
 
 The second source-only alpha makes mainnet deliberately unavailable. The core

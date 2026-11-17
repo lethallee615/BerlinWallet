@@ -37,6 +37,8 @@ use fedimint_core::module::AmountUnit;
 use fedimint_walletv2_client::WalletClientModule;
 use tokio::sync::{Mutex, watch};
 
+mod demo;
+
 const DEFAULT_ESPLORA_URL: &str = "http://127.0.0.1:3002";
 const WATCH_HEARTBEAT: Duration = Duration::from_secs(10);
 const REPL_PROMPT: &str = "berlin-wallet> ";
@@ -170,6 +172,9 @@ async fn main() -> anyhow::Result<()> {
             let journal = Journal::new(open_database(&data_dir).await?, vec![0x00]);
             let wallet = Arc::new(Mutex::new(bdk));
             command_list_onchain(&wallet, &journal).await
+        }
+        Some("demo") => {
+            demo::run(&args, &data_dir, &seed, root_secret, network_arg.as_deref()).await
         }
         Some("join") => {
             let invite = args
@@ -400,7 +405,7 @@ fn print_help() {
     println!("  Wallet and backup passphrases are prompted; in automation set");
     println!("  BERLIN_WALLET_PASSPHRASE and BERLIN_WALLET_BACKUP_PASSPHRASE.");
     println!("                                      recover on a fresh data dir + full BDK scan");
-    println!("  run <invite> [chain-source]         interactive manual-run session");
+    println!("  demo --profile signet|fedimint       sat-first demo TUI");
     println!("  send <address> <sat> <sat/vb>       send on-chain without a federation");
     println!("  list-onchain                        journalled sends + wallet history");
     println!("  version, --version                  print the package version");
