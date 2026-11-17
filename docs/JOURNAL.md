@@ -12,6 +12,11 @@ Fedimint TUI deposit 100,000 sat -> 99,577.856 sat ecash, withdrawal 50,000 sat
 -> recipient 50,000 sat, clean quit, and a 318K age backup. The Fedimint deposit
 required six blocks because walletv2 finalizes at `tip - 6`.
 
+The tag is `v0.1.0-alpha.3` at `eae9791`, published at
+<https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.3> as a
+pre-release, not latest. The source archive SHA-256 is
+`cd376965890443216fd93d27b2004816baadf801ca6fdf33d9ede76d2b27b0ed`.
+
 ## 2026-11-17 — Sat-first demo TUI
 
 The demo now has a small keyboard-only TUI in the CLI crate. It is not a general
