@@ -67,7 +67,7 @@ publish details before a fix or an agreed disclosure date.
 
 ## Supported versions
 
-There are no stable releases. `v0.1.0-alpha.1` and `v0.1.0-alpha.2` are
+There are no stable releases. `v0.1.0-alpha.1`, `v0.1.0-alpha.2`, and `v0.1.0-alpha.3` are
 source-only developer previews; the branch `main` is the only supported line. There are no backports to
 tags or release branches, and no commitment that a future release will preserve
 the current data format.

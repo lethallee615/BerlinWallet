@@ -1591,7 +1591,7 @@ mod tests {
 
     #[test]
     fn version_is_the_package_version() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0-alpha.2");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0-alpha.3");
     }
 
     #[test]

@@ -34,7 +34,7 @@ A Git tag is a ref, not a directory. `ls` will not show it.
 
 ```bash
 git fetch --tags
-git switch -c demo-alpha2 v0.1.0-alpha.2
+git switch -c demo-alpha2 v0.1.0-alpha.3
 cargo build --release -p berlin-wallet-cli
 export BERLIN_WALLET="$PWD/target/release/berlin-wallet"
 "$BERLIN_WALLET" --version

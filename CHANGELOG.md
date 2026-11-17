@@ -3,6 +3,14 @@
 This project does not generate a changelog from commit messages. Each release is
 curated by hand, and the exact release notes are in `docs/releases/`.
 
+## [0.1.0-alpha.3] - 2026-11-17
+
+Sat-first demo TUI with signet and Fedimint profiles, external recipient RPC
+refresh, clean quit, and demo/testing updates. The normal CLI/FFI output is
+unchanged. See [`docs/releases/v0.1.0-alpha.3.md`](docs/releases/v0.1.0-alpha.3.md).
+
+[0.1.0-alpha.3]: https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.3
+
 ## [0.1.0-alpha.2] - 2026-11-01
 
 Mainnet guard at the core/CLI/FFI boundary, meetup demo and tester runbooks,

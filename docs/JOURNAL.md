@@ -1,5 +1,17 @@
 # Journal
 
+## 2026-11-17 — Alpha.3: sat-first demo TUI
+
+The third source-only alpha adds a keyboard-only demo TUI. It is sat-first,
+uses the local bitcoind RPC for the external recipient, and has two profiles:
+signet (BDK only) and fedimint (joined devimint). The normal CLI and FFI remain
+unchanged; a future CLI unit migration is a separate change.
+
+Live checks: signet TUI send 25,000 sat, 281 sat fee, recipient 25,000 sat;
+Fedimint TUI deposit 100,000 sat -> 99,577.856 sat ecash, withdrawal 50,000 sat
+-> recipient 50,000 sat, clean quit, and a 318K age backup. The Fedimint deposit
+required six blocks because walletv2 finalizes at `tip - 6`.
+
 ## 2026-11-17 — Sat-first demo TUI
 
 The demo now has a small keyboard-only TUI in the CLI crate. It is not a general

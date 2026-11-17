@@ -1,7 +1,7 @@
 # Project status
 
 Last updated: 2026-11-17
-Main at: d101ba5
+Main at: a218ed6
 
 This is the machine-readable status snapshot. `docs/TRACKING.md` explains the
 vocabulary and the update rules. Every row names an issue or evidence; `—` means
@@ -34,8 +34,8 @@ The third source-only alpha adds the sat-first demo TUI.
 
 | Release gate | Status | Issue | Evidence |
 |---|---|---|---|
-| Sat-first demo TUI (signet + Fedimint) | in-review | #81 | this PR |
-| Alpha.3 tag and pre-release | todo | #82 | — |
+| Sat-first demo TUI (signet + Fedimint) | done | #81 | PR #83 |
+| Alpha.3 tag and pre-release | in-review | #82 | this PR |
 
 ## Release v0.1.0-alpha.2
 
@@ -87,6 +87,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | 2026-10-31 | REPL PTY: two-line paste executed both balances; stray `s` absorbed; `!echo`/`shell echo` ran; background WARN redrew the prompt; startup BDK address stable | local CLI | pass | #9, §57 |
 | 2026-11-01 | Source-only alpha `v0.1.0-alpha.2` published as a pre-release (not latest); source archive + portable SHA-256 verified | GitHub release | pass | #72; release URL |
 | 2026-11-17 | Sat-first TUI signet: show/send 25,000 sat (fee 281 sat), recipient 25,000 sat, clean quit | signet bitcoind | pass | #81, §60 |
+| 2026-11-17 | Local OP_TRUE signet alpha.3 gate: 50,000 sat at 2 sat/vB, fee 281 sat, total debit 50,281 sat, txid 8b7a135f...; block 102 confirmed; invalidateblock + re-mine re-confirmed after BDK rebuild | signet bitcoind | pass | #82, §58 |
 | 2026-11-17 | Sat-first TUI fedimint: deposit 100,000 sat -> 99,577.856 sat ecash; withdraw 50,000 sat -> recipient 50,000 sat; quit + CLI backup | devimint | pass | #81, §60 |
 | 2026-11-01 | Mainnet guard: `init --network mainnet` exits 1, creates no data directory; core/FFI tests cover rejection | local CLI | pass | #70, §59 |
 | 2026-10-31 | Source-only alpha `v0.1.0-alpha.1` published as a pre-release (not latest); source archive + portable SHA-256 verified | GitHub release | pass | #61; release URL |
@@ -116,7 +117,7 @@ Newest first. A row is evidence only if it names the flow and the observation.
 | Priority | Issues |
 |---|---|
 | P0 | — |
-| P1 | #81, #82 |
+| P1 | #82 |
 | P2 | — |
 
 P0 means funds are at risk or the primary flow is broken. P1 blocks the MVP.

@@ -10,11 +10,11 @@ project got here. [`docs/TRACKING.md`](docs/TRACKING.md) defines the labels,
 milestones, status vocabulary, and the agent protocol. None of these replaces the
 source or `docs/API-VERIFICATION.md` for current API behavior.
 
-## Current scope (2026-11-01)
+## Current scope (2026-11-17)
 
 The **CLI-first MVP** is feature-complete. The source-only alpha line is live:
-`v0.1.0-alpha.1` is published and `v0.1.0-alpha.2` adds the mainnet guard and
-public-readiness docs. Desktop GUI and mobile remain deferred.
+`v0.1.0-alpha.1` and `v0.1.0-alpha.2` are published; `v0.1.0-alpha.3` adds the
+mainnet guard, public-readiness docs, and sat-first demo TUI. Desktop GUI and mobile remain deferred.
 
 In scope:
 
