@@ -58,7 +58,7 @@ guard.
 - Restore, Send adoption, and backup, plus the FFI and reorg work, have dedicated
   tests and live checks; see `docs/API-VERIFICATION.md` §28–§31 (restore, Send
   adoption, backup), §33 (FFI), §34 (BDK sync fix), and §35 (reorg finding).
-- The current test suite is 126 core tests (125 run + 1 devimint-only ignored), 9 CLI tests, and 8 FFI tests.
+- The current test suite is 126 core tests (125 run + 1 devimint-only ignored), 13 CLI tests, and 8 FFI tests.
 - The first alpha is source-only: there is no supported binary artifact and no
   platform-support promise. Build from the tagged source with the prerequisites
   below.
@@ -101,7 +101,7 @@ guard.
 > signet demo needs `bitcoind`/`bitcoin-cli` 28+ separately. Run
 > `scripts/check-demo-prereqs.sh` after setting `BITCOIND` and `BITCOIN_CLI`.
 
-- [`docs/DEMO.md`](docs/DEMO.md) — meetup presenter runbook for signet + Fedimint.
+- [`docs/DEMO.md`](docs/DEMO.md) — meetup presenter runbook for the sat-first TUI and signet + Fedimint.
 - [`docs/TESTING.md`](docs/TESTING.md) — test matrix and report format.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development setup and PR rules.
 - [`SUPPORT.md`](SUPPORT.md) — where to ask and what to include.
@@ -191,8 +191,10 @@ The CLI binary is a development harness, not a production UI:
 > devimint/custom opt-in). A data directory created before `network.json`
 > existed must run `init --network <the network it already uses>` once.
 
-The CLI also has headless `send <address> <sat> <sat/vb>` and `list-onchain`
-commands for an initialized data directory; they do not require a federation.
+The CLI also has a sat-first demo TUI (`berlin-wallet demo --profile signet`
+or `--profile fedimint`) and headless `send <address> <sat> <sat/vb>` and
+`list-onchain` commands for an initialized data directory; the headless commands
+do not require a federation.
 `berlin-wallet --version` prints the package version, and `--help` labels the
 binary as an unaudited developer preview.
 `docs/SIGNET.md` contains the local OP_TRUE signet send/reorg harness.

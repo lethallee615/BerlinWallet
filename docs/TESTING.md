@@ -112,6 +112,28 @@ withdrawal reaches `Broadcast`, and the external recipient sees the transaction.
 Pass: encrypted archive imports; wrong passphrase fails; no plaintext mnemonic
 is accepted in a new backup.
 
+### T9 — sat-first demo TUI
+
+Launch the signet profile with a funded demo wallet and a configured recipient:
+
+```bash
+export BERLIN_WALLET_DATA_DIR=/tmp/bw-signet-gate/wallet
+export BERLIN_WALLET_PASSPHRASE=signet-pass
+export BERLIN_WALLET_DEMO_PROFILE=signet
+export BERLIN_WALLET_DEMO_RECIPIENT="<recipient-address>"
+export BERLIN_WALLET_DEMO_BITCOIND_RPC="http://u:p@127.0.0.1:18443/wallet/recipient"
+"$BERLIN_WALLET" demo --profile signet
+```
+
+Press `1`, `2`, `3`, and `q`. Pass: every amount is shown in `sat`; no `BTC` or
+`msat` labels appear; the external recipient receives the configured amount;
+`q` exits cleanly and the data directory can immediately be opened by the CLI.
+
+If a joined devimint federation is available, repeat with the fedimint profile:
+`4` deposit, mine six confirmation blocks, `3` recipient, `5` withdraw, `3`
+recipient, `q`. Pass: ecash is shown as sat, the recipient receives the
+withdrawal, and quit permits backup/restart.
+
 ### T7 — chain backend
 
 Repeat a sync/deposit/send on Electrum or bitcoind RPC if available. Pass: the

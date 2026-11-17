@@ -18,6 +18,7 @@ path = "src/main.rs"
 berlin-wallet-core = { path = "../berlin-wallet-core" }
 anyhow = "=1.0.98"
 bitcoin = "=0.32.8"
+bitcoincore-rpc = "=0.19.0"
 fedimint-client = "=0.12.0"
 fedimint-connectors = "=0.12.0"
 fedimint-core = "=0.12.0"
@@ -25,6 +26,8 @@ fedimint-walletv2-client = "=0.12.0"
 fs-lock = "=0.1.10"
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
+crossterm = "=0.29.0"
+ratatui = "=0.30.2"
 rpassword = "=7.5.4"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 
