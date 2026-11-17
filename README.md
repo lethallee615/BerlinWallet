@@ -37,9 +37,9 @@ custody split is explicit:
   later.
 
 This is an **unaudited developer preview**. The current release is
-[`v0.1.0-alpha.2`](https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.2),
-a source-only alpha. The current source disables mainnet; alpha.1 predates that
-guard.
+[`v0.1.0-alpha.3`](https://github.com/lethallee615/BerlinWallet/releases/tag/v0.1.0-alpha.3),
+a source-only alpha with a sat-first demo TUI. The current source disables
+mainnet; alpha.1 predates that guard.
 
 ## Status
 

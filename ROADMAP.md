@@ -10,8 +10,8 @@ done only when its gate is met and documented.
 
 The MVP feature set is complete, but the code is unaudited and several upstream
 edge cases are still open. The current delivery is the **source-only CLI
-developer preview** line; `v0.1.0-alpha.2` adds the mainnet guard and
-public-readiness docs. It is not a production wallet release. A desktop GUI is
+developer preview** line; `v0.1.0-alpha.3` adds the mainnet guard, public-readiness docs, and the sat-first
+demo TUI. It is not a production wallet release. A desktop GUI is
 deferred until after the MVP; mobile is later still.
 
 ## MVP is done when…
